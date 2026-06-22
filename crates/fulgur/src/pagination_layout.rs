@@ -3065,6 +3065,23 @@ fn record_subtree_fragments_at_offset(
                 } else {
                     (last_page_f as u32).min(total_pages.saturating_sub(1))
                 };
+                // fulgur-xa9q: page ASSIGNMENT snaps the start ratio to the page
+                // grid (`first_page_f` via `snapped_start_ratio`), but the stored
+                // Y must use the SAME snapped origin. Otherwise a `top: 100vh`
+                // abs lands ~1px off the in-flow fragmenter's exact page-top
+                // placement (the Stylo `100vh` vs `page_h_px` sub-px residual),
+                // producing the fixedpos-005/006/008 page-2 pixel diff once the
+                // page count matches. Snap only the paging origin, and only for
+                // top-anchored subtrees (`page_stride_px == page_h_px`); the
+                // bottom-only repeat idiom uses a rounded stride and must keep
+                // its raw origin.
+                let paging_origin_y = if page_stride_px == page_h_px
+                    && (start_ratio - start_ratio.round()).abs() < 1e-3
+                {
+                    snapped_start_ratio * page_h_px
+                } else {
+                    final_y_for_paging
+                };
                 let entry = geometry.entry(node_id).or_default();
                 entry.fragments.clear();
                 entry.is_repeat = false;
@@ -3074,7 +3091,7 @@ fn record_subtree_fragments_at_offset(
                     let stored_y = if is_monolithic_continuation {
                         -body_offset.1
                     } else {
-                        final_y_for_paging - (page_index as f32) * page_stride_px - body_offset.1
+                        paging_origin_y - (page_index as f32) * page_stride_px - body_offset.1
                     };
                     let stored_h = if is_monolithic_continuation {
                         let consumed = (page_index - first_page) as f32 * page_h_px;
