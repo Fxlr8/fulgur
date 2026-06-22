@@ -3063,8 +3063,8 @@ fn record_subtree_fragments_at_offset(
             // /clip boundary, where overflow is invisible and must not paginate.
             // A tall abs anchored WITHIN the budget stays clamped (it has an
             // in-budget page to clip onto) so short-flow layouts do not grow.
-            let node_may_extend = may_extend_pages
-                || (first_page_f >= total_pages as f32 && !containment_boundary);
+            let node_may_extend =
+                may_extend_pages || (first_page_f >= total_pages as f32 && !containment_boundary);
             if first_page_f.is_finite()
                 && last_page_f.is_finite()
                 && first_page_f <= last_page_f
