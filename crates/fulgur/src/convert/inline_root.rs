@@ -1167,23 +1167,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_enclosing_anchor_finds_nearest_ancestor_not_outer() {
-        // Outer <a href="outer">, inner <a href="inner">. The inner anchor is
-        // the nearest `<a>` ancestor of the <span>, so its href must be returned.
+    fn resolve_enclosing_anchor_walks_multiple_levels_to_find_anchor() {
+        // <span> is nested three levels deep inside a valid <a>. The function
+        // must walk up span → p → div → a to find the enclosing anchor.
+        // (Nested <a> elements are invalid HTML5 and would be parsed as
+        // siblings, so we use a real multi-element nesting instead.)
         let doc = parse_doc(
-            r#"<!doctype html><html><body>
-               <a href="https://outer.example"><a href="https://inner.example"><span>x</span></a></a>
-            </body></html>"#,
+            r#"<!doctype html><html><body><a href="https://example.com"><div><p><span>deep</span></p></div></a></body></html>"#,
         );
         let span_id = find_tag(&doc, "span");
         let result = resolve_enclosing_anchor(doc.deref(), span_id);
-        let (_, span) = result.expect("inner <a> found");
+        let (_, span) = result.expect("anchor found via multi-level walk");
         match &span.target {
             crate::paragraph::LinkTarget::External(url) => {
-                assert!(
-                    url.as_str().contains("inner"),
-                    "nearest ancestor is inner href; got {url}"
-                );
+                assert_eq!(url.as_str(), "https://example.com");
             }
             other => panic!("expected External, got {other:?}"),
         }
