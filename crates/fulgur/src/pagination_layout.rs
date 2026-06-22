@@ -3027,8 +3027,19 @@ fn record_subtree_fragments_at_offset(
             // on page 1 (WPT fixedpos-008 ref-side). Snap final_y
             // toward integer multiples of page_h before paging.
             let start_ratio = final_y_for_paging / page_h_px;
-            let snapped_start_ratio = if (start_ratio - start_ratio.round()).abs() < 1e-3 {
-                start_ratio.round()
+            let start_round = start_ratio.round();
+            // fulgur-xa9q: the Stylo `Nvh` sub-px residual vs `page_h_px`
+            // accumulates ~linearly with the page multiple — a nested
+            // `top:100vh` + `top:300vh` = 400vh lands ~1.35px short of
+            // `4 * page_h`, which a flat `1e-3` tolerance misses, mis-paging
+            // the element onto the page boundary so its line splits and clips
+            // (fixedpos-005 "fifth"). Scale the snap tolerance by the rounded
+            // page so deeply-anchored content snaps to the grid without
+            // over-snapping genuinely mid-page elements.
+            let snap_tol = 1e-3 * start_round.abs().max(1.0);
+            let start_is_snapped = (start_ratio - start_round).abs() < snap_tol;
+            let snapped_start_ratio = if start_is_snapped {
+                start_round
             } else {
                 start_ratio
             };
@@ -3075,9 +3086,7 @@ fn record_subtree_fragments_at_offset(
                 // top-anchored subtrees (`page_stride_px == page_h_px`); the
                 // bottom-only repeat idiom uses a rounded stride and must keep
                 // its raw origin.
-                let paging_origin_y = if page_stride_px == page_h_px
-                    && (start_ratio - start_ratio.round()).abs() < 1e-3
-                {
+                let paging_origin_y = if page_stride_px == page_h_px && start_is_snapped {
                     snapped_start_ratio * page_h_px
                 } else {
                     final_y_for_paging
