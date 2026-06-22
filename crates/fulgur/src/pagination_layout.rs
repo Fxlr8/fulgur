@@ -2928,6 +2928,12 @@ fn record_subtree_fragments_at_offset(
         page_stride_px: f32,
         total_pages: u32,
         may_extend_pages: bool,
+        // fulgur-xa9q: true once we are at or below a `contain: size` ancestor.
+        // Inside such a subtree the "START beyond budget extends" exception is
+        // suppressed for descendants, so clipped/size-contained overflow cannot
+        // generate pages (page-background-003 cat box). The contained node
+        // itself is independently clamped by `is_size_contained`.
+        containment_boundary: bool,
         // Subtree-offset and border-box size of the nearest positioned
         // ancestor of `node_id` — the containing block that `node_id`'s
         // out-of-flow children resolve their explicit insets against (CSS
@@ -3040,13 +3046,21 @@ fn record_subtree_fragments_at_offset(
             if is_size_contained {
                 last_page_f = first_page_f;
             }
+            // fulgur-xa9q: an abs whose START is at/beyond the existing in-flow
+            // page budget extends the page count even with in-flow content
+            // present (Chrome-compatible) — UNLESS it sits inside a containment
+            // /clip boundary, where overflow is invisible and must not paginate.
+            // A tall abs anchored WITHIN the budget stays clamped (it has an
+            // in-budget page to clip onto) so short-flow layouts do not grow.
+            let node_may_extend = may_extend_pages
+                || (first_page_f >= total_pages as f32 && !containment_boundary);
             if first_page_f.is_finite()
                 && last_page_f.is_finite()
                 && first_page_f <= last_page_f
-                && (may_extend_pages || first_page_f < total_pages as f32)
+                && (node_may_extend || first_page_f < total_pages as f32)
             {
                 let first_page = first_page_f as u32;
-                let last_page = if may_extend_pages {
+                let last_page = if node_may_extend {
                     last_page_f as u32
                 } else {
                     (last_page_f as u32).min(total_pages.saturating_sub(1))
@@ -3153,6 +3167,7 @@ fn record_subtree_fragments_at_offset(
                             page_stride_px,
                             descendant_total_pages,
                             may_extend_pages,
+                            containment_boundary || is_size_contained,
                             child_cb_anchor,
                             child_cb_size,
                             depth + 1,
@@ -3184,6 +3199,7 @@ fn record_subtree_fragments_at_offset(
                 page_stride_px,
                 descendant_total_pages,
                 may_extend_pages,
+                containment_boundary || is_size_contained,
                 child_cb_anchor,
                 child_cb_size,
                 depth + 1,
@@ -3205,6 +3221,8 @@ fn record_subtree_fragments_at_offset(
         page_stride_px,
         total_pages,
         may_extend_pages,
+        // fulgur-xa9q: the subtree root starts outside any containment boundary.
+        false,
         // Initial CB: the subtree root is the body-direct abs (positioned),
         // so it overrides these on the first frame — seed with the root's own
         // anchor/size for correctness if that ever changes.

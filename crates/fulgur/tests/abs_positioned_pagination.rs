@@ -223,7 +223,6 @@ fn nested_abs_height_drives_page_count() {
 /// fulgur-puml では未対応 — naive な may_extend 緩和は fixedpos-008 /
 /// page-background-003 を regress させると bisect で判明したため別 issue に分離。
 #[test]
-#[ignore = "tracked by fulgur-xa9q: abs page extension with in-flow content"]
 fn abs_extends_pages_despite_in_flow_content() {
     let html = r#"<!doctype html><html><head><style>
         @page { size: 100pt 100pt; margin: 0; }
