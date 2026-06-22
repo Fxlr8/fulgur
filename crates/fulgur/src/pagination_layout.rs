@@ -2928,11 +2928,12 @@ fn record_subtree_fragments_at_offset(
         page_stride_px: f32,
         total_pages: u32,
         may_extend_pages: bool,
-        // fulgur-xa9q: true once we are at or below a `contain: size` ancestor.
-        // Inside such a subtree the "START beyond budget extends" exception is
-        // suppressed for descendants, so clipped/size-contained overflow cannot
-        // generate pages (page-background-003 cat box). The contained node
-        // itself is independently clamped by `is_size_contained`.
+        // fulgur-xa9q: true once we are at or below an overflow-clipping
+        // ancestor (`clips_overflow`: any non-`visible` overflow). Inside such
+        // a subtree the "START beyond budget extends" exception is suppressed
+        // for descendants, so clipped overflow cannot generate pages
+        // (page-background-003 cat box, which is `overflow:clip`). `contain:
+        // size` alone is NOT a clip and does not set this boundary.
         containment_boundary: bool,
         // Subtree-offset and border-box size of the nearest positioned
         // ancestor of `node_id` — the containing block that `node_id`'s
@@ -3058,6 +3059,13 @@ fn record_subtree_fragments_at_offset(
             if is_size_contained {
                 last_page_f = first_page_f;
             }
+            // fulgur-xa9q: the start snap can advance `first_page_f` onto the
+            // next page while `last_page_f` still floors from the UNSNAPPED
+            // bottom; for a box shorter than the corrected residual that would
+            // make `first_page_f > last_page_f` and drop the fragment entirely
+            // (Codex review). A box must appear on at least its (snapped) start
+            // page, so never let the last page precede the first.
+            last_page_f = last_page_f.max(first_page_f);
             // fulgur-xa9q: an abs whose START is at/beyond the existing in-flow
             // page budget extends the page count even with in-flow content
             // present (Chrome-compatible) — UNLESS it sits inside a containment
@@ -3194,7 +3202,7 @@ fn record_subtree_fragments_at_offset(
                             page_stride_px,
                             descendant_total_pages,
                             may_extend_pages,
-                            containment_boundary || is_size_contained,
+                            containment_boundary || clips_overflow(node),
                             child_cb_anchor,
                             child_cb_size,
                             depth + 1,
@@ -3226,7 +3234,7 @@ fn record_subtree_fragments_at_offset(
                 page_stride_px,
                 descendant_total_pages,
                 may_extend_pages,
-                containment_boundary || is_size_contained,
+                containment_boundary || clips_overflow(node),
                 child_cb_anchor,
                 child_cb_size,
                 depth + 1,
@@ -3293,6 +3301,21 @@ fn has_contain_size(node: &blitz_dom::Node) -> bool {
             .clone_contain()
             .contains(::style::values::computed::box_::Contain::SIZE)
     })
+}
+
+/// Whether `node` clips its overflowing descendants from painting — any
+/// `overflow` value other than `visible` (`hidden` / `clip` / `scroll` /
+/// `auto` all clip the box; mirrors `convert::style::overflow`). Used as the
+/// page-extension boundary (fulgur-xa9q): a descendant whose paint overflow is
+/// clipped here cannot generate pages even when it lands past the in-flow
+/// budget. NOTE: `contain: size` is deliberately NOT treated as a clip — it
+/// sizes the box without its contents but leaves overflow visible, so a
+/// `contain:size; overflow:visible` box must still let descendants extend
+/// (Codex review on PR #498).
+fn clips_overflow(node: &blitz_dom::Node) -> bool {
+    use ::style::values::computed::Overflow as S;
+    node.primary_styles()
+        .is_some_and(|s| s.clone_overflow_x() != S::Visible || s.clone_overflow_y() != S::Visible)
 }
 
 /// CSS-px (x, y) of `<body>`'s top-left in its containing block (html).
