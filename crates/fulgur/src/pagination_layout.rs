@@ -3034,9 +3034,10 @@ fn record_subtree_fragments_at_offset(
             // `4 * page_h`, which a flat `1e-3` tolerance misses, mis-paging
             // the element onto the page boundary so its line splits and clips
             // (fixedpos-005 "fifth"). Scale the snap tolerance by the rounded
-            // page so deeply-anchored content snaps to the grid without
-            // over-snapping genuinely mid-page elements.
-            let snap_tol = 1e-3 * start_round.abs().max(1.0);
+            // page so deeply-anchored content snaps to the grid, capped at 1%
+            // of the page (~half a line height) so extreme page counts cannot
+            // grow the tolerance unbounded and snap genuinely mid-page elements.
+            let snap_tol = (1e-3 * start_round.abs().max(1.0)).min(0.01);
             let start_is_snapped = (start_ratio - start_round).abs() < snap_tol;
             let snapped_start_ratio = if start_is_snapped {
                 start_round
