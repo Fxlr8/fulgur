@@ -1187,10 +1187,11 @@ mod tests {
         let doc = parse_doc("<html><body><div>x</div></body></html>");
         let mut out = crate::drawables::Drawables::new();
         let node_id = 9999;
-        let mut style = crate::draw_primitives::BlockStyle::default();
-        style.overflow_x = crate::draw_primitives::Overflow::Clip;
         let mut entry = make_block_entry_plain();
-        entry.style = style;
+        entry.style = crate::draw_primitives::BlockStyle {
+            overflow_x: crate::draw_primitives::Overflow::Clip,
+            ..Default::default()
+        };
         out.block_styles.insert(node_id, entry);
         let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
         assert!(
@@ -1267,7 +1268,7 @@ mod tests {
         let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
         // top_inset = 4 + 2 = 6; baseline = 12 → Some(18).
         assert!(
-            result.map_or(false, |v| (v - 18.0).abs() < 0.001),
+            result.is_some_and(|v| (v - 18.0).abs() < 0.001),
             "expected Some(18.0), got {:?}",
             result
         );
