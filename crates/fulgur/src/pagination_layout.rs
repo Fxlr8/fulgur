@@ -3029,15 +3029,18 @@ fn record_subtree_fragments_at_offset(
             // toward integer multiples of page_h before paging.
             let start_ratio = final_y_for_paging / page_h_px;
             let start_round = start_ratio.round();
-            // fulgur-xa9q: the Stylo `Nvh` sub-px residual vs `page_h_px`
-            // accumulates ~linearly with the page multiple — a nested
-            // `top:100vh` + `top:300vh` = 400vh lands ~1.35px short of
-            // `4 * page_h`, which a flat `1e-3` tolerance misses, mis-paging
-            // the element onto the page boundary so its line splits and clips
-            // (fixedpos-005 "fifth"). Scale the snap tolerance by the rounded
-            // page so deeply-anchored content snaps to the grid, capped at 1%
-            // of the page (~half a line height) so extreme page counts cannot
-            // grow the tolerance unbounded and snap genuinely mid-page elements.
+            // fulgur-xa9q: the Stylo `Nvh` sub-px residual vs `page_h_px` scales
+            // with the `vh` MULTIPLE summed into `final_y_for_paging` — Stylo's
+            // per-`vh`-unit rounding error is multiplied by the vh count, so a
+            // `top:400vh` lands ~1.35px short of `4*page_h` and a `top:500vh`
+            // further, regardless of nesting depth. A flat `1e-3` tolerance
+            // misses this and mis-pages the element onto the page boundary so
+            // its line splits and clips (fixedpos-005 "fifth", fixedpos-008
+            // page 6). Scale the tolerance by the rounded page (≈ the vh
+            // multiple), capped at 1% of the page (~half a line) so extreme
+            // page counts cannot grow the window unbounded. NOTE: depth-scaling
+            // was tried and regresses fixedpos-008 — the residual tracks the vh
+            // multiple, not nesting depth (Codex review on PR #498).
             let snap_tol = (1e-3 * start_round.abs().max(1.0)).min(0.01);
             let start_is_snapped = (start_ratio - start_round).abs() < snap_tol;
             let snapped_start_ratio = if start_is_snapped {
@@ -3303,19 +3306,34 @@ fn has_contain_size(node: &blitz_dom::Node) -> bool {
     })
 }
 
-/// Whether `node` clips its overflowing descendants from painting — any
-/// `overflow` value other than `visible` (`hidden` / `clip` / `scroll` /
-/// `auto` all clip the box; mirrors `convert::style::overflow`). Used as the
-/// page-extension boundary (fulgur-xa9q): a descendant whose paint overflow is
-/// clipped here cannot generate pages even when it lands past the in-flow
-/// budget. NOTE: `contain: size` is deliberately NOT treated as a clip — it
-/// sizes the box without its contents but leaves overflow visible, so a
-/// `contain:size; overflow:visible` box must still let descendants extend
-/// (Codex review on PR #498).
+/// Whether `node` establishes a clip context that hides its overflowing
+/// descendants from painting — used as the page-extension boundary
+/// (fulgur-xa9q): a descendant whose paint overflow is clipped here cannot
+/// generate pages even when it lands past the in-flow budget.
+///
+/// Two conditions, both required:
+///   1. `overflow` is not `visible` on some axis (`hidden`/`clip`/`scroll`/
+///      `auto` all clip; mirrors `convert::style::overflow`).
+///   2. the box actually establishes a clip context — a block-level box or an
+///      atomic inline / BFC root. A non-replaced `display: inline` box ignores
+///      `overflow` and the renderer pushes no clip scope for it, so an inline
+///      wrapper like `<span style="overflow:hidden">` must NOT act as a
+///      boundary (Codex review on PR #498).
+///
+/// NOTE: `contain: size` is deliberately NOT treated as a clip — it sizes the
+/// box without its contents but leaves overflow visible, so a
+/// `contain:size; overflow:visible` box must still let descendants extend.
 fn clips_overflow(node: &blitz_dom::Node) -> bool {
-    use ::style::values::computed::Overflow as S;
-    node.primary_styles()
-        .is_some_and(|s| s.clone_overflow_x() != S::Visible || s.clone_overflow_y() != S::Visible)
+    use ::style::values::computed::Overflow as Ov;
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    node.primary_styles().is_some_and(|s| {
+        let clips = s.clone_overflow_x() != Ov::Visible || s.clone_overflow_y() != Ov::Visible;
+        if !clips {
+            return false;
+        }
+        let display = s.clone_display();
+        display.outside() == DisplayOutside::Block || display.inside() != DisplayInside::Flow
+    })
 }
 
 /// CSS-px (x, y) of `<body>`'s top-left in its containing block (html).
