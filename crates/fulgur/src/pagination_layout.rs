@@ -2928,6 +2928,13 @@ fn record_subtree_fragments_at_offset(
         page_stride_px: f32,
         total_pages: u32,
         may_extend_pages: bool,
+        // fulgur-xa9q: true once we are at or below an overflow-clipping
+        // ancestor (`clips_overflow`: any non-`visible` overflow). Inside such
+        // a subtree the "START beyond budget extends" exception is suppressed
+        // for descendants, so clipped overflow cannot generate pages
+        // (page-background-003 cat box, which is `overflow:clip`). `contain:
+        // size` alone is NOT a clip and does not set this boundary.
+        containment_boundary: bool,
         // Subtree-offset and border-box size of the nearest positioned
         // ancestor of `node_id` — the containing block that `node_id`'s
         // out-of-flow children resolve their explicit insets against (CSS
@@ -3021,8 +3028,23 @@ fn record_subtree_fragments_at_offset(
             // on page 1 (WPT fixedpos-008 ref-side). Snap final_y
             // toward integer multiples of page_h before paging.
             let start_ratio = final_y_for_paging / page_h_px;
-            let snapped_start_ratio = if (start_ratio - start_ratio.round()).abs() < 1e-3 {
-                start_ratio.round()
+            let start_round = start_ratio.round();
+            // fulgur-xa9q: the Stylo `Nvh` sub-px residual vs `page_h_px` scales
+            // with the `vh` MULTIPLE summed into `final_y_for_paging` — Stylo's
+            // per-`vh`-unit rounding error is multiplied by the vh count, so a
+            // `top:400vh` lands ~1.35px short of `4*page_h` and a `top:500vh`
+            // further, regardless of nesting depth. A flat `1e-3` tolerance
+            // misses this and mis-pages the element onto the page boundary so
+            // its line splits and clips (fixedpos-005 "fifth", fixedpos-008
+            // page 6). Scale the tolerance by the rounded page (≈ the vh
+            // multiple), capped at 1% of the page (~half a line) so extreme
+            // page counts cannot grow the window unbounded. NOTE: depth-scaling
+            // was tried and regresses fixedpos-008 — the residual tracks the vh
+            // multiple, not nesting depth (Codex review on PR #498).
+            let snap_tol = (1e-3 * start_round.abs().max(1.0)).min(0.01);
+            let start_is_snapped = (start_ratio - start_round).abs() < snap_tol;
+            let snapped_start_ratio = if start_is_snapped {
+                start_round
             } else {
                 start_ratio
             };
@@ -3040,16 +3062,46 @@ fn record_subtree_fragments_at_offset(
             if is_size_contained {
                 last_page_f = first_page_f;
             }
+            // fulgur-xa9q: the start snap can advance `first_page_f` onto the
+            // next page while `last_page_f` still floors from the UNSNAPPED
+            // bottom; for a box shorter than the corrected residual that would
+            // make `first_page_f > last_page_f` and drop the fragment entirely
+            // (Codex review). A box must appear on at least its (snapped) start
+            // page, so never let the last page precede the first.
+            last_page_f = last_page_f.max(first_page_f);
+            // fulgur-xa9q: an abs whose START is at/beyond the existing in-flow
+            // page budget extends the page count even with in-flow content
+            // present (Chrome-compatible) — UNLESS it sits inside a containment
+            // /clip boundary, where overflow is invisible and must not paginate.
+            // A tall abs anchored WITHIN the budget stays clamped (it has an
+            // in-budget page to clip onto) so short-flow layouts do not grow.
+            let node_may_extend =
+                may_extend_pages || (first_page_f >= total_pages as f32 && !containment_boundary);
             if first_page_f.is_finite()
                 && last_page_f.is_finite()
                 && first_page_f <= last_page_f
-                && (may_extend_pages || first_page_f < total_pages as f32)
+                && (node_may_extend || first_page_f < total_pages as f32)
             {
                 let first_page = first_page_f as u32;
-                let last_page = if may_extend_pages {
+                let last_page = if node_may_extend {
                     last_page_f as u32
                 } else {
                     (last_page_f as u32).min(total_pages.saturating_sub(1))
+                };
+                // fulgur-xa9q: page ASSIGNMENT snaps the start ratio to the page
+                // grid (`first_page_f` via `snapped_start_ratio`), but the stored
+                // Y must use the SAME snapped origin. Otherwise a `top: 100vh`
+                // abs lands ~1px off the in-flow fragmenter's exact page-top
+                // placement (the Stylo `100vh` vs `page_h_px` sub-px residual),
+                // producing the fixedpos-005/006/008 page-2 pixel diff once the
+                // page count matches. Snap only the paging origin, and only for
+                // top-anchored subtrees (`page_stride_px == page_h_px`); the
+                // bottom-only repeat idiom uses a rounded stride and must keep
+                // its raw origin.
+                let paging_origin_y = if page_stride_px == page_h_px && start_is_snapped {
+                    snapped_start_ratio * page_h_px
+                } else {
+                    final_y_for_paging
                 };
                 let entry = geometry.entry(node_id).or_default();
                 entry.fragments.clear();
@@ -3060,7 +3112,7 @@ fn record_subtree_fragments_at_offset(
                     let stored_y = if is_monolithic_continuation {
                         -body_offset.1
                     } else {
-                        final_y_for_paging - (page_index as f32) * page_stride_px - body_offset.1
+                        paging_origin_y - (page_index as f32) * page_stride_px - body_offset.1
                     };
                     let stored_h = if is_monolithic_continuation {
                         let consumed = (page_index - first_page) as f32 * page_h_px;
@@ -3153,6 +3205,7 @@ fn record_subtree_fragments_at_offset(
                             page_stride_px,
                             descendant_total_pages,
                             may_extend_pages,
+                            containment_boundary || clips_overflow(node),
                             child_cb_anchor,
                             child_cb_size,
                             depth + 1,
@@ -3184,6 +3237,7 @@ fn record_subtree_fragments_at_offset(
                 page_stride_px,
                 descendant_total_pages,
                 may_extend_pages,
+                containment_boundary || clips_overflow(node),
                 child_cb_anchor,
                 child_cb_size,
                 depth + 1,
@@ -3205,6 +3259,8 @@ fn record_subtree_fragments_at_offset(
         page_stride_px,
         total_pages,
         may_extend_pages,
+        // fulgur-xa9q: the subtree root starts outside any containment boundary.
+        false,
         // Initial CB: the subtree root is the body-direct abs (positioned),
         // so it overrides these on the first frame — seed with the root's own
         // anchor/size for correctness if that ever changes.
@@ -3247,6 +3303,36 @@ fn has_contain_size(node: &blitz_dom::Node) -> bool {
         s.get_box()
             .clone_contain()
             .contains(::style::values::computed::box_::Contain::SIZE)
+    })
+}
+
+/// Whether `node` establishes a clip context that hides its overflowing
+/// descendants from painting — used as the page-extension boundary
+/// (fulgur-xa9q): a descendant whose paint overflow is clipped here cannot
+/// generate pages even when it lands past the in-flow budget.
+///
+/// Two conditions, both required:
+///   1. `overflow` is not `visible` on some axis (`hidden`/`clip`/`scroll`/
+///      `auto` all clip; mirrors `convert::style::overflow`).
+///   2. the box actually establishes a clip context — a block-level box or an
+///      atomic inline / BFC root. A non-replaced `display: inline` box ignores
+///      `overflow` and the renderer pushes no clip scope for it, so an inline
+///      wrapper like `<span style="overflow:hidden">` must NOT act as a
+///      boundary (Codex review on PR #498).
+///
+/// NOTE: `contain: size` is deliberately NOT treated as a clip — it sizes the
+/// box without its contents but leaves overflow visible, so a
+/// `contain:size; overflow:visible` box must still let descendants extend.
+fn clips_overflow(node: &blitz_dom::Node) -> bool {
+    use ::style::values::computed::Overflow as Ov;
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    node.primary_styles().is_some_and(|s| {
+        let clips = s.clone_overflow_x() != Ov::Visible || s.clone_overflow_y() != Ov::Visible;
+        if !clips {
+            return false;
+        }
+        let display = s.clone_display();
+        display.outside() == DisplayOutside::Block || display.inside() != DisplayInside::Flow
     })
 }
 
