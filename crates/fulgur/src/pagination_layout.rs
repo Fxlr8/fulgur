@@ -1651,7 +1651,17 @@ fn fragment_block_subtree(
             }
         }
         let layout = child.final_layout;
-        let child_h = layout.size.height;
+        // fulgur-2m6w: same non-finite guard as `fragment_pagination_root`.
+        // A nested child with a non-finite Taffy height (`+inf` / `NaN`, or
+        // an `f32::MAX` height that overflows to `+inf` after one
+        // `cursor_y += child_h`) would otherwise poison `cursor_y` /
+        // `page_start_y` for the parent and every following sibling. Treat
+        // it as zero height so it falls into the `child_h <= 0.0` branch.
+        let child_h = if layout.size.height.is_finite() {
+            layout.size.height
+        } else {
+            0.0
+        };
         let child_w = if layout.size.width > 0.0 {
             layout.size.width
         } else {
@@ -3110,9 +3120,20 @@ fn record_subtree_fragments_at_offset(
                 && first_page_f <= last_page_f
                 && (node_may_extend || first_page_f < total_pages as f32)
             {
-                let first_page = first_page_f as u32;
+                // fulgur-2m6w: clamp the emitted page index to `MAX_PAGES`.
+                // `first_page_f` / `last_page_f` are derived from the abs
+                // element's viewport-CB resolved Y, which is attacker-
+                // controlled CSS (`position:absolute; top:99999999px`).
+                // Without this clamp a 1px abs node lands at page ~10^5,
+                // `descendant_total_pages` propagates that to
+                // `implied_page_count`, and `render_v2` allocates + renders
+                // every intervening page — the same small-input DoS the
+                // body-direct slice cap blocks, via a different path. This
+                // `walk` runs for the abs root AND nested abs descendants,
+                // so one clamp bounds both.
+                let first_page = (first_page_f as u32).min(crate::MAX_PAGES);
                 let last_page = if node_may_extend {
-                    last_page_f as u32
+                    (last_page_f as u32).min(crate::MAX_PAGES)
                 } else {
                     (last_page_f as u32).min(total_pages.saturating_sub(1))
                 };
@@ -4594,6 +4615,47 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    /// fulgur-2m6w: a body-direct `position:absolute` node positioned far
+    /// beyond the page budget (`top: 99999999px`) must not extend the page
+    /// count without bound. The abs path emits one fragment per intersected
+    /// page and `descendant_total_pages` feeds `implied_page_count`, so an
+    /// unclamped page index from a tiny box makes `render_v2` allocate and
+    /// render ~10^5 pages — the same small-input DoS the body-direct slice
+    /// cap blocks, reached via the absolute-positioning path (Codex review
+    /// on PR #501). Without the clamp this input lands at page ~125000;
+    /// page indices are clamped to `MAX_PAGES`.
+    #[test]
+    fn position_absolute_far_offset_is_page_capped() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; top: 99999999px; width: 10px; height: 10px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+            None,
+        );
+        // The fragment must still be emitted (not silently dropped) — just
+        // pinned to the cap page rather than page ~125000.
+        let max_page = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.page_index)
+            .max()
+            .expect("abs fragment must be emitted");
+        assert!(
+            max_page <= crate::MAX_PAGES,
+            "abs page index must be clamped to MAX_PAGES ({}), got {max_page}",
+            crate::MAX_PAGES,
+        );
+    }
+
     #[test]
     fn position_absolute_body_direct_expanded_pages_reach_later_text() {
         let html = r#"
@@ -4900,6 +4962,57 @@ h2 { string-set: chapter-title content(text); }
             h2.y >= 100.0,
             "block sibling after split grid must continue after the grid tail; got y={} (pre-fix: y=0 overlaps the tail)",
             h2.y
+        );
+    }
+
+    /// fulgur-2m6w: a nested child with a non-finite Taffy height must not
+    /// poison `cursor_y` inside the recursive splitter. The grid pattern
+    /// routes the section through `fragment_block_subtree` (250px content vs
+    /// 150px strip); a `+inf` height injected into one cell is sanitized to
+    /// zero so the recursion neither panics nor produces a non-finite /
+    /// unbounded page count, and the node is still recorded in geometry.
+    #[test]
+    fn fragment_block_subtree_non_finite_child_height_is_sanitized() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                  <div id="bad" style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let bad = find_by_id(doc.deref_mut(), "bad").expect("div#bad");
+        doc.deref_mut()
+            .get_node_mut(bad)
+            .expect("div#bad")
+            .final_layout
+            .size
+            .height = f32::INFINITY;
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 150.0, &table);
+        // Load-bearing assertion: without the guard the injected `+inf`
+        // reaches a Fragment height and poisons `cursor_y`, so emitted
+        // fragments carry non-finite `y` / `height`. The guard zeroes it,
+        // keeping every emitted coordinate finite.
+        for (id, g) in geom.iter() {
+            for f in &g.fragments {
+                assert!(
+                    f.y.is_finite() && f.height.is_finite(),
+                    "node {id}: non-finite fragment y={} height={} leaked through \
+                     fragment_block_subtree",
+                    f.y,
+                    f.height,
+                );
+            }
+        }
+        assert!(
+            geom.contains_key(&bad),
+            "nested non-finite-height node must still be recorded",
         );
     }
 
