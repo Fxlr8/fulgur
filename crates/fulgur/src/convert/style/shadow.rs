@@ -31,3 +31,89 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Engine;
+
+    fn render_with_shadow(shadow_css: &str) -> Vec<u8> {
+        let html = format!(
+            r#"<html><body><div style="width:100px;height:100px;box-shadow:{shadow_css}"></div></body></html>"#
+        );
+        Engine::builder()
+            .build()
+            .render_html(&html)
+            .expect("render should succeed")
+    }
+
+    /// Non-inset shadow with partial alpha exercises the main push path.
+    /// The shadow is actually drawn, so the PDF must differ from the no-shadow baseline.
+    #[test]
+    fn non_inset_shadow_is_pushed() {
+        let baseline = render_with_shadow("none");
+        let pdf = render_with_shadow("5px 5px 10px rgba(0,0,0,0.5)");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+        assert_ne!(
+            pdf.len(),
+            baseline.len(),
+            "non-inset shadow should add content to PDF"
+        );
+    }
+
+    /// `inset` keyword exercises the `shadow.inset` branch (skipped with log::warn!).
+    /// Skipped shadows leave no trace — output must match the no-shadow baseline.
+    #[test]
+    fn inset_shadow_is_skipped() {
+        let baseline = render_with_shadow("none");
+        let pdf = render_with_shadow("inset 5px 5px 10px red");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+        assert_eq!(
+            pdf.len(),
+            baseline.len(),
+            "inset shadow should not affect output"
+        );
+    }
+
+    /// Fully transparent color exercises the `rgba[3] == 0` early-continue branch.
+    /// Skipped shadows leave no trace — output must match the no-shadow baseline.
+    #[test]
+    fn transparent_shadow_is_skipped() {
+        let baseline = render_with_shadow("none");
+        let pdf = render_with_shadow("5px 5px 10px transparent");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+        assert_eq!(
+            pdf.len(),
+            baseline.len(),
+            "transparent shadow should not affect output"
+        );
+    }
+
+    /// Multiple shadows: inset + transparent + normal in one list.
+    /// Only the opaque non-inset shadow reaches the push path;
+    /// output must match the equivalent single-shadow render.
+    #[test]
+    fn mixed_shadow_list_skips_inset_and_transparent() {
+        let single = render_with_shadow("3px 3px 0px black");
+        let pdf = render_with_shadow("inset 2px 2px red, 5px 5px transparent, 3px 3px 0px black");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+        assert_eq!(
+            pdf.len(),
+            single.len(),
+            "only the valid shadow should be included"
+        );
+    }
+
+    /// Non-zero spread radius is stored via `px_to_pt(shadow.spread.px())`.
+    /// The shadow is actually drawn, so the PDF must differ from the no-shadow baseline.
+    #[test]
+    fn shadow_with_spread_radius() {
+        let baseline = render_with_shadow("none");
+        let pdf = render_with_shadow("2px 2px 5px 8px rgba(255,0,0,0.8)");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+        assert_ne!(
+            pdf.len(),
+            baseline.len(),
+            "shadow with spread should add content to PDF"
+        );
+    }
+}
