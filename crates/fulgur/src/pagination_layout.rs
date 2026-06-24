@@ -569,7 +569,19 @@ impl<'a> PaginationLayoutTree<'a> {
                 continue;
             }
             let layout = child.final_layout;
-            let child_h = layout.size.height;
+            // fulgur-2m6w: defend against a non-finite Taffy height
+            // (`+inf` / `NaN`). A `NaN` height slips past the
+            // `child_h > page_height_px + 1.0` slice gate (NaN compares
+            // false) into the normal path where `cursor_y += child_h`
+            // would poison every later page advance; `+inf` would corrupt
+            // `prev_bottom_y_in_body`. Treat either as zero height — the
+            // node still enters geometry via the `child_h <= 0.0` branch
+            // so its counter / bookmark markers survive.
+            let child_h = if layout.size.height.is_finite() {
+                layout.size.height
+            } else {
+                0.0
+            };
             let child_w = if layout.size.width > 0.0 {
                 layout.size.width
             } else {
@@ -963,7 +975,15 @@ impl<'a> PaginationLayoutTree<'a> {
                 );
                 let mut remaining = child_h - first_slice_h;
                 let mut last_slice_h = first_slice_h;
-                while remaining > 0.0 {
+                // fulgur-2m6w: cap the per-page-strip slicing at
+                // `MAX_PAGES`. `child_h` is attacker-controlled CSS
+                // (`height` / `vh`), so without this bound a few bytes of
+                // HTML (`<div style="height:99999999px">`) generate ~10^5
+                // fragments — and a non-finite height would never reduce
+                // `remaining`, looping forever. The `page_index` ceiling is
+                // load-bearing on its own (it stops the loop even when
+                // `remaining` is `+inf`); content past the cap is truncated.
+                while remaining > 0.0 && page_index < crate::MAX_PAGES {
                     page_index += 1;
                     last_slice_h = remaining.min(self.page_height_px);
                     self.geometry
@@ -978,6 +998,14 @@ impl<'a> PaginationLayoutTree<'a> {
                             height: last_slice_h,
                         });
                     remaining -= last_slice_h;
+                }
+                if remaining > 0.0 {
+                    log::warn!(
+                        "pagination: block height {child_h}px exceeds the \
+                         {}-page limit; truncating remaining content to bound \
+                         rendering (fulgur-2m6w)",
+                        crate::MAX_PAGES,
+                    );
                 }
                 cursor_y = if child_h - first_slice_h > 0.0 {
                     last_slice_h
@@ -3789,6 +3817,97 @@ mod tests {
             vec![0, 0, 1],
             "body page 0, first child page 0, second child page 1, got {pages:?}"
         );
+    }
+
+    /// Find the first element node carrying `id="<id>"`.
+    fn find_by_id(doc: &blitz_dom::BaseDocument, id: &str) -> Option<usize> {
+        fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, target: &str) -> Option<usize> {
+            let node = doc.get_node(node_id)?;
+            if let Some(ed) = node.element_data()
+                && let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
+                && attr_id.value.as_str() == target
+            {
+                return Some(node_id);
+            }
+            for &child in &node.children {
+                if let Some(found) = walk(doc, child, target) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        walk(doc, doc.root_element().id, id)
+    }
+
+    /// fulgur-2m6w: a tiny input with a pathologically tall CSS height
+    /// must not generate an unbounded number of page strips. Without the
+    /// page cap a `height: 99999999px` div on an 800px strip slices into
+    /// ~125 000 fragments/pages, which downstream (`render.rs`) turns into
+    /// a `vec![Vec::new(); page_count]` allocation plus a per-page render
+    /// loop — a CPU/memory-exhaustion DoS from a few bytes of untrusted
+    /// HTML. The slicing loop is clamped to `MAX_PAGES`.
+    #[test]
+    fn pathological_tall_block_is_page_capped() {
+        let html = r#"<html><body><div style="height: 99999999px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages <= crate::MAX_PAGES + 1,
+            "page count must be clamped to ~MAX_PAGES ({}), got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-2m6w: Stylo/Taffy clamps an absurd `<length>` to `f32::MAX`
+    /// (≈3.4e38) rather than `+inf`, so `height: 1e39px` is the true
+    /// worst-case *finite* input — without the cap it would slice into
+    /// ~4e35 strips (an effective hang, and `page_index` (u32) would wrap
+    /// /panic long before). The cap bounds it to `MAX_PAGES` all the same.
+    #[test]
+    fn f32_max_height_block_is_page_capped() {
+        let html = r#"<html><body><div style="height: 1e39px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages <= crate::MAX_PAGES + 1,
+            "f32::MAX height must be clamped to ~MAX_PAGES ({}), got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-2m6w: a non-finite Taffy height (`+inf` / `NaN`) is treated
+    /// as zero so it can never reach the slicing loop (where `+inf` would
+    /// make `remaining -= last_slice_h` loop forever) nor poison the
+    /// `cursor_y` advance. CSS clamps to `f32::MAX` and cannot produce a
+    /// non-finite height, so inject one directly into the resolved layout.
+    /// The node still enters geometry (via the `child_h <= 0.0` branch) and
+    /// the document stays single-page.
+    #[test]
+    fn non_finite_height_treated_as_zero() {
+        use std::ops::DerefMut;
+        for bad in [f32::INFINITY, f32::NAN] {
+            let html = r#"<html><body><div id="x">hi</div></body></html>"#;
+            let mut doc = parse(html, 600.0);
+            let id = find_by_id(doc.deref_mut(), "x").expect("div#x");
+            doc.deref_mut()
+                .get_node_mut(id)
+                .expect("div#x")
+                .final_layout
+                .size
+                .height = bad;
+            let table = run_pass(&mut doc, 800.0);
+            assert!(
+                implied_page_count(&table) == 1,
+                "non-finite height {bad} must not paginate; got {} pages",
+                implied_page_count(&table),
+            );
+            assert!(
+                table.contains_key(&id),
+                "non-finite-height node must still be recorded in geometry",
+            );
+        }
     }
 
     /// fulgur-i5a: `overflow: hidden` is a pure visual effect that must

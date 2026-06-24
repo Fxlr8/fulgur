@@ -4689,3 +4689,19 @@ fn table_caption_preserves_full_width_table() {
         "caption must not change table width: max cell x without={without}, with={with}"
     );
 }
+
+/// fulgur-2m6w (DoS guard): a few bytes of HTML with a pathologically tall
+/// CSS height must not hang or exhaust memory through the full pipeline.
+/// Before the page cap this `height: 99999999px` div sliced into ~125 000
+/// fragments, driving `render.rs` to allocate `vec![Vec::new(); 125_000]`
+/// and render that many pages. The slicing is now clamped to `MAX_PAGES`,
+/// so the render terminates with a bounded, non-empty PDF.
+#[test]
+fn pathological_tall_block_render_is_bounded() {
+    let html = r#"<!doctype html><html><body><div style="height:99999999px"></div></body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render must terminate and succeed");
+    assert!(!pdf.is_empty(), "expected a non-empty bounded PDF");
+}

@@ -2,6 +2,16 @@
 /// from pathologically deep HTML input.
 pub(crate) const MAX_DOM_DEPTH: usize = 512;
 
+/// Maximum number of pages a single render may produce. Bounds the
+/// per-page-strip slicing of an oversized block in `pagination_layout`
+/// so a tiny input with a pathologically tall CSS height (e.g.
+/// `height: 99999999px`) cannot force unbounded fragment/page generation
+/// — which downstream inflates a `vec![Vec::new(); page_count]` allocation
+/// and a per-page render loop into a CPU/memory-exhaustion DoS. Content
+/// beyond this many pages is truncated (clamp-and-warn), matching the
+/// `MAX_DOM_DEPTH` / background `MAX_TILES` defensive-bound precedent.
+pub(crate) const MAX_PAGES: u32 = 10_000;
+
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;
