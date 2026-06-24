@@ -3120,22 +3120,36 @@ fn record_subtree_fragments_at_offset(
                 && first_page_f <= last_page_f
                 && (node_may_extend || first_page_f < total_pages as f32)
             {
-                // fulgur-2m6w: clamp the emitted page index to `MAX_PAGES`.
-                // `first_page_f` / `last_page_f` are derived from the abs
-                // element's viewport-CB resolved Y, which is attacker-
-                // controlled CSS (`position:absolute; top:99999999px`).
-                // Without this clamp a 1px abs node lands at page ~10^5,
-                // `descendant_total_pages` propagates that to
-                // `implied_page_count`, and `render_v2` allocates + renders
-                // every intervening page — the same small-input DoS the
-                // body-direct slice cap blocks, via a different path. This
+                // fulgur-2m6w: clamp the emitted page index to `MAX_PAGES`,
+                // but ONLY on the page-EXTENSION path. `first_page_f` /
+                // `last_page_f` derive from the abs element's viewport-CB
+                // resolved Y, which is attacker-controlled CSS
+                // (`position:absolute; top:99999999px`). When the element
+                // extends the page count (`node_may_extend`) an unclamped
+                // value lands at page ~10^5, `descendant_total_pages`
+                // propagates that to `implied_page_count`, and `render_v2`
+                // allocates + renders every intervening page — the same
+                // small-input DoS the body-direct slice cap blocks. This
                 // `walk` runs for the abs root AND nested abs descendants,
                 // so one clamp bounds both.
-                let first_page = (first_page_f as u32).min(crate::MAX_PAGES);
-                let last_page = if node_may_extend {
-                    (last_page_f as u32).min(crate::MAX_PAGES)
+                //
+                // The NON-extending branch is already bounded by
+                // `total_pages` (the in-flow page count, itself capped /
+                // input-proportional), so it must stay UNCLAMPED: clamping
+                // `first_page` while `last_page` keeps `min(.., total_pages-1)`
+                // would emit a spurious fragment run from `MAX_PAGES` through
+                // the real (in-budget) page when `total_pages > MAX_PAGES`
+                // from many ordinary in-flow pages (Codex review on PR #501).
+                let (first_page, last_page) = if node_may_extend {
+                    (
+                        (first_page_f as u32).min(crate::MAX_PAGES),
+                        (last_page_f as u32).min(crate::MAX_PAGES),
+                    )
                 } else {
-                    (last_page_f as u32).min(total_pages.saturating_sub(1))
+                    (
+                        first_page_f as u32,
+                        (last_page_f as u32).min(total_pages.saturating_sub(1)),
+                    )
                 };
                 // fulgur-xa9q: page ASSIGNMENT snaps the start ratio to the page
                 // grid (`first_page_f` via `snapped_start_ratio`), but the stored
@@ -4653,6 +4667,50 @@ h2 { string-set: chapter-title content(text); }
             max_page <= crate::MAX_PAGES,
             "abs page index must be clamped to MAX_PAGES ({}), got {max_page}",
             crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-2m6w (Codex review on PR #501): the `MAX_PAGES` clamp must
+    /// apply ONLY to the page-extension path. When `total_pages` legitimately
+    /// exceeds `MAX_PAGES` (many ordinary in-flow pages — input-proportional,
+    /// not amplified), a NON-extending absolute element starting at an
+    /// in-budget page above the cap must emit a single fragment at its real
+    /// page, not a spurious run from `MAX_PAGES` through the real page.
+    #[test]
+    fn position_absolute_in_budget_start_above_cap_not_clamped() {
+        let page_h = 800.0_f32;
+        let start_page = 12_000_u32; // > MAX_PAGES (10_000)
+        let total_pages = start_page + 5; // in-budget
+        let top = page_h * start_page as f32;
+        // In-flow `<p>` makes `body_has_in_flow_content` true, so
+        // `may_extend_pages` is false → the non-extending branch.
+        let html = format!(
+            r#"<html><body style="margin:0">
+                 <p>in-flow</p>
+                 <div style="position:absolute; top:{top}px; width:10px; height:10px"></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            total_pages,
+            600.0,
+            page_h,
+            None,
+        );
+        // Isolate the 10px-wide abs node's fragments.
+        let abs_pages: Vec<u32> = geom
+            .values()
+            .filter(|g| g.fragments.iter().any(|f| (f.width - 10.0).abs() < 0.5))
+            .flat_map(|g| g.fragments.iter().map(|f| f.page_index))
+            .collect();
+        assert_eq!(
+            abs_pages,
+            vec![start_page],
+            "non-extending in-budget abs must emit only at its real page \
+             (no spurious clamp run), got {abs_pages:?}",
         );
     }
 
