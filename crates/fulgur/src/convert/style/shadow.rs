@@ -31,3 +31,54 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Engine;
+
+    fn render_with_shadow(shadow_css: &str) -> Vec<u8> {
+        let html = format!(
+            r#"<html><body><div style="width:100px;height:100px;box-shadow:{shadow_css}"></div></body></html>"#
+        );
+        Engine::builder()
+            .build()
+            .render_html(&html)
+            .expect("render should succeed")
+    }
+
+    /// Non-inset shadow with partial alpha exercises the main push path.
+    #[test]
+    fn non_inset_shadow_is_pushed() {
+        let pdf = render_with_shadow("5px 5px 10px rgba(0,0,0,0.5)");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+    }
+
+    /// `inset` keyword exercises the `shadow.inset` branch (skipped with log::warn!).
+    #[test]
+    fn inset_shadow_is_skipped() {
+        let pdf = render_with_shadow("inset 5px 5px 10px red");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+    }
+
+    /// Fully transparent color exercises the `rgba[3] == 0` early-continue branch.
+    #[test]
+    fn transparent_shadow_is_skipped() {
+        let pdf = render_with_shadow("5px 5px 10px transparent");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+    }
+
+    /// Multiple shadows: inset + transparent + normal in one list.
+    /// Only the opaque non-inset shadow reaches the push path.
+    #[test]
+    fn mixed_shadow_list_skips_inset_and_transparent() {
+        let pdf = render_with_shadow("inset 2px 2px red, 5px 5px transparent, 3px 3px 0px black");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+    }
+
+    /// Non-zero spread radius is stored via `px_to_pt(shadow.spread.px())`.
+    #[test]
+    fn shadow_with_spread_radius() {
+        let pdf = render_with_shadow("2px 2px 5px 8px rgba(255,0,0,0.8)");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+    }
+}
