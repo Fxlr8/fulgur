@@ -2,15 +2,28 @@
 /// from pathologically deep HTML input.
 pub(crate) const MAX_DOM_DEPTH: usize = 512;
 
-/// Maximum number of pages a single render may produce. Bounds the
+/// Hard ceiling on the page count a single render may reach. Bounds the
 /// per-page-strip slicing of an oversized block in `pagination_layout`
-/// so a tiny input with a pathologically tall CSS height (e.g.
-/// `height: 99999999px`) cannot force unbounded fragment/page generation
-/// — which downstream inflates a `vec![Vec::new(); page_count]` allocation
-/// and a per-page render loop into a CPU/memory-exhaustion DoS. Content
-/// beyond this many pages is truncated (clamp-and-warn), matching the
-/// `MAX_DOM_DEPTH` / background `MAX_TILES` defensive-bound precedent.
-pub(crate) const MAX_PAGES: u32 = 10_000;
+/// (and the absolute-positioning page-extension path) so a tiny input with
+/// a pathologically tall CSS height / offset (e.g. `height: 99999999px`,
+/// `position:absolute; top:99999999px`) cannot force unbounded fragment /
+/// page generation — which downstream inflates a `vec![Vec::new(); page_count]`
+/// allocation and a per-page render loop into a CPU/memory-exhaustion DoS.
+///
+/// This is an **absolute** page-index ceiling, not a per-element budget:
+/// keying the cap off the running `page_index` makes many oversized
+/// siblings additive (`MAX_PAGES + N`) rather than multiplicative
+/// (`N * MAX_PAGES`), which is what actually bounds the multi-element DoS.
+/// A per-element budget would re-open that amplification, so the ceiling
+/// must stay absolute (Codex review on PR #501).
+///
+/// Set high enough that legitimate large documents (batch report
+/// generation is a primary use case) do not hit it — at this value the
+/// truncation only fires for attacker-amplified input, and rendering the
+/// ceiling is still bounded (~100k pages ≈ a few seconds). Content beyond
+/// the ceiling is truncated (clamp-and-warn). Sibling of the
+/// `MAX_DOM_DEPTH` / background `MAX_TILES` defensive bounds.
+pub(crate) const MAX_PAGES: u32 = 100_000;
 
 pub mod asset;
 pub mod background;

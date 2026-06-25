@@ -4679,7 +4679,7 @@ h2 { string-set: chapter-title content(text); }
     #[test]
     fn position_absolute_in_budget_start_above_cap_not_clamped() {
         let page_h = 800.0_f32;
-        let start_page = 12_000_u32; // > MAX_PAGES (10_000)
+        let start_page = crate::MAX_PAGES + 20_000; // > MAX_PAGES
         let total_pages = start_page + 5; // in-budget
         let top = page_h * start_page as f32;
         // In-flow `<p>` makes `body_has_in_flow_content` true, so
