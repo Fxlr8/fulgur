@@ -1216,4 +1216,260 @@ mod tests {
             "fixed slot must produce a draw entry via convert_node fallback"
         );
     }
+
+    // ── resolve_cb_for_absolute: None viewport path ───────────────────────────
+
+    #[test]
+    fn resolve_cb_for_absolute_none_viewport_all_static_returns_body_fallback() {
+        // When viewport_size_px is None, the `if let Some((vw, vh))` block in
+        // resolve_cb_for_absolute is skipped entirely. The body fallback must
+        // still be returned with the body's own computed dimensions.
+        let doc =
+            parse_doc(r#"<!doctype html><html><body><div><span>text</span></div></body></html>"#);
+        let span_id = find_tag(&doc, "span");
+        let span_node = doc.get_node(span_id).unwrap();
+        let result = resolve_cb_for_absolute(doc.deref(), span_node, false, None);
+        assert!(
+            result.is_some(),
+            "body fallback must be returned even when viewport_size_px is None"
+        );
+        // The body width in a 595-px viewport should be > 0.
+        assert!(
+            result.unwrap().padding_box_size.0 > 0.0,
+            "body padding-box width must be positive"
+        );
+    }
+
+    // ── walk_absolute_pseudo_children: non-abs slot is skipped ────────────────
+
+    #[test]
+    fn walk_absolute_pseudo_children_skips_non_abs_slot() {
+        // Passing a static (non-abs-positioned) node as a slot must hit the
+        // `if !is_absolutely_positioned(pseudo) { continue }` guard and
+        // produce no draw entries.
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            r#"<!doctype html><html><body>
+              <section><div>static</div></section>
+            </body></html>"#,
+            595.0,
+            842.0,
+            &[],
+            false,
+        );
+        let section_id = find_tag(&doc, "section");
+        let static_div_id = find_tag(&doc, "div");
+        let running_store = RunningElementStore::new();
+        let mut ctx = make_ctx(&mut doc, &running_store);
+        let mut out = crate::drawables::Drawables::new();
+
+        let section_node = doc.get_node(section_id).unwrap();
+        walk_absolute_pseudo_children(
+            doc.deref(),
+            section_node,
+            &mut ctx,
+            0,
+            &[Some(static_div_id)],
+            &mut out,
+        );
+
+        assert!(
+            out.is_empty(),
+            "non-abs-positioned slot must be skipped by walk_absolute_pseudo_children"
+        );
+    }
+
+    // ── maybe_apply_abs_pseudo_inset_correction: Engine smoke tests ───────────
+    //
+    // These tests exercise the full path through walk_absolute_pseudo_children →
+    // try_build_absolute_pseudo_image → maybe_apply_abs_pseudo_inset_correction.
+    // That chain fires when a ::before / ::after pseudo has `content: url(...)`
+    // and `position: absolute` or `position: fixed`.
+
+    // Minimal 1×1 red PNG for use as a test image asset.
+    const RED_1X1_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn render_with_pseudo_css(html: &str, css: &str) -> Vec<u8> {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(css);
+        crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(html)
+            .expect("render failed")
+    }
+
+    fn build_with_geo(
+        html: &str,
+    ) -> (
+        crate::drawables::Drawables,
+        crate::pagination_layout::PaginationGeometryTable,
+    ) {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        crate::engine::Engine::builder()
+            .page_size(crate::config::PageSize::A4)
+            .margin(crate::config::Margin::uniform(72.0))
+            .assets(bundle)
+            .build()
+            .build_drawables_and_geometry_for_testing_no_gcpm(html)
+    }
+
+    fn find_image_geo(
+        drawables: &crate::drawables::Drawables,
+        want_w: f32,
+        want_h: f32,
+    ) -> Option<(usize, &crate::drawables::ImageEntry)> {
+        drawables
+            .images
+            .iter()
+            .find(|(_, img)| (img.width - want_w).abs() < 0.5 && (img.height - want_h).abs() < 0.5)
+            .map(|(id, e)| (*id, e))
+    }
+
+    fn frag_xy(
+        geometry: &crate::pagination_layout::PaginationGeometryTable,
+        node_id: usize,
+    ) -> (f32, f32) {
+        let geom = geometry.get(&node_id).expect("node missing from geometry");
+        let frag = geom.fragments.first().expect("node has no fragments");
+        (frag.x, frag.y)
+    }
+
+    // maybe_apply_abs_pseudo_inset_correction: `right` + `bottom` set, `left`
+    // + `top` auto → needs_right=true, needs_bottom=true → the correction is
+    // applied and new_x / new_y are written into pagination_geometry.
+    // Also covers resolve_inset_px with a LengthPercentage inset.
+    //
+    // Coordinate check: parent 100×100 CSS px (75×75 pt), pseudo 10×10 px
+    // (7.5×7.5 pt) at right:5px, bottom:5px.
+    //   expected dx = (100 − 10 − 5) × 0.75 = 63.75 pt
+    //   bug case (pre-fix, pseudo layout.size = 0): (100 − 0 − 5) × 0.75 = 71.25 pt
+    #[test]
+    fn smoke_abs_pseudo_content_url_right_bottom_insets() {
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .marker { position: relative; width: 100px; height: 100px; }
+            .marker::before {
+                content: url(dot.png);
+                position: absolute;
+                width: 10px; height: 10px;
+                right: 5px; bottom: 5px;
+            }
+        </style></head><body><div class="marker"></div></body></html>"#;
+        let (drawables, geometry) = build_with_geo(html);
+
+        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5)
+            .expect("expected a 7.5×7.5 pt ImageEntry from abs pseudo");
+        let (marker_id, _) = drawables
+            .block_styles
+            .iter()
+            .find(|(_, b)| {
+                b.layout_size
+                    .is_some_and(|s| (s.width - 75.0).abs() < 0.5 && (s.height - 75.0).abs() < 0.5)
+            })
+            .map(|(id, e)| (*id, e))
+            .expect("marker block (75×75 pt) must exist in block_styles");
+
+        let (ix, iy) = frag_xy(&geometry, image_id);
+        let (mx, my) = frag_xy(&geometry, marker_id);
+        let dx_pt = (ix - mx) * 0.75;
+        let dy_pt = (iy - my) * 0.75;
+        let want = 63.75_f32;
+        assert!(
+            (dx_pt - want).abs() < 0.5 && (dy_pt - want).abs() < 0.5,
+            "expected pseudo at marker+({want:.2},{want:.2}) pt, got ({dx_pt:.2},{dy_pt:.2}); \
+             bug case (no correction) would be ~71.25",
+        );
+    }
+
+    // maybe_apply_abs_pseudo_inset_correction: `left` + `top` set → needs_right
+    // = false, needs_bottom = false → early exit at `!needs_right && !needs_bottom`.
+    #[test]
+    fn smoke_abs_pseudo_content_url_left_top_no_correction() {
+        let pdf = render_with_pseudo_css(
+            r#"<!doctype html><html><body><div></div></body></html>"#,
+            r#"
+                div { position: relative; width: 100px; height: 100px; }
+                div::before {
+                    content: url("dot.png");
+                    position: absolute;
+                    width: 10px; height: 10px;
+                    left: 5px; top: 5px;
+                }
+            "#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // maybe_apply_abs_pseudo_inset_correction: position:fixed pseudo with
+    // content:url triggers the `is_position_fixed` early return at line 213.
+    // This path is distinct from the absolute-positioned path tested above.
+    #[test]
+    fn smoke_fixed_pseudo_content_url_early_exit() {
+        let pdf = render_with_pseudo_css(
+            r#"<!doctype html><html><body><div></div></body></html>"#,
+            r#"
+                div::before {
+                    content: url("dot.png");
+                    position: fixed;
+                    width: 10px; height: 10px;
+                    right: 5px; bottom: 5px;
+                }
+            "#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // maybe_apply_abs_pseudo_inset_correction: `right` set but `left` auto
+    // with only `top` set (not `bottom`) → needs_right=true, needs_bottom=false
+    // → x_in_pp_px takes the `needs_right` branch; y_in_pp_px falls through to
+    // `top.unwrap_or(0.0)` (the non-needs_bottom arm).
+    //
+    // Coordinate check: parent 100×100 CSS px (75×75 pt), pseudo 10×10 px
+    // (7.5×7.5 pt) at right:5px, top:0.
+    //   expected dx = (100 − 10 − 5) × 0.75 = 63.75 pt,  dy = 0.0 pt
+    #[test]
+    fn smoke_abs_pseudo_content_url_right_only_inset() {
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .marker { position: relative; width: 100px; height: 100px; }
+            .marker::before {
+                content: url(dot.png);
+                position: absolute;
+                width: 10px; height: 10px;
+                right: 5px; top: 0px;
+            }
+        </style></head><body><div class="marker"></div></body></html>"#;
+        let (drawables, geometry) = build_with_geo(html);
+
+        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5)
+            .expect("expected a 7.5×7.5 pt ImageEntry from abs pseudo");
+        let (marker_id, _) = drawables
+            .block_styles
+            .iter()
+            .find(|(_, b)| {
+                b.layout_size
+                    .is_some_and(|s| (s.width - 75.0).abs() < 0.5 && (s.height - 75.0).abs() < 0.5)
+            })
+            .map(|(id, e)| (*id, e))
+            .expect("marker block (75×75 pt) must exist in block_styles");
+
+        let (ix, iy) = frag_xy(&geometry, image_id);
+        let (mx, my) = frag_xy(&geometry, marker_id);
+        let dx_pt = (ix - mx) * 0.75;
+        let dy_pt = (iy - my) * 0.75;
+        assert!(
+            (dx_pt - 63.75_f32).abs() < 0.5,
+            "expected pseudo x at marker+63.75 pt, got {dx_pt:.2}; bug case ~71.25",
+        );
+        assert!(
+            dy_pt.abs() < 0.5,
+            "expected pseudo y at marker (dy=0.0 pt), got {dy_pt:.2}",
+        );
+    }
 }
