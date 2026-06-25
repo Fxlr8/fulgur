@@ -1300,22 +1300,23 @@ mod tests {
         );
         let div_id = find_tag(&doc, "div");
         let div_node = doc.get_node(div_id).unwrap();
-        if let Some(before_id) = div_node.before {
-            if let Some(before_node) = doc.get_node(before_id) {
-                let ab_cb = AbsCb {
-                    padding_box_size: (100.0, 100.0),
-                    border_top_left: (0.0, 0.0),
-                    parent_offset_in_cb_bp: (0.0, 0.0),
-                };
-                let result =
-                    try_build_absolute_pseudo_image(before_node, div_node, Some(ab_cb), None);
-                // background → has_visual_style() = true → must return None
-                assert!(
-                    result.is_none(),
-                    "pseudo with background must return None from try_build_absolute_pseudo_image"
-                );
-            }
-        }
+        let before_id = div_node
+            .before
+            .expect("::before pseudo-element should exist");
+        let before_node = doc
+            .get_node(before_id)
+            .expect("::before node should be retrievable");
+        let ab_cb = AbsCb {
+            padding_box_size: (100.0, 100.0),
+            border_top_left: (0.0, 0.0),
+            parent_offset_in_cb_bp: (0.0, 0.0),
+        };
+        let result = try_build_absolute_pseudo_image(before_node, div_node, Some(ab_cb), None);
+        // background → has_visual_style() = true → must return None
+        assert!(
+            result.is_none(),
+            "pseudo with background must return None from try_build_absolute_pseudo_image"
+        );
     }
 
     #[test]
@@ -1339,15 +1340,17 @@ mod tests {
         );
         let div_id = find_tag(&doc, "div");
         let div_node = doc.get_node(div_id).unwrap();
-        if let Some(before_id) = div_node.before {
-            if let Some(before_node) = doc.get_node(before_id) {
-                // cb=None → else branch uses parent.final_layout.size as basis
-                let result = try_build_absolute_pseudo_image(before_node, div_node, None, None);
-                // assets=None → build_pseudo_image_entry returns None,
-                // but the else branch was exercised.
-                assert!(result.is_none());
-            }
-        }
+        let before_id = div_node
+            .before
+            .expect("::before pseudo-element should exist");
+        let before_node = doc
+            .get_node(before_id)
+            .expect("::before node should be retrievable");
+        // cb=None → else branch uses parent.final_layout.size as basis
+        let result = try_build_absolute_pseudo_image(before_node, div_node, None, None);
+        // assets=None → build_pseudo_image_entry returns None,
+        // but the else branch was exercised.
+        assert!(result.is_none());
     }
 
     // ── maybe_apply_abs_pseudo_inset_correction: Engine smoke tests ───────────
