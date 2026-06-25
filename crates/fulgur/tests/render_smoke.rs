@@ -4689,3 +4689,21 @@ fn table_caption_preserves_full_width_table() {
         "caption must not change table width: max cell x without={without}, with={with}"
     );
 }
+
+/// fulgur-2m6w (DoS guard): a tall CSS height that slices across many pages
+/// must drive the multi-page slice render path end-to-end without hanging.
+/// This exercises `render.rs`'s per-slice draw loop on a sliced body child;
+/// a moderate height (~tens of pages) keeps the render fast — the page CAP
+/// itself (the `99999999px` / `f32::MAX` amplification bound) is covered by
+/// the fast pagination unit tests in `pagination_layout.rs`, which need no
+/// render. Rendering the full 100k-page ceiling here would just be a slow
+/// CI tax for no extra coverage.
+#[test]
+fn pathological_tall_block_render_is_bounded() {
+    let html = r#"<!doctype html><html><body><div style="height:50000px"></div></body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render must terminate and succeed");
+    assert!(!pdf.is_empty(), "expected a non-empty bounded PDF");
+}
