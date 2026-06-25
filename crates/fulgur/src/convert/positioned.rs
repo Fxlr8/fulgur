@@ -1337,13 +1337,8 @@ mod tests {
         geometry: &crate::pagination_layout::PaginationGeometryTable,
         node_id: usize,
     ) -> (f32, f32) {
-        let geom = geometry
-            .get(&node_id)
-            .unwrap_or_else(|| panic!("no geometry for node {node_id}"));
-        let frag = geom
-            .fragments
-            .first()
-            .unwrap_or_else(|| panic!("no fragment for node {node_id}"));
+        let geom = geometry.get(&node_id).expect("node missing from geometry");
+        let frag = geom.fragments.first().expect("node has no fragments");
         (frag.x, frag.y)
     }
 
@@ -1369,16 +1364,8 @@ mod tests {
         </style></head><body><div class="marker"></div></body></html>"#;
         let (drawables, geometry) = build_with_geo(html);
 
-        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5).unwrap_or_else(|| {
-            panic!(
-                "expected a 7.5×7.5 pt ImageEntry; got: {:?}",
-                drawables
-                    .images
-                    .values()
-                    .map(|i| (i.width, i.height))
-                    .collect::<Vec<_>>()
-            )
-        });
+        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5)
+            .expect("expected a 7.5×7.5 pt ImageEntry from abs pseudo");
         let (marker_id, _) = drawables
             .block_styles
             .iter()
@@ -1460,16 +1447,8 @@ mod tests {
         </style></head><body><div class="marker"></div></body></html>"#;
         let (drawables, geometry) = build_with_geo(html);
 
-        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5).unwrap_or_else(|| {
-            panic!(
-                "expected a 7.5×7.5 pt ImageEntry; got: {:?}",
-                drawables
-                    .images
-                    .values()
-                    .map(|i| (i.width, i.height))
-                    .collect::<Vec<_>>()
-            )
-        });
+        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5)
+            .expect("expected a 7.5×7.5 pt ImageEntry from abs pseudo");
         let (marker_id, _) = drawables
             .block_styles
             .iter()
