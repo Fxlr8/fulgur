@@ -1305,25 +1305,100 @@ mod tests {
             .expect("render failed")
     }
 
+    fn build_with_geo(
+        html: &str,
+    ) -> (
+        crate::drawables::Drawables,
+        crate::pagination_layout::PaginationGeometryTable,
+    ) {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        crate::engine::Engine::builder()
+            .page_size(crate::config::PageSize::A4)
+            .margin(crate::config::Margin::uniform(72.0))
+            .assets(bundle)
+            .build()
+            .build_drawables_and_geometry_for_testing_no_gcpm(html)
+    }
+
+    fn find_image_geo(
+        drawables: &crate::drawables::Drawables,
+        want_w: f32,
+        want_h: f32,
+    ) -> Option<(usize, &crate::drawables::ImageEntry)> {
+        drawables
+            .images
+            .iter()
+            .find(|(_, img)| (img.width - want_w).abs() < 0.5 && (img.height - want_h).abs() < 0.5)
+            .map(|(id, e)| (*id, e))
+    }
+
+    fn frag_xy(
+        geometry: &crate::pagination_layout::PaginationGeometryTable,
+        node_id: usize,
+    ) -> (f32, f32) {
+        let geom = geometry
+            .get(&node_id)
+            .unwrap_or_else(|| panic!("no geometry for node {node_id}"));
+        let frag = geom
+            .fragments
+            .first()
+            .unwrap_or_else(|| panic!("no fragment for node {node_id}"));
+        (frag.x, frag.y)
+    }
+
     // maybe_apply_abs_pseudo_inset_correction: `right` + `bottom` set, `left`
     // + `top` auto → needs_right=true, needs_bottom=true → the correction is
     // applied and new_x / new_y are written into pagination_geometry.
     // Also covers resolve_inset_px with a LengthPercentage inset.
+    //
+    // Coordinate check: parent 100×100 CSS px (75×75 pt), pseudo 10×10 px
+    // (7.5×7.5 pt) at right:5px, bottom:5px.
+    //   expected dx = (100 − 10 − 5) × 0.75 = 63.75 pt
+    //   bug case (pre-fix, pseudo layout.size = 0): (100 − 0 − 5) × 0.75 = 71.25 pt
     #[test]
     fn smoke_abs_pseudo_content_url_right_bottom_insets() {
-        let pdf = render_with_pseudo_css(
-            r#"<!doctype html><html><body><div></div></body></html>"#,
-            r#"
-                div { position: relative; width: 100px; height: 100px; }
-                div::before {
-                    content: url("dot.png");
-                    position: absolute;
-                    width: 10px; height: 10px;
-                    right: 5px; bottom: 5px;
-                }
-            "#,
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .marker { position: relative; width: 100px; height: 100px; }
+            .marker::before {
+                content: url(dot.png);
+                position: absolute;
+                width: 10px; height: 10px;
+                right: 5px; bottom: 5px;
+            }
+        </style></head><body><div class="marker"></div></body></html>"#;
+        let (drawables, geometry) = build_with_geo(html);
+
+        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5).unwrap_or_else(|| {
+            panic!(
+                "expected a 7.5×7.5 pt ImageEntry; got: {:?}",
+                drawables
+                    .images
+                    .values()
+                    .map(|i| (i.width, i.height))
+                    .collect::<Vec<_>>()
+            )
+        });
+        let (marker_id, _) = drawables
+            .block_styles
+            .iter()
+            .find(|(_, b)| {
+                b.layout_size
+                    .is_some_and(|s| (s.width - 75.0).abs() < 0.5 && (s.height - 75.0).abs() < 0.5)
+            })
+            .map(|(id, e)| (*id, e))
+            .expect("marker block (75×75 pt) must exist in block_styles");
+
+        let (ix, iy) = frag_xy(&geometry, image_id);
+        let (mx, my) = frag_xy(&geometry, marker_id);
+        let dx_pt = (ix - mx) * 0.75;
+        let dy_pt = (iy - my) * 0.75;
+        let want = 63.75_f32;
+        assert!(
+            (dx_pt - want).abs() < 0.5 && (dy_pt - want).abs() < 0.5,
+            "expected pseudo at marker+({want:.2},{want:.2}) pt, got ({dx_pt:.2},{dy_pt:.2}); \
+             bug case (no correction) would be ~71.25",
         );
-        assert!(pdf.starts_with(b"%PDF"));
     }
 
     // maybe_apply_abs_pseudo_inset_correction: `left` + `top` set → needs_right
@@ -1368,20 +1443,54 @@ mod tests {
     // with only `top` set (not `bottom`) → needs_right=true, needs_bottom=false
     // → x_in_pp_px takes the `needs_right` branch; y_in_pp_px falls through to
     // `top.unwrap_or(0.0)` (the non-needs_bottom arm).
+    //
+    // Coordinate check: parent 100×100 CSS px (75×75 pt), pseudo 10×10 px
+    // (7.5×7.5 pt) at right:5px, top:0.
+    //   expected dx = (100 − 10 − 5) × 0.75 = 63.75 pt,  dy = 0.0 pt
     #[test]
     fn smoke_abs_pseudo_content_url_right_only_inset() {
-        let pdf = render_with_pseudo_css(
-            r#"<!doctype html><html><body><div></div></body></html>"#,
-            r#"
-                div { position: relative; width: 100px; height: 100px; }
-                div::before {
-                    content: url("dot.png");
-                    position: absolute;
-                    width: 10px; height: 10px;
-                    right: 5px; top: 0px;
-                }
-            "#,
+        let html = r#"<!DOCTYPE html><html><head><style>
+            .marker { position: relative; width: 100px; height: 100px; }
+            .marker::before {
+                content: url(dot.png);
+                position: absolute;
+                width: 10px; height: 10px;
+                right: 5px; top: 0px;
+            }
+        </style></head><body><div class="marker"></div></body></html>"#;
+        let (drawables, geometry) = build_with_geo(html);
+
+        let (image_id, _) = find_image_geo(&drawables, 7.5, 7.5).unwrap_or_else(|| {
+            panic!(
+                "expected a 7.5×7.5 pt ImageEntry; got: {:?}",
+                drawables
+                    .images
+                    .values()
+                    .map(|i| (i.width, i.height))
+                    .collect::<Vec<_>>()
+            )
+        });
+        let (marker_id, _) = drawables
+            .block_styles
+            .iter()
+            .find(|(_, b)| {
+                b.layout_size
+                    .is_some_and(|s| (s.width - 75.0).abs() < 0.5 && (s.height - 75.0).abs() < 0.5)
+            })
+            .map(|(id, e)| (*id, e))
+            .expect("marker block (75×75 pt) must exist in block_styles");
+
+        let (ix, iy) = frag_xy(&geometry, image_id);
+        let (mx, my) = frag_xy(&geometry, marker_id);
+        let dx_pt = (ix - mx) * 0.75;
+        let dy_pt = (iy - my) * 0.75;
+        assert!(
+            (dx_pt - 63.75_f32).abs() < 0.5,
+            "expected pseudo x at marker+63.75 pt, got {dx_pt:.2}; bug case ~71.25",
         );
-        assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            dy_pt.abs() < 0.5,
+            "expected pseudo y at marker (dy=0.0 pt), got {dy_pt:.2}",
+        );
     }
 }
