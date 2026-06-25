@@ -2,27 +2,35 @@
 /// from pathologically deep HTML input.
 pub(crate) const MAX_DOM_DEPTH: usize = 512;
 
-/// Hard ceiling on the page count a single render may reach. Bounds the
-/// per-page-strip slicing of an oversized block in `pagination_layout`
-/// (and the absolute-positioning page-extension path) so a tiny input with
-/// a pathologically tall CSS height / offset (e.g. `height: 99999999px`,
-/// `position:absolute; top:99999999px`) cannot force unbounded fragment /
-/// page generation — which downstream inflates a `vec![Vec::new(); page_count]`
-/// allocation and a per-page render loop into a CPU/memory-exhaustion DoS.
+/// Per-element page-amplification bound (NOT a strict total-page ceiling —
+/// see the note below). Bounds the per-page-strip slicing of an oversized
+/// block in `pagination_layout` (and the absolute-positioning page-extension
+/// path) so a tiny input with a pathologically tall CSS height / offset
+/// (e.g. `height: 99999999px`, `position:absolute; top:99999999px`) cannot
+/// force unbounded fragment / page generation — which downstream inflates a
+/// `vec![Vec::new(); page_count]` allocation and a per-page render loop into
+/// a CPU/memory-exhaustion DoS.
 ///
-/// This is an **absolute** page-index ceiling, not a per-element budget:
-/// keying the cap off the running `page_index` makes many oversized
-/// siblings additive (`MAX_PAGES + N`) rather than multiplicative
-/// (`N * MAX_PAGES`), which is what actually bounds the multi-element DoS.
-/// A per-element budget would re-open that amplification, so the ceiling
-/// must stay absolute (Codex review on PR #501).
+/// The cap is keyed off the running `page_index`, not a per-element budget.
+/// That is deliberate: it makes many oversized siblings **additive** rather
+/// than **multiplicative** — each extra oversized block contributes only its
+/// own first fragment once the slice loop is capped, so the document total
+/// settles at `MAX_PAGES + N` for `N` body children instead of
+/// `N * MAX_PAGES`. A per-element budget would re-open that multi-element
+/// amplification, so the cap must stay keyed off the absolute page index
+/// (Codex review on PR #501).
 ///
-/// Set high enough that legitimate large documents (batch report
-/// generation is a primary use case) do not hit it — at this value the
-/// truncation only fires for attacker-amplified input, and rendering the
-/// ceiling is still bounded (~100k pages ≈ a few seconds). Content beyond
-/// the ceiling is truncated (clamp-and-warn). Sibling of the
-/// `MAX_DOM_DEPTH` / background `MAX_TILES` defensive bounds.
+/// Consequence: the total page count can slightly **exceed** `MAX_PAGES`
+/// (it is `MAX_PAGES + N`, still input-proportional and rendered in bounded
+/// time). This constant therefore caps single-element amplification, not the
+/// absolute page count — code must not assume `page_count <= MAX_PAGES`.
+///
+/// Set high enough that legitimate large documents (batch report generation
+/// is a primary use case) do not hit it — at this value the truncation only
+/// fires for attacker-amplified input, and rendering the bound is still
+/// bounded (~100k pages ≈ a few seconds). Content past the per-element cap is
+/// truncated (clamp-and-warn). Sibling of the `MAX_DOM_DEPTH` / background
+/// `MAX_TILES` defensive bounds.
 pub(crate) const MAX_PAGES: u32 = 100_000;
 
 pub mod asset;

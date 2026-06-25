@@ -4784,24 +4784,8 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        fn find_by_id(doc: &blitz_dom::BaseDocument, id: &str) -> Option<usize> {
-            fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, target: &str) -> Option<usize> {
-                let node = doc.get_node(node_id)?;
-                if let Some(ed) = node.element_data()
-                    && let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
-                    && attr_id.value.as_str() == target
-                {
-                    return Some(node_id);
-                }
-                for &child in &node.children {
-                    if let Some(found) = walk(doc, child, target) {
-                        return Some(found);
-                    }
-                }
-                None
-            }
-            walk(doc, doc.root_element().id, id)
-        }
+        // Reuses the module-level `find_by_id` helper (see the
+        // pagination-cap tests) instead of redefining it here.
         let tiny_id = find_by_id(doc.deref_mut(), "tiny").expect("tiny abs node");
         doc.deref_mut()
             .get_node_mut(tiny_id)
