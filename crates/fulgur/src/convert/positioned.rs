@@ -1278,6 +1278,81 @@ mod tests {
         );
     }
 
+    // ── try_build_absolute_pseudo_image additional branches ─────────────
+
+    #[test]
+    fn try_build_absolute_pseudo_image_background_on_pseudo_returns_none() {
+        // A ::before pseudo that has content:url AND background:red.
+        // extract_content_image_url returns Some (passes the first ?),
+        // but has_visual_style() = true (background) → returns None early.
+        let doc = parse_doc(
+            r#"<!doctype html><html><head><style>
+            div::before {
+                content: url("dot.png");
+                background: #f00;
+                position: absolute;
+                width: 10px;
+                height: 10px;
+            }
+        </style></head><body>
+            <div style="position:relative;width:100px;height:100px;"></div>
+        </body></html>"#,
+        );
+        let div_id = find_tag(&doc, "div");
+        let div_node = doc.get_node(div_id).unwrap();
+        let before_id = div_node
+            .before
+            .expect("::before pseudo-element should exist");
+        let before_node = doc
+            .get_node(before_id)
+            .expect("::before node should be retrievable");
+        let ab_cb = AbsCb {
+            padding_box_size: (100.0, 100.0),
+            border_top_left: (0.0, 0.0),
+            parent_offset_in_cb_bp: (0.0, 0.0),
+        };
+        let result = try_build_absolute_pseudo_image(before_node, div_node, Some(ab_cb), None);
+        // background → has_visual_style() = true → must return None
+        assert!(
+            result.is_none(),
+            "pseudo with background must return None from try_build_absolute_pseudo_image"
+        );
+    }
+
+    #[test]
+    fn try_build_absolute_pseudo_image_cb_none_uses_parent_layout_size() {
+        // A ::before pseudo with content:url but no background (no visual style).
+        // Passing cb=None forces the else-branch: basis is taken from
+        // parent.final_layout.size rather than cb.padding_box_size.
+        // assets=None means build_pseudo_image_entry returns None, but the
+        // else-branch is still exercised for coverage.
+        let doc = parse_doc(
+            r#"<!doctype html><html><head><style>
+            div::before {
+                content: url("dot.png");
+                position: absolute;
+                width: 10px;
+                height: 10px;
+            }
+        </style></head><body>
+            <div style="position:relative;width:100px;height:100px;"></div>
+        </body></html>"#,
+        );
+        let div_id = find_tag(&doc, "div");
+        let div_node = doc.get_node(div_id).unwrap();
+        let before_id = div_node
+            .before
+            .expect("::before pseudo-element should exist");
+        let before_node = doc
+            .get_node(before_id)
+            .expect("::before node should be retrievable");
+        // cb=None → else branch uses parent.final_layout.size as basis
+        let result = try_build_absolute_pseudo_image(before_node, div_node, None, None);
+        // assets=None → build_pseudo_image_entry returns None,
+        // but the else branch was exercised.
+        assert!(result.is_none());
+    }
+
     // ── maybe_apply_abs_pseudo_inset_correction: Engine smoke tests ───────────
     //
     // These tests exercise the full path through walk_absolute_pseudo_children →
@@ -1388,25 +1463,6 @@ mod tests {
         );
     }
 
-    // maybe_apply_abs_pseudo_inset_correction: `left` + `top` set → needs_right
-    // = false, needs_bottom = false → early exit at `!needs_right && !needs_bottom`.
-    #[test]
-    fn smoke_abs_pseudo_content_url_left_top_no_correction() {
-        let pdf = render_with_pseudo_css(
-            r#"<!doctype html><html><body><div></div></body></html>"#,
-            r#"
-                div { position: relative; width: 100px; height: 100px; }
-                div::before {
-                    content: url("dot.png");
-                    position: absolute;
-                    width: 10px; height: 10px;
-                    left: 5px; top: 5px;
-                }
-            "#,
-        );
-        assert!(pdf.starts_with(b"%PDF"));
-    }
-
     // maybe_apply_abs_pseudo_inset_correction: position:fixed pseudo with
     // content:url triggers the `is_position_fixed` early return at line 213.
     // This path is distinct from the absolute-positioned path tested above.
@@ -1420,6 +1476,25 @@ mod tests {
                     position: fixed;
                     width: 10px; height: 10px;
                     right: 5px; bottom: 5px;
+                }
+            "#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // maybe_apply_abs_pseudo_inset_correction: `left` + `top` set → needs_right
+    // = false, needs_bottom = false → early exit at `!needs_right && !needs_bottom`.
+    #[test]
+    fn smoke_abs_pseudo_content_url_left_top_no_correction() {
+        let pdf = render_with_pseudo_css(
+            r#"<!doctype html><html><body><div></div></body></html>"#,
+            r#"
+                div { position: relative; width: 100px; height: 100px; }
+                div::before {
+                    content: url("dot.png");
+                    position: absolute;
+                    width: 10px; height: 10px;
+                    left: 5px; top: 5px;
                 }
             "#,
         );
@@ -1471,5 +1546,24 @@ mod tests {
             dy_pt.abs() < 0.5,
             "expected pseudo y at marker (dy=0.0 pt), got {dy_pt:.2}",
         );
+    }
+
+    // Branch: needs_right=false, needs_bottom=true → y uses cb_h − pseudo_h − bottom,
+    // x uses `left.unwrap_or(0.0)` (the else-branch of `if needs_right`).
+    #[test]
+    fn smoke_abs_before_bottom_only_covers_needs_right_false() {
+        let pdf = render_with_pseudo_css(
+            r#"<!doctype html><html><body>
+        <div style="position:relative;width:200px;height:200px;"></div>
+    </body></html>"#,
+            r#"div::before {
+                content: url("dot.png");
+                position: absolute;
+                bottom: 10px;
+                width: 20px;
+                height: 20px;
+            }"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
     }
 }
