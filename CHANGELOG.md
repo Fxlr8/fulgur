@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.0] - 2026-06-26
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(table): render <caption> via pre-layout DOM restructure pass by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/487
+### Bug Fixes
+* fix(pagination): extend page count for absolute elements with in-flow content (fulgur-xa9q) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/498
+* fix(pagination): cap unbounded page slicing from tall CSS height (DoS guard) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/501
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.18.0...v0.19.0
+
 ## [0.18.0] - 2026-06-14
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
