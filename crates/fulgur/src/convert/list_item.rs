@@ -1059,4 +1059,130 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // build_list_item_body (outside marker, inline-root): a ::after pseudo whose
+    // `content` is an image URL and display is NOT block-outside injects an
+    // InlineImage *after* the paragraph text (lines 352-367).
+    #[test]
+    fn smoke_outside_marker_with_inline_after_image() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"li::after { content: url("dot.png"); width: 8px; height: 8px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(
+                r#"<!doctype html><html><body>
+                <ul><li>Item with after image</li></ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// Decode NotoSans-Regular WOFF2 fixture into the TTF bytes that
+    /// `AssetBundle::fonts` stores after `add_font_bytes`.
+    fn load_noto_sans_ttf() -> std::sync::Arc<Vec<u8>> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fonts/NotoSans-Regular.woff2");
+        let woff2 = std::fs::read(&fixture).expect("NotoSans-Regular.woff2 missing");
+        let mut bundle = crate::asset::AssetBundle::new();
+        bundle.add_font_bytes(woff2).expect("WOFF2 decode failed");
+        std::sync::Arc::clone(&bundle.fonts[0])
+    }
+
+    // try_convert branch 3 (inside marker, non-inline-root, non-empty children):
+    // when walking children produces no ParagraphEntry,
+    // `inject_marker_into_first_paragraph` returns false and the marker is
+    // synthesized as a standalone paragraph at the list-item level (lines 241-254).
+    // Requires a bundled font so `find_marker_font` can locate the bullet glyph.
+    #[test]
+    fn smoke_inside_marker_block_child_no_paragraph() {
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.fonts.push(font_data);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-position:inside">
+                    <li><div style="height:20px;background:#eee"></div></li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 2 (fallback display:list-item): a <div> styled with
+    // `display:list-item` and a bundled `list-style-image` hits the fallback
+    // path (lines 76-118) that exists for non-<li> elements.
+    // Default `line-height` → `LineHeight::Normal` arm (line 83).
+    #[test]
+    fn smoke_fallback_display_list_item_normal_line_height() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"div.li-item { display: list-item; list-style-image: url("dot.png"); }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(
+                r#"<!doctype html><html><body>
+                <div class="li-item">Fallback list item</div>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 2 (fallback display:list-item): same as above but with
+    // a numeric line-height multiplier → `LineHeight::Number` arm (line 84).
+    #[test]
+    fn smoke_fallback_display_list_item_number_line_height() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"div.li-item {
+            display: list-item;
+            list-style-image: url("dot.png");
+            line-height: 1.5;
+        }"#,
+        );
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(
+                r#"<!doctype html><html><body>
+                <div class="li-item">Fallback item numeric lh</div>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 2 (fallback display:list-item): absolute-length
+    // line-height → `LineHeight::Length` arm (line 85).
+    #[test]
+    fn smoke_fallback_display_list_item_length_line_height() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"div.li-item {
+            display: list-item;
+            list-style-image: url("dot.png");
+            line-height: 24px;
+        }"#,
+        );
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render_html(
+                r#"<!doctype html><html><body>
+                <div class="li-item">Fallback item length lh</div>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
