@@ -70,5 +70,5 @@ pub use outline::build_outline;
 /// Convert HTML to PDF with default settings.
 pub fn convert_html(html: &str) -> Result<Vec<u8>> {
     let engine = Engine::builder().build();
-    engine.render_html(html)
+    engine.render(html)
 }
