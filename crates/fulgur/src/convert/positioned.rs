@@ -1376,7 +1376,7 @@ mod tests {
         crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render failed")
     }
 

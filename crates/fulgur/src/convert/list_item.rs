@@ -1071,7 +1071,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <ul><li>Item with after image</li></ul>
                 </body></html>"#,
@@ -1104,7 +1104,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <ul style="list-style-position:inside">
                     <li><div style="height:20px;background:#eee"></div></li>
@@ -1127,7 +1127,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <div class="li-item">Fallback list item</div>
                 </body></html>"#,
@@ -1152,7 +1152,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <div class="li-item">Fallback item numeric lh</div>
                 </body></html>"#,
@@ -1177,7 +1177,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <div class="li-item">Fallback item length lh</div>
                 </body></html>"#,
