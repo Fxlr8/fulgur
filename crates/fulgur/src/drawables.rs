@@ -199,6 +199,27 @@ impl std::fmt::Debug for ListItemEntry {
     }
 }
 
+/// Per-column-group geometry for painting a multicol `column-rule`, in PDF
+/// pt (already converted from `multicol_layout::ColumnGroupGeometry`'s CSS
+/// px by `convert::record_multicol_rule`). A distinct pt-typed carrier so
+/// the px source struct is no longer reused across two unit spaces.
+#[derive(Debug, Clone)]
+pub struct ColumnRuleGeometry {
+    /// Horizontal offset from the container border-box left to column 0.
+    pub x_offset: crate::units::Pt,
+    /// Vertical offset from the container border-box top (incl. padding-top
+    /// + border-top) to this group.
+    pub y_offset: crate::units::Pt,
+    /// Width of a single column.
+    pub col_w: crate::units::Pt,
+    /// Gap between adjacent columns.
+    pub gap: crate::units::Pt,
+    /// Number of columns this group balances across.
+    pub n: u32,
+    /// Per-column filled height; length == `n`.
+    pub col_heights: Vec<crate::units::Pt>,
+}
+
 /// Multicol column-rule paint spec + per-column-group geometry.
 /// Mirrors the fields `MulticolRulePageable` carries — render at the
 /// container's location after children paint, partitioning `groups`
@@ -206,7 +227,7 @@ impl std::fmt::Debug for ListItemEntry {
 #[derive(Debug, Clone)]
 pub struct MulticolRuleEntry {
     pub rule: crate::column_css::ColumnRuleSpec,
-    pub groups: Vec<crate::multicol_layout::ColumnGroupGeometry>,
+    pub groups: Vec<ColumnRuleGeometry>,
 }
 
 /// One source paragraph distributed across columns of a multicol
