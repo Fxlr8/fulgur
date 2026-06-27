@@ -2296,6 +2296,7 @@ fn paint_multicol_rule_for_page(
     page_index: u32,
 ) {
     use crate::draw_primitives::stroke_line;
+    use crate::units::{F32Units, Pt};
 
     let Some(stroke) = build_multicol_stroke(&entry.rule) else {
         return;
@@ -2309,8 +2310,6 @@ fn paint_multicol_rule_for_page(
         return;
     };
     let target_frag = &container_geom.fragments[target_pos];
-
-    use crate::units::F32Units;
 
     let consumed = container_geom.fragments[..target_pos]
         .iter()
@@ -2329,11 +2328,7 @@ fn paint_multicol_rule_for_page(
             continue;
         }
         let group_top = group.y_offset - consumed;
-        let max_h = group
-            .col_heights
-            .iter()
-            .copied()
-            .fold(zero, crate::units::Pt::max);
+        let max_h = group.col_heights.iter().copied().fold(zero, Pt::max);
         let group_bottom = group_top + max_h;
         if group_bottom <= zero || group_top >= cutoff {
             continue;

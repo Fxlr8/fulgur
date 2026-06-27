@@ -207,7 +207,8 @@ impl std::fmt::Debug for ListItemEntry {
 pub struct ColumnRuleGeometry {
     /// Horizontal offset from the container border-box left to column 0.
     pub x_offset: crate::units::Pt,
-    /// Vertical offset from the container content-box top to this group.
+    /// Vertical offset from the container border-box top (incl. padding-top
+    /// + border-top) to this group.
     pub y_offset: crate::units::Pt,
     /// Width of a single column.
     pub col_w: crate::units::Pt,
