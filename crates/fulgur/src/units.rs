@@ -160,6 +160,19 @@ impl Pt {
     pub fn in_px(self) -> Px {
         Px(self.0 / PX_TO_PT)
     }
+
+    /// Larger of two lengths. Mirrors `f32::max` (same NaN handling) so a
+    /// migrated `x.max(y)` stays byte-identical.
+    #[inline]
+    pub fn max(self, other: Pt) -> Pt {
+        Pt(self.0.max(other.0))
+    }
+
+    /// Smaller of two lengths. Mirrors `f32::min`.
+    #[inline]
+    pub fn min(self, other: Pt) -> Pt {
+        Pt(self.0.min(other.0))
+    }
 }
 
 /// Constructor sugar so `value.px()` / `value.pt()` reads naturally and the
@@ -209,6 +222,20 @@ mod tests {
         assert_eq!(a, Pt(1.0));
         let s: Pt = [Pt(1.0), Pt(2.0), Pt(3.0)].into_iter().sum();
         assert_eq!(s, Pt(6.0));
+    }
+
+    #[test]
+    fn pt_max_min_mirror_f32() {
+        assert_eq!(Pt(1.0).max(Pt(2.0)), Pt(2.0));
+        assert_eq!(Pt(1.0).min(Pt(2.0)), Pt(1.0));
+        // identical to f32::max/min, including the 0.0 clamp idiom
+        assert_eq!(Pt(-3.0).max(Pt(0.0)), Pt(0.0));
+        assert_eq!(
+            [Pt(0.0), Pt(2.0), Pt(1.0)]
+                .into_iter()
+                .fold(Pt(0.0), Pt::max),
+            Pt(2.0)
+        );
     }
 
     #[test]
