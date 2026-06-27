@@ -22,7 +22,7 @@ fn render_example(name: &str) -> Vec<u8> {
 
     engine
         .render(&html)
-        .expect("render_html should succeed")
+        .expect("render should succeed")
 }
 
 #[test]

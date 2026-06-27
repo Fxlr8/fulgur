@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn render_html_standalone_still_works() {
         let pdf = render_html(r#"<div style="background:red; width:100px; height:100px"></div>"#)
-            .expect("render_html should succeed");
+            .expect("render_html standalone should succeed");
         assert_eq!(&pdf[..4], b"%PDF");
     }
 

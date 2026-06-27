@@ -3301,7 +3301,7 @@ fn bookmark_label_counter_appears_in_outline() {
         .bookmarks(true)
         .build()
         .render(html)
-        .expect("render_html");
+        .expect("render");
     let titles = outline_titles(&pdf);
     assert!(
         titles.iter().any(|t| t == "1. Intro"),
@@ -3324,7 +3324,7 @@ fn bookmark_label_string_appears_in_outline() {
         .bookmarks(true)
         .build()
         .render(html)
-        .expect("render_html");
+        .expect("render");
     let titles = outline_titles(&pdf);
     assert_eq!(titles, vec!["Alpha".to_string(), "Beta".to_string()]);
 }

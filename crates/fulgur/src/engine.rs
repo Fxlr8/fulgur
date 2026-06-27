@@ -28,7 +28,7 @@ pub struct Engine {
 ///   skipped to avoid `element_text` cost on every id'd subtree on the
 ///   fast path.
 /// - `needs_pass_two`: mirrors that gate; `true` only for pass 1 of a
-///   2-pass render so `render_html` can decide whether to call
+///   2-pass render so `render` can decide whether to call
 ///   `render_pass` again with the populated map.
 struct RenderPassOutput {
     pdf: Vec<u8>,
@@ -752,12 +752,12 @@ impl Engine {
             &column_styles,
         );
 
-        // Mirror the production `render_html` path so test callers that
+        // Mirror the production `render` path so test callers that
         // consult the returned geometry as a placement oracle see the
         // same `position: fixed` per-page repetition that the real
         // render emits (see the `append_position_fixed_fragments` block
-        // in `render_html`). Without this, the helper would diverge
-        // from `render_html` for documents with `position: fixed`.
+        // in `render`). Without this, the helper would diverge
+        // from `render` for documents with `position: fixed`.
         let content_w_px = crate::convert::pt_to_px(self.config.content_width());
         let content_h_px = crate::convert::pt_to_px(self.config.content_height());
         let total_pages = crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
@@ -810,7 +810,7 @@ impl Engine {
         // those corrections from tests that drive
         // `pseudo_absolute_content_url::
         // absolute_pseudo_with_right_bottom_offsets_by_image_size`.
-        // The production `render_html` path already passes
+        // The production `render` path already passes
         // `&convert_ctx.pagination_geometry` to `render_v2` after
         // convert, so this matches the production read order.
         (drawables, convert_ctx.pagination_geometry)
