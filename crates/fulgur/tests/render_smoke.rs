@@ -4648,3 +4648,31 @@ fn pathological_tall_block_render_is_bounded() {
         .expect("render must terminate and succeed");
     assert!(!pdf.is_empty(), "expected a non-empty bounded PDF");
 }
+
+/// fulgur-2qpt: deprecated aliases `render_html` and `render_html_to_file`
+/// must delegate to the renamed methods and produce valid PDFs.
+#[test]
+#[allow(deprecated)]
+fn deprecated_render_html_alias_delegates() {
+    let html = r#"<!doctype html><html><body><p>compat</p></body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render_html must succeed");
+    assert!(!pdf.is_empty());
+    assert!(pdf.starts_with(b"%PDF"));
+}
+
+#[test]
+#[allow(deprecated)]
+fn deprecated_render_html_to_file_alias_delegates() {
+    let html = r#"<!doctype html><html><body><p>compat</p></body></html>"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("compat.pdf");
+    Engine::builder()
+        .build()
+        .render_html_to_file(html, &path)
+        .expect("render_html_to_file must succeed");
+    assert!(path.exists());
+    assert!(std::fs::metadata(&path).unwrap().len() > 0);
+}
