@@ -15,7 +15,7 @@ fn test_template_to_pdf() {
         .template("invoice.html", template)
         .data(data)
         .build()
-        .render()
+        .render_template()
         .unwrap();
 
     assert!(!pdf.is_empty());
@@ -37,14 +37,14 @@ fn test_template_syntax_error_propagates() {
         .template("bad.html", "{% if %}")
         .data(json!({}))
         .build()
-        .render();
+        .render_template();
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Template error"));
 }
 
 #[test]
 fn test_render_without_template_errors() {
-    let result = Engine::builder().build().render();
+    let result = Engine::builder().build().render_template();
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("no template set"));
 }
@@ -55,7 +55,7 @@ fn test_invalid_filter_propagates() {
         .template("test.html", "{{ x | bogus }}")
         .data(json!({"x": 1}))
         .build()
-        .render();
+        .render_template();
     assert!(result.is_err());
 }
 
@@ -72,7 +72,7 @@ fn test_template_with_assets() {
         .data(data)
         .assets(assets)
         .build()
-        .render()
+        .render_template()
         .unwrap();
 
     assert!(!pdf.is_empty());
