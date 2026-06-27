@@ -1168,6 +1168,49 @@ mod tests {
     }
 
     #[test]
+    fn resolve_enclosing_anchor_returns_none_when_a_has_no_href() {
+        let doc = parse_doc(r#"<html><body><a><span>no href</span></a></body></html>"#);
+        let span_id = find_tag(&doc, "span");
+        assert!(
+            super::resolve_enclosing_anchor(doc.deref(), span_id).is_none(),
+            "<a> with no href attr → None"
+        );
+    }
+
+    #[test]
+    fn resolve_enclosing_anchor_includes_alt_text_when_anchor_has_text() {
+        let doc =
+            parse_doc(r#"<html><body><a href="https://example.com">Click here</a></body></html>"#);
+        let a_id = find_tag(&doc, "a");
+        let result = super::resolve_enclosing_anchor(doc.deref(), a_id);
+        let (_, span) = result.expect("anchor finds itself");
+        assert!(
+            span.alt_text.is_some(),
+            "anchor with text content → alt_text set"
+        );
+    }
+
+    #[test]
+    fn resolve_enclosing_anchor_walks_multiple_levels_to_find_anchor() {
+        // <span> is nested three levels deep inside a valid <a>. The function
+        // must walk up span → p → div → a to find the enclosing anchor.
+        // (Nested <a> elements are invalid HTML5 and would be parsed as
+        // siblings, so we use a real multi-element nesting instead.)
+        let doc = parse_doc(
+            r#"<html><body><a href="https://example.com"><div><p><span>deep</span></p></div></a></body></html>"#,
+        );
+        let span_id = find_tag(&doc, "span");
+        let result = super::resolve_enclosing_anchor(doc.deref(), span_id);
+        let (_, span) = result.expect("anchor found via multi-level walk");
+        match &span.target {
+            LinkTarget::External(url) => {
+                assert_eq!(url.as_str(), "https://example.com");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn resolve_enclosing_anchor_returns_anchor_node_id_not_span() {
         let doc =
             parse_doc(r#"<html><body><a href="https://x.com"><span>x</span></a></body></html>"#);
@@ -1215,6 +1258,19 @@ mod tests {
             Some(12.0),
             "no overflow clip + paragraph entry → Some(baseline)"
         );
+    }
+
+    #[test]
+    fn inline_box_baseline_overflow_visible_block_does_not_short_circuit() {
+        // Block entry with default (visible) overflow must NOT trigger the guard.
+        // With a paragraph also present the function should return Some.
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
+        let mut out = crate::drawables::Drawables::new();
+        let node_id = 9997;
+        out.block_styles.insert(node_id, make_block_entry_plain()); // overflow Visible
+        out.paragraphs.insert(node_id, make_paragraph_entry(&[9.0]));
+        let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
+        assert_eq!(result, Some(9.0), "visible overflow must not short-circuit");
     }
 
     // ── pageable_last_baseline_from_drawables ──────────────────────────────────
