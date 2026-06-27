@@ -11,8 +11,11 @@ migration in this task.
 newtypes over `f32` (zero runtime cost). The field is **private** so all
 construction goes through `.px()` / `.pt()` and all raw-`f32` escapes go
 through `.to_f32()` — every boundary crossing is visible. `PX_TO_PT = 0.75`
-lives here as the crate's single conversion constant. Re-exported at the crate
-root. Compile-fail doctests assert cross-unit arithmetic does not compile
+lives here as the crate's single conversion constant. The newtypes are **not**
+re-exported at the crate root in P0 — the existing `draw_primitives::Pt = f32`
+alias would make a root `Pt` ambiguous, so the root re-export and alias removal
+wait for P1a (see Step 4). Compile-fail doctests assert cross-unit arithmetic
+does not compile
 (chosen over `trybuild` to avoid a new dev-dependency and brittle `.stderr`
 snapshots).
 
@@ -30,7 +33,8 @@ the render path).
 **Files:**
 
 - Create: `crates/fulgur/src/units.rs`
-- Modify: `crates/fulgur/src/lib.rs` (add `pub mod units;` + re-export)
+- Modify: `crates/fulgur/src/lib.rs` (add `pub mod units;` only; no crate-root
+  re-export in P0 — see Step 4)
 
 **Step 1: Write the failing unit tests**
 

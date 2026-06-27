@@ -68,11 +68,27 @@ macro_rules! impl_unit_arith {
                 $t(self.0 * rhs)
             }
         }
+        // Commutative scalar multiply: `2.0 * width`.
+        impl core::ops::Mul<$t> for f32 {
+            type Output = $t;
+            #[inline]
+            fn mul(self, rhs: $t) -> $t {
+                $t(self * rhs.0)
+            }
+        }
         impl core::ops::Div<f32> for $t {
             type Output = $t;
             #[inline]
             fn div(self, rhs: f32) -> $t {
                 $t(self.0 / rhs)
+            }
+        }
+        // Same-unit division yields a dimensionless ratio.
+        impl core::ops::Div for $t {
+            type Output = f32;
+            #[inline]
+            fn div(self, rhs: $t) -> f32 {
+                self.0 / rhs.0
             }
         }
         impl core::ops::Neg for $t {
@@ -92,6 +108,18 @@ macro_rules! impl_unit_arith {
             #[inline]
             fn sub_assign(&mut self, rhs: $t) {
                 self.0 -= rhs.0;
+            }
+        }
+        impl core::ops::MulAssign<f32> for $t {
+            #[inline]
+            fn mul_assign(&mut self, rhs: f32) {
+                self.0 *= rhs;
+            }
+        }
+        impl core::ops::DivAssign<f32> for $t {
+            #[inline]
+            fn div_assign(&mut self, rhs: f32) {
+                self.0 /= rhs;
             }
         }
         impl core::iter::Sum for $t {
@@ -169,12 +197,16 @@ mod tests {
         assert_eq!(Pt(1.0) + Pt(2.0), Pt(3.0));
         assert_eq!(Px(5.0) - Px(2.0), Px(3.0));
         assert_eq!(Pt(2.0) * 3.0, Pt(6.0));
+        assert_eq!(3.0 * Pt(2.0), Pt(6.0));
         assert_eq!(Pt(6.0) / 2.0, Pt(3.0));
+        assert_eq!(Pt(6.0) / Pt(2.0), 3.0);
         assert_eq!(-Px(1.5), Px(-1.5));
         let mut a = Pt(1.0);
         a += Pt(2.0);
         a -= Pt(0.5);
-        assert_eq!(a, Pt(2.5));
+        a *= 2.0;
+        a /= 5.0;
+        assert_eq!(a, Pt(1.0));
         let s: Pt = [Pt(1.0), Pt(2.0), Pt(3.0)].into_iter().sum();
         assert_eq!(s, Pt(6.0));
     }
