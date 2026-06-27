@@ -22,7 +22,7 @@ existing `examples_determinism` and VRT goldens (incl. `multicol-rule-solid`)
 must stay byte-identical, proven by preserving f32 operation order (no
 reassociation).
 
-**Tech Stack:** Rust, `units::{Px, Pt, F32Units}` newtypes
+**Tech Stack:** Rust, `units::{Px, Pt}` newtypes + `F32Units` conversion trait
 (`crates/fulgur/src/units.rs`), krilla draw layer, VRT PDF byte comparison
 (`crates/fulgur-vrt`), `examples_determinism` (`crates/fulgur-cli`).
 
