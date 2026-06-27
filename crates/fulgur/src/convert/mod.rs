@@ -20,6 +20,7 @@ use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, LinkSpan, LinkTarget, ShapedGlyph, ShapedGlyphRun,
     ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,
 };
+use crate::units::F32Units;
 use blitz_html::HtmlDocument;
 use skrifa::MetadataProvider;
 use std::collections::HashMap;
@@ -666,27 +667,29 @@ fn record_multicol_rule(
     let Some(geometry) = ctx.multicol_geometry.get(&node_id) else {
         return;
     };
-    // `ColumnGroupGeometry` is recorded in CSS px; convert to pt so
-    // downstream paint matches every other Drawables entry's units.
-    let groups_pt: Vec<crate::multicol_layout::ColumnGroupGeometry> = geometry
+    // `ColumnGroupGeometry` is recorded in CSS px; convert to the pt-typed
+    // ColumnRuleGeometry carrier so downstream paint matches every other
+    // Drawables entry's units. Each conversion is one multiply (byte-neutral).
+    let groups: Vec<crate::drawables::ColumnRuleGeometry> = geometry
         .groups
         .iter()
-        .map(|g| crate::multicol_layout::ColumnGroupGeometry {
-            x_offset: px_to_pt(g.x_offset),
-            y_offset: px_to_pt(g.y_offset),
-            col_w: px_to_pt(g.col_w),
-            gap: px_to_pt(g.gap),
+        .map(|g| crate::drawables::ColumnRuleGeometry {
+            x_offset: g.x_offset.px().in_pt(),
+            y_offset: g.y_offset.px().in_pt(),
+            col_w: g.col_w.px().in_pt(),
+            gap: g.gap.px().in_pt(),
             n: g.n,
-            col_heights: g.col_heights.iter().copied().map(px_to_pt).collect(),
-            paragraph_splits: Vec::new(),
+            col_heights: g
+                .col_heights
+                .iter()
+                .copied()
+                .map(|h| h.px().in_pt())
+                .collect(),
         })
         .collect();
     out.multicol_rules.insert(
         node_id,
-        crate::drawables::MulticolRuleEntry {
-            rule,
-            groups: groups_pt,
-        },
+        crate::drawables::MulticolRuleEntry { rule, groups },
     );
 }
 

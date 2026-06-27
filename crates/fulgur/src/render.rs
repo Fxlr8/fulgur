@@ -2295,7 +2295,6 @@ fn paint_multicol_rule_for_page(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    use crate::convert::px_to_pt;
     use crate::draw_primitives::stroke_line;
 
     let Some(stroke) = build_multicol_stroke(&entry.rule) else {
@@ -2311,16 +2310,19 @@ fn paint_multicol_rule_for_page(
     };
     let target_frag = &container_geom.fragments[target_pos];
 
-    let consumed: f32 = px_to_pt(
-        container_geom.fragments[..target_pos]
-            .iter()
-            .map(|f| f.height)
-            .sum::<f32>(),
-    );
-    let cutoff = px_to_pt(target_frag.height);
+    use crate::units::F32Units;
 
-    let x_base = margin_left_pt + px_to_pt(target_frag.x);
-    let y_base = margin_top_pt + px_to_pt(target_frag.y);
+    let consumed = container_geom.fragments[..target_pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<f32>()
+        .px()
+        .in_pt();
+    let cutoff = target_frag.height.px().in_pt();
+
+    let x_base = margin_left_pt.pt() + target_frag.x.px().in_pt();
+    let y_base = margin_top_pt.pt() + target_frag.y.px().in_pt();
+    let zero = 0.0_f32.pt();
 
     for group in &entry.groups {
         if group.n < 2 || group.col_heights.len() != group.n as usize {
@@ -2331,12 +2333,12 @@ fn paint_multicol_rule_for_page(
             .col_heights
             .iter()
             .copied()
-            .fold(0.0_f32, |acc, h| acc.max(h));
+            .fold(zero, crate::units::Pt::max);
         let group_bottom = group_top + max_h;
-        if group_bottom <= 0.0 || group_top >= cutoff {
+        if group_bottom <= zero || group_top >= cutoff {
             continue;
         }
-        let visible_top = group_top.max(0.0);
+        let visible_top = group_top.max(zero);
         let y_top = y_base + visible_top;
         // Mirror `MulticolRulePageable::slice_for_page`
         // (`pageable.rs:3221-3223`): subtract the portion of each
@@ -2344,16 +2346,16 @@ fn paint_multicol_rule_for_page(
         // the visible strip on this page. Without this, a column rule
         // segment whose group straddles a page boundary extends past
         // the actual visible column content.
-        let consumed_above = (visible_top - group_top).max(0.0);
-        let visible_h = (group_bottom.min(cutoff) - visible_top).max(0.0);
+        let consumed_above = (visible_top - group_top).max(zero);
+        let visible_h = (group_bottom.min(cutoff) - visible_top).max(zero);
         for i in 0..(group.n as usize - 1) {
             let h_left = (group.col_heights[i] - consumed_above)
-                .max(0.0)
+                .max(zero)
                 .min(visible_h);
             let h_right = (group.col_heights[i + 1] - consumed_above)
-                .max(0.0)
+                .max(zero)
                 .min(visible_h);
-            if h_left <= 0.0 || h_right <= 0.0 {
+            if h_left <= zero || h_right <= zero {
                 continue;
             }
             let rule_x = x_base
@@ -2362,7 +2364,14 @@ fn paint_multicol_rule_for_page(
                 + i as f32 * group.gap
                 + group.gap / 2.0;
             let y_bot = y_top + h_left.min(h_right);
-            stroke_line(canvas, rule_x, y_top, rule_x, y_bot, stroke.clone());
+            stroke_line(
+                canvas,
+                rule_x.to_f32(),
+                y_top.to_f32(),
+                rule_x.to_f32(),
+                y_bot.to_f32(),
+                stroke.clone(),
+            );
         }
     }
     canvas.surface.set_stroke(None);
