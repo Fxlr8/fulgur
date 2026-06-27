@@ -569,7 +569,19 @@ impl<'a> PaginationLayoutTree<'a> {
                 continue;
             }
             let layout = child.final_layout;
-            let child_h = layout.size.height;
+            // fulgur-2m6w: defend against a non-finite Taffy height
+            // (`+inf` / `NaN`). A `NaN` height slips past the
+            // `child_h > page_height_px + 1.0` slice gate (NaN compares
+            // false) into the normal path where `cursor_y += child_h`
+            // would poison every later page advance; `+inf` would corrupt
+            // `prev_bottom_y_in_body`. Treat either as zero height — the
+            // node still enters geometry via the `child_h <= 0.0` branch
+            // so its counter / bookmark markers survive.
+            let child_h = if layout.size.height.is_finite() {
+                layout.size.height
+            } else {
+                0.0
+            };
             let child_w = if layout.size.width > 0.0 {
                 layout.size.width
             } else {
@@ -963,7 +975,15 @@ impl<'a> PaginationLayoutTree<'a> {
                 );
                 let mut remaining = child_h - first_slice_h;
                 let mut last_slice_h = first_slice_h;
-                while remaining > 0.0 {
+                // fulgur-2m6w: cap the per-page-strip slicing at
+                // `MAX_PAGES`. `child_h` is attacker-controlled CSS
+                // (`height` / `vh`), so without this bound a few bytes of
+                // HTML (`<div style="height:99999999px">`) generate ~10^5
+                // fragments — and a non-finite height would never reduce
+                // `remaining`, looping forever. The `page_index` ceiling is
+                // load-bearing on its own (it stops the loop even when
+                // `remaining` is `+inf`); content past the cap is truncated.
+                while remaining > 0.0 && page_index < crate::MAX_PAGES {
                     page_index += 1;
                     last_slice_h = remaining.min(self.page_height_px);
                     self.geometry
@@ -978,6 +998,14 @@ impl<'a> PaginationLayoutTree<'a> {
                             height: last_slice_h,
                         });
                     remaining -= last_slice_h;
+                }
+                if remaining > 0.0 {
+                    log::warn!(
+                        "pagination: block height {child_h}px exceeds the \
+                         {}-page limit; truncating remaining content to bound \
+                         rendering (fulgur-2m6w)",
+                        crate::MAX_PAGES,
+                    );
                 }
                 cursor_y = if child_h - first_slice_h > 0.0 {
                     last_slice_h
@@ -1623,7 +1651,17 @@ fn fragment_block_subtree(
             }
         }
         let layout = child.final_layout;
-        let child_h = layout.size.height;
+        // fulgur-2m6w: same non-finite guard as `fragment_pagination_root`.
+        // A nested child with a non-finite Taffy height (`+inf` / `NaN`, or
+        // an `f32::MAX` height that overflows to `+inf` after one
+        // `cursor_y += child_h`) would otherwise poison `cursor_y` /
+        // `page_start_y` for the parent and every following sibling. Treat
+        // it as zero height so it falls into the `child_h <= 0.0` branch.
+        let child_h = if layout.size.height.is_finite() {
+            layout.size.height
+        } else {
+            0.0
+        };
         let child_w = if layout.size.width > 0.0 {
             layout.size.width
         } else {
@@ -2928,6 +2966,13 @@ fn record_subtree_fragments_at_offset(
         page_stride_px: f32,
         total_pages: u32,
         may_extend_pages: bool,
+        // fulgur-xa9q: true once we are at or below an overflow-clipping
+        // ancestor (`clips_overflow`: any non-`visible` overflow). Inside such
+        // a subtree the "START beyond budget extends" exception is suppressed
+        // for descendants, so clipped overflow cannot generate pages
+        // (page-background-003 cat box, which is `overflow:clip`). `contain:
+        // size` alone is NOT a clip and does not set this boundary.
+        containment_boundary: bool,
         // Subtree-offset and border-box size of the nearest positioned
         // ancestor of `node_id` — the containing block that `node_id`'s
         // out-of-flow children resolve their explicit insets against (CSS
@@ -3021,8 +3066,23 @@ fn record_subtree_fragments_at_offset(
             // on page 1 (WPT fixedpos-008 ref-side). Snap final_y
             // toward integer multiples of page_h before paging.
             let start_ratio = final_y_for_paging / page_h_px;
-            let snapped_start_ratio = if (start_ratio - start_ratio.round()).abs() < 1e-3 {
-                start_ratio.round()
+            let start_round = start_ratio.round();
+            // fulgur-xa9q: the Stylo `Nvh` sub-px residual vs `page_h_px` scales
+            // with the `vh` MULTIPLE summed into `final_y_for_paging` — Stylo's
+            // per-`vh`-unit rounding error is multiplied by the vh count, so a
+            // `top:400vh` lands ~1.35px short of `4*page_h` and a `top:500vh`
+            // further, regardless of nesting depth. A flat `1e-3` tolerance
+            // misses this and mis-pages the element onto the page boundary so
+            // its line splits and clips (fixedpos-005 "fifth", fixedpos-008
+            // page 6). Scale the tolerance by the rounded page (≈ the vh
+            // multiple), capped at 1% of the page (~half a line) so extreme
+            // page counts cannot grow the window unbounded. NOTE: depth-scaling
+            // was tried and regresses fixedpos-008 — the residual tracks the vh
+            // multiple, not nesting depth (Codex review on PR #498).
+            let snap_tol = (1e-3 * start_round.abs().max(1.0)).min(0.01);
+            let start_is_snapped = (start_ratio - start_round).abs() < snap_tol;
+            let snapped_start_ratio = if start_is_snapped {
+                start_round
             } else {
                 start_ratio
             };
@@ -3040,16 +3100,71 @@ fn record_subtree_fragments_at_offset(
             if is_size_contained {
                 last_page_f = first_page_f;
             }
+            // fulgur-xa9q: the start snap can advance `first_page_f` onto the
+            // next page while `last_page_f` still floors from the UNSNAPPED
+            // bottom; for a box shorter than the corrected residual that would
+            // make `first_page_f > last_page_f` and drop the fragment entirely
+            // (Codex review). A box must appear on at least its (snapped) start
+            // page, so never let the last page precede the first.
+            last_page_f = last_page_f.max(first_page_f);
+            // fulgur-xa9q: an abs whose START is at/beyond the existing in-flow
+            // page budget extends the page count even with in-flow content
+            // present (Chrome-compatible) — UNLESS it sits inside a containment
+            // /clip boundary, where overflow is invisible and must not paginate.
+            // A tall abs anchored WITHIN the budget stays clamped (it has an
+            // in-budget page to clip onto) so short-flow layouts do not grow.
+            let node_may_extend =
+                may_extend_pages || (first_page_f >= total_pages as f32 && !containment_boundary);
             if first_page_f.is_finite()
                 && last_page_f.is_finite()
                 && first_page_f <= last_page_f
-                && (may_extend_pages || first_page_f < total_pages as f32)
+                && (node_may_extend || first_page_f < total_pages as f32)
             {
-                let first_page = first_page_f as u32;
-                let last_page = if may_extend_pages {
-                    last_page_f as u32
+                // fulgur-2m6w: clamp the emitted page index to `MAX_PAGES`,
+                // but ONLY on the page-EXTENSION path. `first_page_f` /
+                // `last_page_f` derive from the abs element's viewport-CB
+                // resolved Y, which is attacker-controlled CSS
+                // (`position:absolute; top:99999999px`). When the element
+                // extends the page count (`node_may_extend`) an unclamped
+                // value lands at page ~10^5, `descendant_total_pages`
+                // propagates that to `implied_page_count`, and `render_v2`
+                // allocates + renders every intervening page — the same
+                // small-input DoS the body-direct slice cap blocks. This
+                // `walk` runs for the abs root AND nested abs descendants,
+                // so one clamp bounds both.
+                //
+                // The NON-extending branch is already bounded by
+                // `total_pages` (the in-flow page count, itself capped /
+                // input-proportional), so it must stay UNCLAMPED: clamping
+                // `first_page` while `last_page` keeps `min(.., total_pages-1)`
+                // would emit a spurious fragment run from `MAX_PAGES` through
+                // the real (in-budget) page when `total_pages > MAX_PAGES`
+                // from many ordinary in-flow pages (Codex review on PR #501).
+                let (first_page, last_page) = if node_may_extend {
+                    (
+                        (first_page_f as u32).min(crate::MAX_PAGES),
+                        (last_page_f as u32).min(crate::MAX_PAGES),
+                    )
                 } else {
-                    (last_page_f as u32).min(total_pages.saturating_sub(1))
+                    (
+                        first_page_f as u32,
+                        (last_page_f as u32).min(total_pages.saturating_sub(1)),
+                    )
+                };
+                // fulgur-xa9q: page ASSIGNMENT snaps the start ratio to the page
+                // grid (`first_page_f` via `snapped_start_ratio`), but the stored
+                // Y must use the SAME snapped origin. Otherwise a `top: 100vh`
+                // abs lands ~1px off the in-flow fragmenter's exact page-top
+                // placement (the Stylo `100vh` vs `page_h_px` sub-px residual),
+                // producing the fixedpos-005/006/008 page-2 pixel diff once the
+                // page count matches. Snap only the paging origin, and only for
+                // top-anchored subtrees (`page_stride_px == page_h_px`); the
+                // bottom-only repeat idiom uses a rounded stride and must keep
+                // its raw origin.
+                let paging_origin_y = if page_stride_px == page_h_px && start_is_snapped {
+                    snapped_start_ratio * page_h_px
+                } else {
+                    final_y_for_paging
                 };
                 let entry = geometry.entry(node_id).or_default();
                 entry.fragments.clear();
@@ -3060,7 +3175,7 @@ fn record_subtree_fragments_at_offset(
                     let stored_y = if is_monolithic_continuation {
                         -body_offset.1
                     } else {
-                        final_y_for_paging - (page_index as f32) * page_stride_px - body_offset.1
+                        paging_origin_y - (page_index as f32) * page_stride_px - body_offset.1
                     };
                     let stored_h = if is_monolithic_continuation {
                         let consumed = (page_index - first_page) as f32 * page_h_px;
@@ -3153,6 +3268,7 @@ fn record_subtree_fragments_at_offset(
                             page_stride_px,
                             descendant_total_pages,
                             may_extend_pages,
+                            containment_boundary || clips_overflow(node),
                             child_cb_anchor,
                             child_cb_size,
                             depth + 1,
@@ -3184,6 +3300,7 @@ fn record_subtree_fragments_at_offset(
                 page_stride_px,
                 descendant_total_pages,
                 may_extend_pages,
+                containment_boundary || clips_overflow(node),
                 child_cb_anchor,
                 child_cb_size,
                 depth + 1,
@@ -3205,6 +3322,8 @@ fn record_subtree_fragments_at_offset(
         page_stride_px,
         total_pages,
         may_extend_pages,
+        // fulgur-xa9q: the subtree root starts outside any containment boundary.
+        false,
         // Initial CB: the subtree root is the body-direct abs (positioned),
         // so it overrides these on the first frame — seed with the root's own
         // anchor/size for correctness if that ever changes.
@@ -3247,6 +3366,36 @@ fn has_contain_size(node: &blitz_dom::Node) -> bool {
         s.get_box()
             .clone_contain()
             .contains(::style::values::computed::box_::Contain::SIZE)
+    })
+}
+
+/// Whether `node` establishes a clip context that hides its overflowing
+/// descendants from painting — used as the page-extension boundary
+/// (fulgur-xa9q): a descendant whose paint overflow is clipped here cannot
+/// generate pages even when it lands past the in-flow budget.
+///
+/// Two conditions, both required:
+///   1. `overflow` is not `visible` on some axis (`hidden`/`clip`/`scroll`/
+///      `auto` all clip; mirrors `convert::style::overflow`).
+///   2. the box actually establishes a clip context — a block-level box or an
+///      atomic inline / BFC root. A non-replaced `display: inline` box ignores
+///      `overflow` and the renderer pushes no clip scope for it, so an inline
+///      wrapper like `<span style="overflow:hidden">` must NOT act as a
+///      boundary (Codex review on PR #498).
+///
+/// NOTE: `contain: size` is deliberately NOT treated as a clip — it sizes the
+/// box without its contents but leaves overflow visible, so a
+/// `contain:size; overflow:visible` box must still let descendants extend.
+fn clips_overflow(node: &blitz_dom::Node) -> bool {
+    use ::style::values::computed::Overflow as Ov;
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    node.primary_styles().is_some_and(|s| {
+        let clips = s.clone_overflow_x() != Ov::Visible || s.clone_overflow_y() != Ov::Visible;
+        if !clips {
+            return false;
+        }
+        let display = s.clone_display();
+        display.outside() == DisplayOutside::Block || display.inside() != DisplayInside::Flow
     })
 }
 
@@ -3703,6 +3852,97 @@ mod tests {
             vec![0, 0, 1],
             "body page 0, first child page 0, second child page 1, got {pages:?}"
         );
+    }
+
+    /// Find the first element node carrying `id="<id>"`.
+    fn find_by_id(doc: &blitz_dom::BaseDocument, id: &str) -> Option<usize> {
+        fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, target: &str) -> Option<usize> {
+            let node = doc.get_node(node_id)?;
+            if let Some(ed) = node.element_data()
+                && let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
+                && attr_id.value.as_str() == target
+            {
+                return Some(node_id);
+            }
+            for &child in &node.children {
+                if let Some(found) = walk(doc, child, target) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        walk(doc, doc.root_element().id, id)
+    }
+
+    /// fulgur-2m6w: a tiny input with a pathologically tall CSS height
+    /// must not generate an unbounded number of page strips. Without the
+    /// page cap a `height: 99999999px` div on an 800px strip slices into
+    /// ~125 000 fragments/pages, which downstream (`render.rs`) turns into
+    /// a `vec![Vec::new(); page_count]` allocation plus a per-page render
+    /// loop — a CPU/memory-exhaustion DoS from a few bytes of untrusted
+    /// HTML. The slicing loop is clamped to `MAX_PAGES`.
+    #[test]
+    fn pathological_tall_block_is_page_capped() {
+        let html = r#"<html><body><div style="height: 99999999px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages <= crate::MAX_PAGES + 1,
+            "page count must be clamped to ~MAX_PAGES ({}), got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-2m6w: Stylo/Taffy clamps an absurd `<length>` to `f32::MAX`
+    /// (≈3.4e38) rather than `+inf`, so `height: 1e39px` is the true
+    /// worst-case *finite* input — without the cap it would slice into
+    /// ~4e35 strips (an effective hang, and `page_index` (u32) would wrap
+    /// /panic long before). The cap bounds it to `MAX_PAGES` all the same.
+    #[test]
+    fn f32_max_height_block_is_page_capped() {
+        let html = r#"<html><body><div style="height: 1e39px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages <= crate::MAX_PAGES + 1,
+            "f32::MAX height must be clamped to ~MAX_PAGES ({}), got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-2m6w: a non-finite Taffy height (`+inf` / `NaN`) is treated
+    /// as zero so it can never reach the slicing loop (where `+inf` would
+    /// make `remaining -= last_slice_h` loop forever) nor poison the
+    /// `cursor_y` advance. CSS clamps to `f32::MAX` and cannot produce a
+    /// non-finite height, so inject one directly into the resolved layout.
+    /// The node still enters geometry (via the `child_h <= 0.0` branch) and
+    /// the document stays single-page.
+    #[test]
+    fn non_finite_height_treated_as_zero() {
+        use std::ops::DerefMut;
+        for bad in [f32::INFINITY, f32::NAN] {
+            let html = r#"<html><body><div id="x">hi</div></body></html>"#;
+            let mut doc = parse(html, 600.0);
+            let id = find_by_id(doc.deref_mut(), "x").expect("div#x");
+            doc.deref_mut()
+                .get_node_mut(id)
+                .expect("div#x")
+                .final_layout
+                .size
+                .height = bad;
+            let table = run_pass(&mut doc, 800.0);
+            assert!(
+                implied_page_count(&table) == 1,
+                "non-finite height {bad} must not paginate; got {} pages",
+                implied_page_count(&table),
+            );
+            assert!(
+                table.contains_key(&id),
+                "non-finite-height node must still be recorded in geometry",
+            );
+        }
     }
 
     /// fulgur-i5a: `overflow: hidden` is a pure visual effect that must
@@ -4389,6 +4629,91 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    /// fulgur-2m6w: a body-direct `position:absolute` node positioned far
+    /// beyond the page budget (`top: 99999999px`) must not extend the page
+    /// count without bound. The abs path emits one fragment per intersected
+    /// page and `descendant_total_pages` feeds `implied_page_count`, so an
+    /// unclamped page index from a tiny box makes `render_v2` allocate and
+    /// render ~10^5 pages — the same small-input DoS the body-direct slice
+    /// cap blocks, reached via the absolute-positioning path (Codex review
+    /// on PR #501). Without the clamp this input lands at page ~125000;
+    /// page indices are clamped to `MAX_PAGES`.
+    #[test]
+    fn position_absolute_far_offset_is_page_capped() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; top: 99999999px; width: 10px; height: 10px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            1,
+            600.0,
+            800.0,
+            None,
+        );
+        // The fragment must still be emitted (not silently dropped) — just
+        // pinned to the cap page rather than page ~125000.
+        let max_page = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.page_index)
+            .max()
+            .expect("abs fragment must be emitted");
+        assert!(
+            max_page <= crate::MAX_PAGES,
+            "abs page index must be clamped to MAX_PAGES ({}), got {max_page}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-2m6w (Codex review on PR #501): the `MAX_PAGES` clamp must
+    /// apply ONLY to the page-extension path. When `total_pages` legitimately
+    /// exceeds `MAX_PAGES` (many ordinary in-flow pages — input-proportional,
+    /// not amplified), a NON-extending absolute element starting at an
+    /// in-budget page above the cap must emit a single fragment at its real
+    /// page, not a spurious run from `MAX_PAGES` through the real page.
+    #[test]
+    fn position_absolute_in_budget_start_above_cap_not_clamped() {
+        let page_h = 800.0_f32;
+        let start_page = crate::MAX_PAGES + 20_000; // > MAX_PAGES
+        let total_pages = start_page + 5; // in-budget
+        let top = page_h * start_page as f32;
+        // In-flow `<p>` makes `body_has_in_flow_content` true, so
+        // `may_extend_pages` is false → the non-extending branch.
+        let html = format!(
+            r#"<html><body style="margin:0">
+                 <p>in-flow</p>
+                 <div style="position:absolute; top:{top}px; width:10px; height:10px"></div>
+               </body></html>"#
+        );
+        let mut doc = parse(&html, 600.0);
+        let mut geom = PaginationGeometryTable::new();
+        super::append_position_absolute_body_direct_fragments(
+            &mut geom,
+            doc.deref_mut(),
+            total_pages,
+            600.0,
+            page_h,
+            None,
+        );
+        // Isolate the 10px-wide abs node's fragments.
+        let abs_pages: Vec<u32> = geom
+            .values()
+            .filter(|g| g.fragments.iter().any(|f| (f.width - 10.0).abs() < 0.5))
+            .flat_map(|g| g.fragments.iter().map(|f| f.page_index))
+            .collect();
+        assert_eq!(
+            abs_pages,
+            vec![start_page],
+            "non-extending in-budget abs must emit only at its real page \
+             (no spurious clamp run), got {abs_pages:?}",
+        );
+    }
+
     #[test]
     fn position_absolute_body_direct_expanded_pages_reach_later_text() {
         let html = r#"
@@ -4459,24 +4784,8 @@ h2 { string-set: chapter-title content(text); }
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
-        fn find_by_id(doc: &blitz_dom::BaseDocument, id: &str) -> Option<usize> {
-            fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, target: &str) -> Option<usize> {
-                let node = doc.get_node(node_id)?;
-                if let Some(ed) = node.element_data()
-                    && let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
-                    && attr_id.value.as_str() == target
-                {
-                    return Some(node_id);
-                }
-                for &child in &node.children {
-                    if let Some(found) = walk(doc, child, target) {
-                        return Some(found);
-                    }
-                }
-                None
-            }
-            walk(doc, doc.root_element().id, id)
-        }
+        // Reuses the module-level `find_by_id` helper (see the
+        // pagination-cap tests) instead of redefining it here.
         let tiny_id = find_by_id(doc.deref_mut(), "tiny").expect("tiny abs node");
         doc.deref_mut()
             .get_node_mut(tiny_id)
@@ -4695,6 +5004,57 @@ h2 { string-set: chapter-title content(text); }
             h2.y >= 100.0,
             "block sibling after split grid must continue after the grid tail; got y={} (pre-fix: y=0 overlaps the tail)",
             h2.y
+        );
+    }
+
+    /// fulgur-2m6w: a nested child with a non-finite Taffy height must not
+    /// poison `cursor_y` inside the recursive splitter. The grid pattern
+    /// routes the section through `fragment_block_subtree` (250px content vs
+    /// 150px strip); a `+inf` height injected into one cell is sanitized to
+    /// zero so the recursion neither panics nor produces a non-finite /
+    /// unbounded page count, and the node is still recorded in geometry.
+    #[test]
+    fn fragment_block_subtree_non_finite_child_height_is_sanitized() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 220px;">
+                <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                  <div id="bad" style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                  <div style="height: 100px; width: 100px"></div>
+                </div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let bad = find_by_id(doc.deref_mut(), "bad").expect("div#bad");
+        doc.deref_mut()
+            .get_node_mut(bad)
+            .expect("div#bad")
+            .final_layout
+            .size
+            .height = f32::INFINITY;
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 150.0, &table);
+        // Load-bearing assertion: without the guard the injected `+inf`
+        // reaches a Fragment height and poisons `cursor_y`, so emitted
+        // fragments carry non-finite `y` / `height`. The guard zeroes it,
+        // keeping every emitted coordinate finite.
+        for (id, g) in geom.iter() {
+            for f in &g.fragments {
+                assert!(
+                    f.y.is_finite() && f.height.is_finite(),
+                    "node {id}: non-finite fragment y={} height={} leaked through \
+                     fragment_block_subtree",
+                    f.y,
+                    f.height,
+                );
+            }
+        }
+        assert!(
+            geom.contains_key(&bad),
+            "nested non-finite-height node must still be recorded",
         );
     }
 

@@ -223,7 +223,6 @@ fn nested_abs_height_drives_page_count() {
 /// fulgur-puml では未対応 — naive な may_extend 緩和は fixedpos-008 /
 /// page-background-003 を regress させると bisect で判明したため別 issue に分離。
 #[test]
-#[ignore = "tracked by fulgur-xa9q: abs page extension with in-flow content"]
 fn abs_extends_pages_despite_in_flow_content() {
     let html = r#"<!doctype html><html><head><style>
         @page { size: 100pt 100pt; margin: 0; }
@@ -401,4 +400,57 @@ fn abs_bottom_margin_offsets_above_sibling() {
         (29.0..=31.0).contains(&gap),
         "bottom:0 + margin-bottom:30pt must sit ~30pt above a bottom:0 sibling; got baselines {ys:?} (gap {gap})"
     );
+}
+
+/// fulgur-xa9q: a nested `position: absolute` whose start lands beyond the
+/// in-flow page budget must (1) EXTEND the page count and (2) actually RENDER
+/// its text on the extended page — cleanly anchored at the page top, not split
+/// across a page boundary by the accumulated `Nvh` sub-px residual.
+///
+/// This guards the blind spot that hid the bug through fulgur-puml: the prior
+/// `nested_abs_height_drives_page_count` asserted ONLY the page count, so the
+/// nested text could (and did) silently vanish while the count looked right.
+/// Uses the DEFAULT page (no `@page`) so the Stylo `Nvh` vs `page_h_px`
+/// residual is present — the exact condition that previously mis-paged the
+/// line onto a boundary and clipped it away.
+#[test]
+fn nested_abs_text_renders_cleanly_on_extended_page() {
+    use support::content_stream::{count_ops, text_matrix_ys};
+    let html = r#"<!doctype html><html><head><style>body{margin:0}</style></head><body>
+      <div style="height:200vh;">flow</div>
+      <div style="position:absolute; top:100vh;">
+        <div style="position:absolute; top:200vh;">nestedtext</div>
+      </div>
+    </body></html>"#;
+    let engine = Engine::builder().build();
+    let pdf = engine.render_html(html).expect("render");
+
+    // in-flow 200vh = pages 1-2; nested abs at 100vh+200vh = 300vh extends to
+    // the 4th page (its start is the top of page 4).
+    assert_eq!(
+        page_count(&pdf),
+        4,
+        "nested abs at effective 300vh must extend the page count to 4"
+    );
+
+    // Exactly two text runs render: the in-flow "flow" and the nested
+    // "nestedtext". A dropped nested line would give 1; a boundary-split line
+    // would give 3. Skips gracefully when qpdf is unavailable.
+    if let Some(ops) = count_ops(&pdf) {
+        assert_eq!(
+            ops.bt, 2,
+            "expected exactly 2 text runs (flow + nested); nested text was dropped or split"
+        );
+    }
+
+    // Both runs sit at the top of their page: the nested text's baseline must
+    // equal the in-flow text's page-top baseline (the layer-2b snap), proving
+    // it is not offset onto a page boundary.
+    if let Some(ys) = text_matrix_ys(&pdf) {
+        assert_eq!(ys.len(), 2, "expected two text-run baselines");
+        assert!(
+            (ys[0] - ys[1]).abs() < 0.5,
+            "nested abs text must share the in-flow text's page-top baseline; got {ys:?}"
+        );
+    }
 }

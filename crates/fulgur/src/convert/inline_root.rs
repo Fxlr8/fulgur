@@ -613,11 +613,14 @@ pub(super) fn extract_paragraph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blitz_adapter::BaseDocument;
     use crate::image::ImageFormat;
     use crate::paragraph::{
-        InlineBoxItem, InlineImage, LineItem, ShapedGlyphRun, ShapedLine, TextDecoration,
-        VerticalAlign,
+        InlineBoxItem, InlineImage, LineItem, LinkTarget, ShapedGlyphRun, ShapedLine,
+        TextDecoration, VerticalAlign,
     };
+    use blitz_html::HtmlDocument;
+    use std::ops::Deref;
     use std::sync::Arc;
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -1054,10 +1057,7 @@ mod tests {
         assert!(approx(image_ys(&lines[1].items)[0], 28.0));
     }
 
-    // ── resolve_enclosing_anchor ──────────────────────────────────────────────
-
-    use blitz_html::HtmlDocument;
-    use std::ops::Deref;
+    // ── Helpers for Blitz-backed tests ────────────────────────────────────────
 
     fn parse_doc(html: &str) -> HtmlDocument {
         crate::blitz_adapter::parse_and_layout(html, 595.0, 842.0, &[], false)
@@ -1081,84 +1081,108 @@ mod tests {
 
     fn find_tag(doc: &HtmlDocument, tag: &str) -> usize {
         let root = doc.root_element();
-        find_first_by_tag(doc.deref(), root.id, tag).unwrap_or_else(|| panic!("<{tag}> not found"))
+        find_first_by_tag(doc.deref(), root.id, tag)
+            .unwrap_or_else(|| panic!("<{tag}> not found in document"))
     }
 
+    fn make_paragraph_entry(baselines: &[f32]) -> crate::drawables::ParagraphEntry {
+        crate::drawables::ParagraphEntry {
+            lines: baselines
+                .iter()
+                .map(|&b| ShapedLine {
+                    height: 16.0,
+                    baseline: b,
+                    items: vec![],
+                })
+                .collect(),
+            opacity: 1.0,
+            visible: true,
+            id: None,
+        }
+    }
+
+    fn make_block_entry_plain() -> crate::drawables::BlockEntry {
+        crate::drawables::BlockEntry {
+            style: crate::draw_primitives::BlockStyle::default(),
+            opacity: 1.0,
+            visible: true,
+            id: None,
+            layout_size: None,
+            clip_descendants: vec![],
+            opacity_descendants: vec![],
+        }
+    }
+
+    // ── resolve_enclosing_anchor ──────────────────────────────────────────────
+
     #[test]
-    fn resolve_enclosing_anchor_returns_none_when_no_anchor() {
-        let doc = parse_doc(r#"<!doctype html><html><body><p id="p">text</p></body></html>"#);
-        let p_id = find_tag(&doc, "p");
+    fn resolve_enclosing_anchor_returns_none_when_no_anchor_ancestor() {
+        let doc = parse_doc("<html><body><div><span>text</span></div></body></html>");
+        let span_id = find_tag(&doc, "span");
         assert!(
-            resolve_enclosing_anchor(doc.deref(), p_id).is_none(),
-            "no <a> ancestor → None"
+            super::resolve_enclosing_anchor(doc.deref(), span_id).is_none(),
+            "no <a> ancestor must return None"
         );
     }
 
     #[test]
-    fn resolve_enclosing_anchor_returns_external_link() {
+    fn resolve_enclosing_anchor_external_href_returns_external_target() {
         let doc = parse_doc(
-            r#"<!doctype html><html><body><a href="https://example.com"><span>link</span></a></body></html>"#,
+            r#"<html><body><a href="https://example.com"><span>link</span></a></body></html>"#,
         );
         let span_id = find_tag(&doc, "span");
-        let result = resolve_enclosing_anchor(doc.deref(), span_id);
-        assert!(result.is_some(), "should find <a> ancestor");
-        let (_, span) = result.unwrap();
-        match &span.target {
-            crate::paragraph::LinkTarget::External(url) => {
+        let result = super::resolve_enclosing_anchor(doc.deref(), span_id);
+        assert!(result.is_some(), "external href must produce Some");
+        let (_anchor_id, link_span) = result.unwrap();
+        match &link_span.target {
+            LinkTarget::External(url) => {
                 assert_eq!(url.as_str(), "https://example.com");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected External, got {:?}", other),
         }
     }
 
     #[test]
-    fn resolve_enclosing_anchor_returns_internal_link_for_fragment() {
-        let doc = parse_doc(
-            r##"<!doctype html><html><body><a href="#section"><em>anchor</em></a></body></html>"##,
-        );
-        let em_id = find_tag(&doc, "em");
-        let result = resolve_enclosing_anchor(doc.deref(), em_id);
-        assert!(result.is_some(), "should find <a> ancestor");
-        let (_, span) = result.unwrap();
-        match &span.target {
-            crate::paragraph::LinkTarget::Internal(frag) => {
+    fn resolve_enclosing_anchor_internal_href_returns_internal_target() {
+        let doc =
+            parse_doc(r##"<html><body><a href="#section"><span>link</span></a></body></html>"##);
+        let span_id = find_tag(&doc, "span");
+        let result = super::resolve_enclosing_anchor(doc.deref(), span_id);
+        assert!(result.is_some(), "fragment href must produce Some");
+        match &result.unwrap().1.target {
+            LinkTarget::Internal(frag) => {
                 assert_eq!(frag.as_str(), "section");
             }
-            other => panic!("expected Internal, got {other:?}"),
+            other => panic!("expected Internal, got {:?}", other),
         }
     }
 
     #[test]
-    fn resolve_enclosing_anchor_returns_none_for_empty_href() {
-        let doc = parse_doc(
-            r#"<!doctype html><html><body><a href=""><strong>x</strong></a></body></html>"#,
-        );
-        let strong_id = find_tag(&doc, "strong");
-        // Empty href → None (href.is_empty() guard).
+    fn resolve_enclosing_anchor_empty_href_returns_none() {
+        let doc = parse_doc(r#"<html><body><a href=""><span>link</span></a></body></html>"#);
+        let span_id = find_tag(&doc, "span");
         assert!(
-            resolve_enclosing_anchor(doc.deref(), strong_id).is_none(),
-            "empty href → None"
+            super::resolve_enclosing_anchor(doc.deref(), span_id).is_none(),
+            "empty href must return None"
         );
     }
 
     #[test]
     fn resolve_enclosing_anchor_returns_none_when_a_has_no_href() {
-        let doc =
-            parse_doc(r#"<!doctype html><html><body><a><span>no href</span></a></body></html>"#);
+        let doc = parse_doc(r#"<html><body><a><span>no href</span></a></body></html>"#);
         let span_id = find_tag(&doc, "span");
         assert!(
-            resolve_enclosing_anchor(doc.deref(), span_id).is_none(),
+            super::resolve_enclosing_anchor(doc.deref(), span_id).is_none(),
             "<a> with no href attr → None"
         );
     }
 
     #[test]
     fn resolve_enclosing_anchor_includes_alt_text_when_anchor_has_text() {
-        let doc = parse_doc(
-            r#"<!doctype html><html><body><a href="https://example.com">Click here</a></body></html>"#,
-        );
+        let doc =
+            parse_doc(r#"<html><body><a href="https://example.com">Click here</a></body></html>"#);
         let a_id = find_tag(&doc, "a");
-        let result = resolve_enclosing_anchor(doc.deref(), a_id);
+        let result = super::resolve_enclosing_anchor(doc.deref(), a_id);
         let (_, span) = result.expect("anchor finds itself");
         assert!(
             span.alt_text.is_some(),
@@ -1173,200 +1197,211 @@ mod tests {
         // (Nested <a> elements are invalid HTML5 and would be parsed as
         // siblings, so we use a real multi-element nesting instead.)
         let doc = parse_doc(
-            r#"<!doctype html><html><body><a href="https://example.com"><div><p><span>deep</span></p></div></a></body></html>"#,
+            r#"<html><body><a href="https://example.com"><div><p><span>deep</span></p></div></a></body></html>"#,
         );
         let span_id = find_tag(&doc, "span");
-        let result = resolve_enclosing_anchor(doc.deref(), span_id);
+        let result = super::resolve_enclosing_anchor(doc.deref(), span_id);
         let (_, span) = result.expect("anchor found via multi-level walk");
         match &span.target {
-            crate::paragraph::LinkTarget::External(url) => {
+            LinkTarget::External(url) => {
                 assert_eq!(url.as_str(), "https://example.com");
             }
             other => panic!("expected External, got {other:?}"),
         }
     }
 
-    // ── pageable_last_baseline_from_drawables ─────────────────────────────────
-
-    fn make_para_entry(lines: Vec<ShapedLine>) -> crate::drawables::ParagraphEntry {
-        crate::drawables::ParagraphEntry {
-            lines,
-            opacity: 1.0,
-            visible: true,
-            id: None,
-        }
-    }
-
-    fn make_block_entry_with_inset(
-        border_top: f32,
-        padding_top: f32,
-    ) -> crate::drawables::BlockEntry {
-        crate::drawables::BlockEntry {
-            style: crate::draw_primitives::BlockStyle {
-                border_widths: [border_top, 0.0, 0.0, 0.0],
-                padding: [padding_top, 0.0, 0.0, 0.0],
-                ..Default::default()
-            },
-            opacity: 1.0,
-            visible: true,
-            id: None,
-            layout_size: None,
-            clip_descendants: vec![],
-            opacity_descendants: vec![],
-        }
-    }
-
-    fn make_clip_block_entry() -> crate::drawables::BlockEntry {
-        crate::drawables::BlockEntry {
-            style: crate::draw_primitives::BlockStyle {
-                overflow_x: crate::draw_primitives::Overflow::Clip,
-                ..Default::default()
-            },
-            opacity: 1.0,
-            visible: true,
-            id: None,
-            layout_size: None,
-            clip_descendants: vec![],
-            opacity_descendants: vec![],
-        }
-    }
-
     #[test]
-    fn pageable_baseline_paragraph_no_block_entry_returns_line_baseline() {
-        // Branch 1: paragraph entry present, no block_styles entry → top_inset=0.
-        // Result = 0 + line.baseline = line.baseline.
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let mut out = crate::drawables::Drawables::new();
-        let fake_id = 999_usize;
-        out.paragraphs
-            .insert(fake_id, make_para_entry(vec![text_line(16.0, 12.0)]));
-        let result = pageable_last_baseline_from_drawables(doc.deref(), &out, fake_id, 0);
-        assert_eq!(result, Some(12.0), "top_inset=0 → Some(line.baseline=12)");
-    }
-
-    #[test]
-    fn pageable_baseline_uses_last_line_when_multiple_lines() {
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let mut out = crate::drawables::Drawables::new();
-        out.paragraphs.insert(
-            999,
-            make_para_entry(vec![text_line(16.0, 12.0), text_line(14.0, 28.0)]),
-        );
-        let result = pageable_last_baseline_from_drawables(doc.deref(), &out, 999, 0);
-        assert_eq!(result, Some(28.0), "last line baseline=28 must be used");
-    }
-
-    #[test]
-    fn pageable_baseline_with_block_entry_adds_top_inset() {
-        // top_inset = border_widths[0] + padding[0] = 3 + 7 = 10.
-        // line.baseline = 12 → result = 10 + 12 = 22.
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let mut out = crate::drawables::Drawables::new();
-        out.paragraphs
-            .insert(999, make_para_entry(vec![text_line(16.0, 12.0)]));
-        out.block_styles
-            .insert(999, make_block_entry_with_inset(3.0, 7.0));
-        let result = pageable_last_baseline_from_drawables(doc.deref(), &out, 999, 0);
-        assert_eq!(result, Some(22.0), "top_inset=10 → Some(22)");
-    }
-
-    #[test]
-    fn pageable_baseline_empty_paragraph_falls_through_to_none() {
-        // Paragraph entry with no lines: `para.lines.last()` is None, so
-        // branch 1 does NOT return early. Branch 2 walks dom children; a
-        // fake node_id 999 is not in the real document so get_node returns
-        // None → loop produces nothing → returns None.
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let mut out = crate::drawables::Drawables::new();
-        out.paragraphs.insert(999, make_para_entry(vec![])); // empty lines
-        let result = pageable_last_baseline_from_drawables(doc.deref(), &out, 999, 0);
-        assert!(
-            result.is_none(),
-            "empty-lines paragraph → None (no dom children)"
-        );
-    }
-
-    #[test]
-    fn pageable_baseline_returns_none_at_max_depth() {
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let out = crate::drawables::Drawables::new();
-        let result =
-            pageable_last_baseline_from_drawables(doc.deref(), &out, 0, crate::MAX_DOM_DEPTH);
-        assert!(result.is_none(), "depth >= MAX_DOM_DEPTH → None");
-    }
-
-    #[test]
-    fn pageable_baseline_recurses_to_child_with_paragraph() {
-        // Use a real Blitz document so child IDs are in the DOM. Walk from
-        // a parent node that has no paragraph entry directly; its child
-        // paragraph entry provides the baseline.
+    fn resolve_enclosing_anchor_returns_anchor_node_id_not_span() {
         let doc =
-            parse_doc(r#"<!doctype html><html><body><section><p>text</p></section></body></html>"#);
-        // Find the <section> and <p> node ids.
-        let section_id = find_tag(&doc, "section");
-        let p_id = find_tag(&doc, "p");
-
-        let mut out = crate::drawables::Drawables::new();
-        // Register a paragraph for the <p> but not for <section>.
-        out.paragraphs
-            .insert(p_id, make_para_entry(vec![text_line(14.0, 10.0)]));
-
-        // Call on section (no paragraph there) → should find the <p> child and
-        // return its baseline (possibly adjusted by child y offset, which Blitz
-        // will have set). The result must be Some (not None).
-        let result = pageable_last_baseline_from_drawables(doc.deref(), &out, section_id, 0);
-        assert!(
-            result.is_some(),
-            "section has <p> child with paragraph → Some"
+            parse_doc(r#"<html><body><a href="https://x.com"><span>x</span></a></body></html>"#);
+        let span_id = find_tag(&doc, "span");
+        let anchor_id = find_tag(&doc, "a");
+        let (returned_id, _) = super::resolve_enclosing_anchor(doc.deref(), span_id).unwrap();
+        assert_eq!(
+            returned_id, anchor_id,
+            "returned id must be the <a> node's id, not the span's"
         );
     }
 
     // ── inline_box_baseline_offset_from_drawables ─────────────────────────────
 
     #[test]
-    fn inline_box_baseline_returns_none_for_overflow_clip_block() {
-        // Guard: block entry with overflow_x=Clip → immediate None.
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
+    fn inline_box_baseline_overflow_clip_x_returns_none() {
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
         let mut out = crate::drawables::Drawables::new();
-        out.block_styles.insert(999, make_clip_block_entry());
-        let result = inline_box_baseline_offset_from_drawables(doc.deref(), &out, 999);
-        assert!(result.is_none(), "overflow:clip guard → None");
+        let node_id = 9999;
+        let mut entry = make_block_entry_plain();
+        entry.style = crate::draw_primitives::BlockStyle {
+            overflow_x: crate::draw_primitives::Overflow::Clip,
+            ..Default::default()
+        };
+        out.block_styles.insert(node_id, entry);
+        let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
+        assert!(
+            result.is_none(),
+            "overflow_x=Clip must short-circuit to None"
+        );
     }
 
     #[test]
-    fn inline_box_baseline_returns_some_when_paragraph_present() {
-        // Node 999 has a paragraph entry (no block entry → no overflow check hit).
-        // Result = pageable_last_baseline_from_drawables(…, 999, 0)
-        //        = Some(0 + line.baseline) = Some(12).
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
+    fn inline_box_baseline_no_overflow_clip_delegates_to_pageable_last() {
+        // No block entry → overflow-clip guard skipped → pageable_last called.
+        // A paragraph entry for node_id means branch 1 fires and returns the baseline.
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
         let mut out = crate::drawables::Drawables::new();
+        let node_id = 9998;
         out.paragraphs
-            .insert(999, make_para_entry(vec![text_line(16.0, 12.0)]));
-        let result = inline_box_baseline_offset_from_drawables(doc.deref(), &out, 999);
-        assert_eq!(result, Some(12.0), "paragraph → Some(baseline=12)");
+            .insert(node_id, make_paragraph_entry(&[12.0]));
+        let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
+        assert_eq!(
+            result,
+            Some(12.0),
+            "no overflow clip + paragraph entry → Some(baseline)"
+        );
     }
 
     #[test]
     fn inline_box_baseline_overflow_visible_block_does_not_short_circuit() {
         // Block entry with default (visible) overflow must NOT trigger the guard.
         // With a paragraph also present the function should return Some.
-        let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
         let mut out = crate::drawables::Drawables::new();
-        out.block_styles.insert(
-            999,
-            crate::drawables::BlockEntry {
-                style: crate::draw_primitives::BlockStyle::default(), // overflow Visible
-                opacity: 1.0,
-                visible: true,
-                id: None,
-                layout_size: None,
-                clip_descendants: vec![],
-                opacity_descendants: vec![],
-            },
-        );
-        out.paragraphs
-            .insert(999, make_para_entry(vec![text_line(16.0, 9.0)]));
-        let result = inline_box_baseline_offset_from_drawables(doc.deref(), &out, 999);
+        let node_id = 9997;
+        out.block_styles.insert(node_id, make_block_entry_plain()); // overflow Visible
+        out.paragraphs.insert(node_id, make_paragraph_entry(&[9.0]));
+        let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
         assert_eq!(result, Some(9.0), "visible overflow must not short-circuit");
+    }
+
+    // ── pageable_last_baseline_from_drawables ──────────────────────────────────
+
+    #[test]
+    fn pageable_last_baseline_returns_none_at_max_depth() {
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
+        let out = crate::drawables::Drawables::new();
+        let result = super::pageable_last_baseline_from_drawables(
+            doc.deref(),
+            &out,
+            0,
+            crate::MAX_DOM_DEPTH,
+        );
+        assert!(
+            result.is_none(),
+            "at MAX_DOM_DEPTH must return None immediately"
+        );
+    }
+
+    #[test]
+    fn pageable_last_baseline_uses_last_line_of_multi_line_paragraph() {
+        // Multi-line paragraph: the function must return the LAST line's baseline,
+        // not the first.
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
+        let mut out = crate::drawables::Drawables::new();
+        let node_id = 9997;
+        out.paragraphs
+            .insert(node_id, make_paragraph_entry(&[12.0, 26.0]));
+        let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
+        assert_eq!(
+            result,
+            Some(26.0),
+            "must return last line baseline (26.0), not first (12.0)"
+        );
+    }
+
+    #[test]
+    fn pageable_last_baseline_adds_border_and_padding_top_inset() {
+        // Block entry with border-top=4pt and padding-top=2pt adds top_inset=6pt
+        // to the paragraph baseline.
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
+        let mut out = crate::drawables::Drawables::new();
+        let node_id = 9996;
+        out.paragraphs
+            .insert(node_id, make_paragraph_entry(&[12.0]));
+        let mut entry = make_block_entry_plain();
+        entry.style.border_widths[0] = 4.0; // top border
+        entry.style.padding[0] = 2.0; // top padding
+        out.block_styles.insert(node_id, entry);
+        let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
+        // top_inset = 4 + 2 = 6; baseline = 12 → Some(18).
+        assert!(
+            result.is_some_and(|v| (v - 18.0).abs() < 0.001),
+            "expected Some(18.0), got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn pageable_last_baseline_empty_paragraph_lines_falls_through_to_dom_walk() {
+        // A paragraph entry with no lines causes `lines.last()` to return None,
+        // so branch 1 is not taken. The function then tries the DOM walk, but
+        // node_id 9995 does not exist in the Blitz doc, so `doc.get_node` fails
+        // and the function returns None.
+        let doc = parse_doc("<html><body><div>x</div></body></html>");
+        let mut out = crate::drawables::Drawables::new();
+        let node_id = 9995;
+        out.paragraphs.insert(node_id, make_paragraph_entry(&[])); // no lines
+        let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
+        assert!(
+            result.is_none(),
+            "empty lines + non-existent node must return None"
+        );
+    }
+
+    #[test]
+    fn pageable_last_baseline_walks_dom_children_in_reverse_to_find_paragraph() {
+        // Parse a doc with section→div(text). Insert a ParagraphEntry only for
+        // the div. Calling on section (no paragraph entry) must walk children in
+        // reverse, find the div's ParagraphEntry, and return its baseline plus
+        // the div's layout y-offset.
+        let doc = parse_doc("<html><body><section><div>text content</div></section></body></html>");
+        let section_id = find_tag(&doc, "section");
+        let div_id = find_tag(&doc, "div");
+        let mut out = crate::drawables::Drawables::new();
+        out.paragraphs.insert(div_id, make_paragraph_entry(&[12.0]));
+        let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, section_id, 0);
+        // section has no paragraph entry → DOM walk finds div → Some(y_offset + 12.0).
+        // y_offset >= 0, so result >= 12.0.
+        assert!(
+            result.is_some(),
+            "reverse DOM walk must find child's paragraph entry"
+        );
+        assert!(
+            result.unwrap() >= 12.0,
+            "baseline must be at least the child paragraph's baseline"
+        );
+    }
+
+    // ── smoke tests for try_convert code paths ────────────────────────────────
+
+    #[test]
+    fn smoke_try_convert_inline_root_with_overflow_clip() {
+        // A <p> with overflow:hidden is an inline root. needs_block_wrapper() is
+        // true (has_overflow_clip), so needs_block_pre=true and clipping_pre=true.
+        // This exercises the pre_snapshot + clip_descendants tracking path.
+        let pdf = crate::engine::Engine::builder()
+            .build()
+            .render_html(
+                r#"<!doctype html><html><body>
+                <p style="overflow:hidden;height:30px;background:#abc">Clipped text</p>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn smoke_try_convert_inline_root_with_opacity_scope() {
+        // A <p> with background (visual style) and opacity < 1.0 activates
+        // needs_block_pre=true and opacity_scope_pre=true in try_convert.
+        // The pre_snapshot + opacity_descendants path is exercised.
+        let pdf = crate::engine::Engine::builder()
+            .build()
+            .render_html(
+                r#"<!doctype html><html><body>
+                <p style="opacity:0.5;background:#def">Faded paragraph</p>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
     }
 }
