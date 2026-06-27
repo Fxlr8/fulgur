@@ -50,7 +50,10 @@ use self::style::{absolute_to_rgba, extract_block_style, extract_opacity_visible
 /// the Drawables / Krilla render path works in pt. Values cross the boundary
 /// through [`px_to_pt`] / [`pt_to_px`] and the tuple helpers
 /// [`layout_in_pt`] / [`size_in_pt`].
-const PX_TO_PT: f32 = 0.75;
+// Single source of the px↔pt constant lives in `crate::units`; alias it here
+// so `px_to_pt` / `pt_to_px` and `units::{Px::in_pt, Pt::in_px}` can never
+// drift (fulgur-2map.1).
+const PX_TO_PT: f32 = crate::units::PX_TO_PT;
 
 /// Convert a CSS-px scalar to PDF pt.
 #[inline]
