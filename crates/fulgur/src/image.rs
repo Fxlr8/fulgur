@@ -299,4 +299,140 @@ mod tests {
         let img3 = img2.with_node_id(None);
         assert!(img3.node_id.is_none());
     }
+
+    // --- to_krilla_image: cover the Jpeg and Gif match arms ---
+
+    #[test]
+    fn to_krilla_image_jpeg_invalid_returns_err() {
+        // Exercises the Jpeg arm and the map_err closure.
+        let data: krilla::Data = b"not a jpeg".to_vec().into();
+        assert!(ImageFormat::Jpeg.to_krilla_image(data).is_err());
+    }
+
+    #[test]
+    fn to_krilla_image_gif_invalid_returns_err() {
+        // Exercises the Gif arm and the map_err closure.
+        let data: krilla::Data = b"not a gif".to_vec().into();
+        assert!(ImageFormat::Gif.to_krilla_image(data).is_err());
+    }
+
+    #[test]
+    fn to_krilla_image_png_invalid_returns_err() {
+        // Exercises the Png arm error path.
+        let data: krilla::Data = b"not a png".to_vec().into();
+        assert!(ImageFormat::Png.to_krilla_image(data).is_err());
+    }
+
+    // --- JPEG decode_dimensions edge cases ---
+
+    #[test]
+    fn jpeg_decode_dimensions_too_short_returns_none() {
+        // Hits the `data.len() < 2` early-return.
+        assert_eq!(ImageRender::decode_dimensions(&[], ImageFormat::Jpeg), None);
+        assert_eq!(
+            ImageRender::decode_dimensions(&[0xFF], ImageFormat::Jpeg),
+            None
+        );
+    }
+
+    #[test]
+    fn jpeg_decode_dimensions_non_0xff_byte_skipped() {
+        // A garbage non-0xFF byte at index 2 is skipped (i += 1), then a valid
+        // SOF0 marker is found and dimensions are read correctly.
+        let data: &[u8] = &[
+            0xFF, 0xD8, // SOI
+            0xAA, // non-0xFF garbage — triggers `i += 1; continue`
+            0xFF, 0xC0, // SOF0
+            0x00, 0x0B, // segment length = 11
+            0x08, // sample precision
+            0x00, 0x02, // height = 2
+            0x00, 0x03, // width = 3
+            0x01, // components
+        ];
+        assert_eq!(
+            ImageRender::decode_dimensions(data, ImageFormat::Jpeg),
+            Some((3, 2))
+        );
+    }
+
+    #[test]
+    fn jpeg_decode_dimensions_truncated_at_sof_returns_none() {
+        // SOF0 marker is found but fewer than 7 payload bytes remain.
+        let data: &[u8] = &[
+            0xFF, 0xD8, // SOI (i = 2)
+            0xFF, 0xC0, // SOF0 (i → 4)
+            0x00, // only 1 byte left; need i+7=11, have 5 → None
+        ];
+        assert_eq!(
+            ImageRender::decode_dimensions(data, ImageFormat::Jpeg),
+            None
+        );
+    }
+
+    #[test]
+    fn jpeg_decode_dimensions_truncated_before_seg_len_returns_none() {
+        // Non-SOF marker at end of data; no bytes remain for the segment length.
+        // Hits the `i + 1 >= data.len()` early-return.
+        let data: &[u8] = &[
+            0xFF, 0xD8, // SOI (i = 2)
+            0xFF, 0xE0, // APP0 (i → 4); need data[4..6] for seg_len but len = 4
+        ];
+        assert_eq!(
+            ImageRender::decode_dimensions(data, ImageFormat::Jpeg),
+            None
+        );
+    }
+
+    #[test]
+    fn jpeg_decode_dimensions_seg_len_too_small_returns_none() {
+        // Segment length field value < 2 — hits the `seg_len < 2` guard.
+        let data: &[u8] = &[
+            0xFF, 0xD8, // SOI (i = 2)
+            0xFF, 0xE0, // APP0 (i → 4)
+            0x00, 0x01, // seg_len = 1 < 2 → None
+        ];
+        assert_eq!(
+            ImageRender::decode_dimensions(data, ImageFormat::Jpeg),
+            None
+        );
+    }
+
+    #[test]
+    fn jpeg_decode_dimensions_no_sof_marker_returns_none() {
+        // A complete non-SOF segment is consumed; the while loop exits naturally
+        // without having found a SOF marker, so the function returns None.
+        let data: &[u8] = &[
+            0xFF, 0xD8, // SOI (i = 2)
+            0xFF, 0xE0, // APP0 (i → 4)
+            0x00, 0x04, // seg_len = 4 (i → 4 + 4 = 8)
+            0x00,
+            0x00, // APP0 payload (2 bytes)
+                  // i = 8; 8+1 = 9 >= data.len()=8 → loop exits → None
+        ];
+        assert_eq!(
+            ImageRender::decode_dimensions(data, ImageFormat::Jpeg),
+            None
+        );
+    }
+
+    // --- GIF edge case ---
+
+    #[test]
+    fn gif_decode_dimensions_too_short_returns_none() {
+        // data.len() < 10 hits the early-return guard.
+        assert_eq!(
+            ImageRender::decode_dimensions(b"GIF89a\x01\x00\x01", ImageFormat::Gif),
+            None
+        );
+    }
+
+    // --- AssetKind::detect whitespace-skipping path ---
+
+    #[test]
+    fn detect_svg_with_leading_whitespace() {
+        // ASCII whitespace before `<svg` exercises the `slice = rest` branch in
+        // the whitespace-skipping loop inside AssetKind::detect.
+        let svg = b"  \n\t<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+        assert!(matches!(AssetKind::detect(svg), AssetKind::Svg));
+    }
 }
