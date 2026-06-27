@@ -128,7 +128,7 @@ fn column_rule_solid_red_is_visible_between_columns() {
         })
         .margin(Margin::uniform(10.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let rgba = pdf_to_rgba(&pdf, 200, tmp.path());
@@ -201,7 +201,7 @@ fn column_fill_auto_leaves_second_column_empty_for_short_content() {
         })
         .margin(Margin::uniform(20.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let rgba = pdf_to_rgba(&pdf, 200, tmp.path());

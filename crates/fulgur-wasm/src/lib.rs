@@ -232,7 +232,7 @@ impl Engine {
         if let Some(b) = self.bookmarks {
             builder = builder.bookmarks(b);
         }
-        builder.build().render_html(html)
+        builder.build().render(html)
     }
 }
 

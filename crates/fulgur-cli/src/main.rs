@@ -526,9 +526,9 @@ fn main() {
             };
 
             let pdf = if data.is_some() {
-                engine.render()
+                engine.render_template()
             } else {
-                engine.render_html(&input_content)
+                engine.render(&input_content)
             }
             .unwrap_or_else(|e| {
                 eprintln!("Error: {e}");

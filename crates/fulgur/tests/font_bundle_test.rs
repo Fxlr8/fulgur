@@ -24,7 +24,7 @@ fn test_bundled_font() {
         <p>株式会社フルグル — バンドルフォントテスト</p>
     </body></html>"#;
 
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // Bundled font should make the PDF larger
     assert!(pdf.len() > 5000);

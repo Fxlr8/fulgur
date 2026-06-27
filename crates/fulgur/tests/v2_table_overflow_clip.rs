@@ -24,7 +24,7 @@ fn v2_overflow_hidden_table_inside_transform_keeps_clip() {
             </table>
         </div>
     </body></html>"#;
-    let pdf_hidden = engine.render_html(html_hidden).expect("render v2");
+    let pdf_hidden = engine.render(html_hidden).expect("render v2");
     assert!(pdf_hidden.starts_with(b"%PDF"));
 
     let html_visible = r#"<html><body>
@@ -34,7 +34,7 @@ fn v2_overflow_hidden_table_inside_transform_keeps_clip() {
             </table>
         </div>
     </body></html>"#;
-    let pdf_visible = engine.render_html(html_visible).expect("render v2");
+    let pdf_visible = engine.render(html_visible).expect("render v2");
 
     assert_ne!(
         pdf_hidden, pdf_visible,
@@ -56,7 +56,7 @@ fn v2_table_clip_with_inner_cell_clip_keeps_inner_boundary() {
             </td></tr>
         </table>
     </body></html>"#;
-    let pdf_inner_hidden = engine.render_html(html_inner_hidden).expect("render v2");
+    let pdf_inner_hidden = engine.render(html_inner_hidden).expect("render v2");
     assert!(pdf_inner_hidden.starts_with(b"%PDF"));
 
     let html_inner_visible = r#"<html><body>
@@ -66,7 +66,7 @@ fn v2_table_clip_with_inner_cell_clip_keeps_inner_boundary() {
             </td></tr>
         </table>
     </body></html>"#;
-    let pdf_inner_visible = engine.render_html(html_inner_visible).expect("render v2");
+    let pdf_inner_visible = engine.render(html_inner_visible).expect("render v2");
 
     assert_ne!(
         pdf_inner_hidden, pdf_inner_visible,

@@ -24,7 +24,7 @@ fn render(css_background: &str) -> Vec<u8> {
         .page_size(PageSize::A4)
         .margin(Margin::uniform(72.0))
         .build()
-        .render_html(&html)
+        .render(&html)
         .expect("render gradient")
 }
 

@@ -8,7 +8,7 @@ fn render_with_bookmarks(html: &str, bookmarks: bool) -> Vec<u8> {
         .page_size(PageSize::A4)
         .bookmarks(bookmarks)
         .build();
-    engine.render_html(html).expect("render ok")
+    engine.render(html).expect("render ok")
 }
 
 /// Permissive substring check for an outline title in a PDF byte stream.
@@ -87,7 +87,7 @@ fn engine_with_css(css: &str) -> Engine {
 fn author_css_can_suppress_h1_bookmark() {
     let engine = engine_with_css("h1 { bookmark-level: none; }");
     let html = r#"<html><body><h1>Hidden</h1></body></html>"#;
-    let pdf = engine.render_html(html).expect("render ok");
+    let pdf = engine.render(html).expect("render ok");
     assert!(
         !pdf_contains_outline_entry(&pdf, "Hidden"),
         "expected 'Hidden' to be suppressed by bookmark-level: none"
@@ -105,7 +105,7 @@ fn custom_css_bookmarks_arbitrary_element() {
         <div class="ch" data-num="1">first</div>
         <div class="ch" data-num="2">second</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).expect("render ok");
+    let pdf = engine.render(html).expect("render ok");
     assert!(
         pdf_contains_outline_entry(&pdf, "Ch. 1"),
         "expected outline entry 'Ch. 1' resolved from attr(data-num)"
@@ -126,7 +126,7 @@ fn mixed_h1_and_custom_aside_produce_nested_outline() {
         <h1>Chapter</h1>
         <div class="aside" data-title="Note">body</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).expect("render ok");
+    let pdf = engine.render(html).expect("render ok");
     assert!(
         pdf_contains_outline_entry(&pdf, "Chapter"),
         "expected UA-driven h1 'Chapter' in outline"
@@ -144,7 +144,7 @@ fn mixed_h1_and_custom_aside_produce_nested_outline() {
 fn counter_in_bookmark_label_does_not_panic() {
     let engine = engine_with_css(r#"h1 { bookmark-label: counter(chapter) " " content(); }"#);
     let html = r#"<html><body><h1>Intro</h1></body></html>"#;
-    let pdf = engine.render_html(html).expect("render ok");
+    let pdf = engine.render(html).expect("render ok");
     // counter(chapter) resolves to empty; " " content() yields " Intro".
     // The substring helper still matches on the trailing "Intro" portion.
     assert!(
@@ -162,7 +162,7 @@ fn level_only_falls_back_to_element_text() {
     let html = r#"<html><body>
         <div class="aside">Text Content</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).expect("render ok");
+    let pdf = engine.render(html).expect("render ok");
     assert!(
         pdf_contains_outline_entry(&pdf, "Text Content"),
         "label-less rule should fall back to element's text content"
@@ -183,7 +183,7 @@ fn bookmarks_via_inline_style_block() {
     </body></html>"#;
 
     let engine = Engine::builder().bookmarks(true).build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         pdf_contains_outline_entry(&pdf, "Sidebar"),
         "expected 'Sidebar' bookmark entry — bookmark-label via inline <style> not working"

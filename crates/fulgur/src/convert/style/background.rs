@@ -617,7 +617,7 @@ mod tests {
         );
         Engine::builder()
             .build()
-            .render_html(&html)
+            .render(&html)
             .expect("render should succeed")
     }
 
@@ -629,7 +629,7 @@ mod tests {
         let html = format!(r#"<html><body><div style="{style}"></div></body></html>"#);
         let pdf = Engine::builder()
             .build()
-            .render_html(&html)
+            .render(&html)
             .unwrap_or_else(|_| panic!("render failed for {label}"));
         assert!(pdf.starts_with(b"%PDF"), "{label}: expected PDF");
     }
@@ -919,7 +919,7 @@ mod tests {
         let pdf = Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render raster bg");
         assert!(pdf.starts_with(b"%PDF"));
     }
@@ -934,7 +934,7 @@ mod tests {
         let pdf = Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render svg bg");
         assert!(pdf.starts_with(b"%PDF"));
     }
@@ -949,7 +949,7 @@ mod tests {
         let pdf = Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render broken-svg bg");
         assert!(pdf.starts_with(b"%PDF"));
     }
@@ -963,7 +963,7 @@ mod tests {
         let pdf = Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render unknown-asset bg");
         assert!(pdf.starts_with(b"%PDF"));
     }
@@ -975,7 +975,7 @@ mod tests {
         let html = r#"<html><body><div style="width:80px;height:80px;background:url(img.png)"></div></body></html>"#;
         let pdf = Engine::builder()
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render missing-bundle bg");
         assert!(pdf.starts_with(b"%PDF"));
     }

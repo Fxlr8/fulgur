@@ -912,7 +912,7 @@ mod tests {
     fn render_list_html(html: &str) -> Vec<u8> {
         crate::engine::Engine::builder()
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render failed")
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <ul><li>Item with before image</li></ul>
                 </body></html>"#,
@@ -1037,7 +1037,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <ul><li></li></ul>
                 </body></html>"#,

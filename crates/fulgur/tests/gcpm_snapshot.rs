@@ -71,7 +71,7 @@ fn gcpm_counter_via_inline_style_snapshot() {
         .assets(noto_assets())
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_counter_via_inline_style", &pdf);
@@ -93,7 +93,7 @@ fn gcpm_running_element_via_inline_style_snapshot() {
         .assets(noto_assets())
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_running_element_via_inline_style", &pdf);
@@ -126,7 +126,7 @@ fn gcpm_element_policy_first_snapshot() {
         .assets(noto_assets())
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_element_policy_first", &pdf);
@@ -158,7 +158,7 @@ fn gcpm_element_policy_last_snapshot() {
         .assets(noto_assets())
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_element_policy_last", &pdf);
@@ -180,7 +180,7 @@ fn gcpm_string_set_via_inline_style_snapshot() {
         .assets(noto_assets())
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_string_set_via_inline_style", &pdf);
@@ -213,7 +213,7 @@ fn gcpm_header_footer_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_header_footer", &pdf);
@@ -246,7 +246,7 @@ fn gcpm_multipage_counter_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(&html)
+        .render(&html)
         .expect("render");
 
     check_snapshot("gcpm_multipage_counter", &pdf);
@@ -271,7 +271,7 @@ fn gcpm_counter_only_no_running_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_counter_only_no_running", &pdf);
@@ -296,7 +296,7 @@ fn gcpm_id_selector_running_element_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_id_selector_running_element", &pdf);
@@ -321,7 +321,7 @@ fn gcpm_tag_selector_running_element_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_tag_selector_running_element", &pdf);
@@ -348,7 +348,7 @@ fn gcpm_left_right_margin_boxes_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_left_right_margin_boxes", &pdf);
@@ -381,7 +381,7 @@ fn gcpm_all_side_margin_boxes_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_all_side_margin_boxes", &pdf);
@@ -410,7 +410,7 @@ fn gcpm_left_right_with_running_element_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_left_right_with_running_element", &pdf);
@@ -444,7 +444,7 @@ fn gcpm_side_boxes_asymmetric_margins_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_side_boxes_asymmetric_margins", &pdf);
@@ -487,7 +487,7 @@ fn gcpm_string_set_chapter_title_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(&html)
+        .render(&html)
         .expect("render");
 
     check_snapshot("gcpm_string_set_chapter_title", &pdf);
@@ -514,7 +514,7 @@ fn gcpm_string_set_with_attr_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_string_set_with_attr", &pdf);
@@ -541,7 +541,7 @@ fn gcpm_string_set_with_literal_concat_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_string_set_with_literal_concat", &pdf);
@@ -573,7 +573,7 @@ fn gcpm_string_set_with_policies_snapshot() {
         .assets(assets)
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(&html)
+        .render(&html)
         .expect("render");
 
     check_snapshot("gcpm_string_set_with_policies", &pdf);
@@ -613,7 +613,7 @@ li::before { content: counters(item, ".") ". "; }
         .assets(noto_assets())
         .serialize_settings(snapshot_settings())
         .build()
-        .render_html(html)
+        .render(html)
         .expect("render");
 
     check_snapshot("gcpm_counters_function_nested_ol", &pdf);

@@ -4,7 +4,7 @@ use fulgur::engine::Engine;
 
 fn render(html: &str) -> Vec<u8> {
     let engine = Engine::builder().build();
-    engine.render_html(html).expect("render ok")
+    engine.render(html).expect("render ok")
 }
 
 #[test]

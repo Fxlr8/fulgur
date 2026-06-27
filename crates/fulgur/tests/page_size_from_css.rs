@@ -22,7 +22,7 @@ fn page_size_landscape_from_inline_style_block() {
     </head><body>test</body></html>"#;
 
     let engine = Engine::builder().build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         has_landscape_a4_mediabox(&pdf),
         "expected A4 landscape (841 × 595) from inline <style>"
@@ -50,7 +50,7 @@ fn page_size_landscape_from_link_stylesheet() {
     let html = std::fs::read_to_string(&html_path).expect("html read");
 
     let engine = Engine::builder().base_path(dir.path()).build();
-    let pdf = engine.render_html(&html).expect("render");
+    let pdf = engine.render(&html).expect("render");
     assert!(
         has_landscape_a4_mediabox(&pdf),
         "expected A4 landscape from <link> stylesheet"

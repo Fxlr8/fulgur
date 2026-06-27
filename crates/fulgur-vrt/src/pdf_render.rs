@@ -40,7 +40,7 @@ pub fn render_html_to_pdf(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Ve
     let engine = builder.build();
 
     engine
-        .render_html(html)
+        .render(html)
         .map_err(|e| anyhow::anyhow!("fulgur render_html failed: {e}"))
 }
 

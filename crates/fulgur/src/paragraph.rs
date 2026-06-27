@@ -1885,7 +1885,7 @@ mod render_smoke_tests {
     fn render_html(html: &str) -> Vec<u8> {
         crate::engine::Engine::builder()
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render failed")
     }
 
@@ -1894,7 +1894,7 @@ mod render_smoke_tests {
             .tagged(true)
             .lang("en")
             .build()
-            .render_html(html)
+            .render(html)
             .expect("tagged render failed")
     }
 
@@ -2065,7 +2065,7 @@ mod render_smoke_tests {
         let pdf = crate::engine::Engine::builder()
             .assets(assets)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <ul style="list-style-position: inside; list-style-image: url(bullet.png)">
                     <li>item with image marker</li>
@@ -2087,7 +2087,7 @@ mod render_smoke_tests {
         let pdf = crate::engine::Engine::builder()
             .assets(assets)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <p><a href="https://example.com"><img src="pixel.png"
                    width="20" height="20"></a> caption text</p>

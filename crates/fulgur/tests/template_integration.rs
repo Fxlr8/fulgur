@@ -26,7 +26,7 @@ fn test_template_to_pdf() {
 #[test]
 fn test_html_mode_still_works() {
     let html = "<html><body><p>Hello</p></body></html>";
-    let pdf = Engine::builder().build().render_html(html).unwrap();
+    let pdf = Engine::builder().build().render(html).unwrap();
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF-"));
 }

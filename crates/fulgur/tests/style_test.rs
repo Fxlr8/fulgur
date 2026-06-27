@@ -9,7 +9,7 @@ fn test_render_styled_html() {
             <h1>Styled Content</h1>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // Styled PDF should be larger due to graphics commands
     assert!(pdf.len() > 1000);
@@ -26,7 +26,7 @@ fn test_render_colored_background() {
             <p>Green background</p>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -42,7 +42,7 @@ fn test_overflow_hidden_produces_different_pdf_than_visible() {
             <div style="width:300px;height:300px;background:red"></div>
         </div>
     </body></html>"#;
-    let pdf_hidden = engine.render_html(html_hidden).unwrap();
+    let pdf_hidden = engine.render(html_hidden).unwrap();
     assert!(pdf_hidden.starts_with(b"%PDF"));
 
     let html_visible = r#"<html><body>
@@ -50,7 +50,7 @@ fn test_overflow_hidden_produces_different_pdf_than_visible() {
             <div style="width:300px;height:300px;background:red"></div>
         </div>
     </body></html>"#;
-    let pdf_visible = engine.render_html(html_visible).unwrap();
+    let pdf_visible = engine.render(html_visible).unwrap();
     assert!(pdf_visible.starts_with(b"%PDF"));
 
     // overflow:hidden emits a clip path in the content stream, so the PDF
@@ -71,7 +71,7 @@ fn test_overflow_clip_keyword_renders() {
             <div style="width:300px;height:300px;background:blue"></div>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -86,7 +86,7 @@ fn test_overflow_scroll_and_auto_also_clip() {
             <div style="width:300px;height:300px;background:green"></div>
         </div>
     </body></html>"#;
-    let pdf_scroll = engine.render_html(html_scroll).unwrap();
+    let pdf_scroll = engine.render(html_scroll).unwrap();
     assert!(pdf_scroll.starts_with(b"%PDF"));
 
     let html_auto = r#"<html><body>
@@ -94,7 +94,7 @@ fn test_overflow_scroll_and_auto_also_clip() {
             <div style="width:300px;height:300px;background:green"></div>
         </div>
     </body></html>"#;
-    let pdf_auto = engine.render_html(html_auto).unwrap();
+    let pdf_auto = engine.render(html_auto).unwrap();
     assert!(pdf_auto.starts_with(b"%PDF"));
 
     let html_visible = r#"<html><body>
@@ -102,7 +102,7 @@ fn test_overflow_scroll_and_auto_also_clip() {
             <div style="width:300px;height:300px;background:green"></div>
         </div>
     </body></html>"#;
-    let pdf_visible = engine.render_html(html_visible).unwrap();
+    let pdf_visible = engine.render(html_visible).unwrap();
 
     assert_ne!(
         pdf_scroll, pdf_visible,
@@ -128,7 +128,7 @@ fn test_overflow_hidden_on_bare_block_without_visual_style() {
             <div style="width:300px;height:300px;background:red"></div>
         </div>
     </body></html>"#;
-    let pdf_hidden = engine.render_html(html_hidden).unwrap();
+    let pdf_hidden = engine.render(html_hidden).unwrap();
     assert!(pdf_hidden.starts_with(b"%PDF"));
 
     let html_visible = r#"<html><body>
@@ -136,7 +136,7 @@ fn test_overflow_hidden_on_bare_block_without_visual_style() {
             <div style="width:300px;height:300px;background:red"></div>
         </div>
     </body></html>"#;
-    let pdf_visible = engine.render_html(html_visible).unwrap();
+    let pdf_visible = engine.render(html_visible).unwrap();
 
     assert_ne!(
         pdf_hidden, pdf_visible,
@@ -156,7 +156,7 @@ fn test_overflow_hidden_on_table_clips() {
             <tr><td style="width:300px;height:300px;background:orange">cell</td></tr>
         </table>
     </body></html>"#;
-    let pdf_hidden = engine.render_html(html_hidden).unwrap();
+    let pdf_hidden = engine.render(html_hidden).unwrap();
     assert!(pdf_hidden.starts_with(b"%PDF"));
 
     let html_visible = r#"<html><body>
@@ -164,7 +164,7 @@ fn test_overflow_hidden_on_table_clips() {
             <tr><td style="width:300px;height:300px;background:orange">cell</td></tr>
         </table>
     </body></html>"#;
-    let pdf_visible = engine.render_html(html_visible).unwrap();
+    let pdf_visible = engine.render(html_visible).unwrap();
 
     assert_ne!(
         pdf_hidden, pdf_visible,
@@ -182,7 +182,7 @@ fn test_overflow_x_only_renders() {
             <div style="width:300px;height:300px;background:purple"></div>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 
     let html_visible = r#"<html><body>
@@ -190,7 +190,7 @@ fn test_overflow_x_only_renders() {
             <div style="width:300px;height:300px;background:purple"></div>
         </div>
     </body></html>"#;
-    let pdf_visible = engine.render_html(html_visible).unwrap();
+    let pdf_visible = engine.render(html_visible).unwrap();
     assert_ne!(
         pdf, pdf_visible,
         "overflow-x:hidden should emit a clip path different from default"
@@ -218,7 +218,7 @@ fn test_overflow_hidden_page_spanning_clip() {
             <div style="width:200pt;height:80pt;background:purple"></div>
         </div>
     </body></html>"#;
-    let pdf_hidden = engine.render_html(html_hidden).unwrap();
+    let pdf_hidden = engine.render(html_hidden).unwrap();
     assert!(pdf_hidden.starts_with(b"%PDF"));
 
     // Count pages using /Type /Page (exclude /Type /Pages)
@@ -251,7 +251,7 @@ fn test_overflow_hidden_page_spanning_clip() {
             <div style="width:200pt;height:80pt;background:purple"></div>
         </div>
     </body></html>"#;
-    let pdf_visible = engine.render_html(html_visible).unwrap();
+    let pdf_visible = engine.render(html_visible).unwrap();
 
     assert_ne!(
         pdf_hidden, pdf_visible,

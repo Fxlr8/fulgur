@@ -9,7 +9,7 @@ fn test_render_html_with_text() {
         .build();
 
     let html = "<html><body><h1>Hello World</h1><p>This is fulgur.</p></body></html>";
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // PDF should be larger than empty doc due to font embedding
     assert!(pdf.len() > 1000);
@@ -27,6 +27,6 @@ fn test_render_multiline_text() {
         <p>Line two of the paragraph.</p>
         <p>Line three of the paragraph.</p>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }

@@ -34,7 +34,7 @@ fn test_list_style_image_png_embeds_xobject() {
             <li>Item two</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // A rendered raster image marker causes krilla to emit an Image XObject.
     assert!(
@@ -46,7 +46,7 @@ fn test_list_style_image_png_embeds_xobject() {
         .page_size(PageSize::A4)
         .margin(Margin::uniform(72.0))
         .build()
-        .render_html(r#"<html><body><ul><li>Item one</li><li>Item two</li></ul></body></html>"#)
+        .render(r#"<html><body><ul><li>Item one</li><li>Item two</li></ul></body></html>"#)
         .unwrap();
     assert!(
         !pdf_contains(&text_only, b"/Subtype /Image")
@@ -64,7 +64,7 @@ fn test_list_style_image_unresolved_url_falls_back_to_text() {
         </ul>
     </body></html>"#;
     // Must not panic — falls through to text marker silently.
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -77,7 +77,7 @@ fn test_list_style_none_with_image_url_embeds_xobject() {
             <li>Item two</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         pdf_contains(&pdf, b"/Subtype /Image") || pdf_contains(&pdf, b"/Subtype/Image"),
@@ -93,7 +93,7 @@ fn test_list_style_image_only_embeds_xobject() {
             <li style="list-style-image: url(bullet.png)">Item</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         pdf_contains(&pdf, b"/Subtype /Image") || pdf_contains(&pdf, b"/Subtype/Image"),
@@ -117,14 +117,14 @@ fn test_list_style_image_svg_renders() {
             <li>SVG bullet item</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 
     let text_only = Engine::builder()
         .page_size(PageSize::A4)
         .margin(Margin::uniform(72.0))
         .build()
-        .render_html(r#"<html><body><ul><li>SVG bullet item</li></ul></body></html>"#)
+        .render(r#"<html><body><ul><li>SVG bullet item</li></ul></body></html>"#)
         .unwrap();
     // When the SVG branch of resolve_list_marker actually fires, the bullet
     // glyph (U+2022) is replaced by a vector draw and the font subset for the

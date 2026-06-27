@@ -17,7 +17,7 @@ fn render_contains_red(html: &str, base: &Path) -> Option<bool> {
         .page_size(PageSize::A4)
         .base_path(base.to_path_buf())
         .build();
-    let pdf = engine.render_html(html).expect("render must succeed");
+    let pdf = engine.render(html).expect("render must succeed");
 
     let work = tempdir().unwrap();
     let pdf_path = work.path().join("fixture.pdf");
@@ -204,7 +204,7 @@ fn link_media_print_does_not_duplicate_gcpm_context() {
         .page_size(PageSize::A4)
         .base_path(root.to_path_buf())
         .build();
-    let pdf = engine.render_html(html).expect("render must succeed");
+    let pdf = engine.render(html).expect("render must succeed");
     assert!(!pdf.is_empty());
     // TODO (fulgur-owa): assert margin-box "HDR" appears exactly once in
     // the rendered page margin, not twice.

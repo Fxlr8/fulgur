@@ -168,7 +168,7 @@ impl RbEngine {
             // pointer。`without_gvl` は呼び出し元を block しているため、
             // この closure が走っている間 `self` は生存している。
             let engine: &Engine = unsafe { &*a.engine };
-            engine.render_html(&a.html)
+            engine.render(&a.html)
         });
 
         let ruby = Ruby::get().expect("ruby vm");
@@ -201,7 +201,7 @@ impl RbEngine {
             // SAFETY: `a.engine` は呼び出し元の `&self.inner` から作った
             // pointer。`without_gvl` の block 中は self が生存している。
             let engine: &Engine = unsafe { &*a.engine };
-            engine.render_html_to_file(&a.html, &a.path)
+            engine.render_file(&a.html, &a.path)
         });
 
         let ruby = Ruby::get().expect("ruby vm");

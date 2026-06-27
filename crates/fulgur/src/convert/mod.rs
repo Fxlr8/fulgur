@@ -1159,7 +1159,7 @@ mod bookmark_outline_tests {
             .page_size(PageSize::A4)
             .bookmarks(true)
             .build();
-        let pdf = engine.render_html(html).expect("render v2");
+        let pdf = engine.render(html).expect("render v2");
         let pdf_str = String::from_utf8_lossy(&pdf);
         assert!(
             pdf_str.contains("/Outlines"),

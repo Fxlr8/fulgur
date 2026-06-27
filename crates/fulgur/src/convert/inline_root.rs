@@ -1324,7 +1324,7 @@ mod tests {
         // This exercises the pre_snapshot + clip_descendants tracking path.
         let pdf = crate::engine::Engine::builder()
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <p style="overflow:hidden;height:30px;background:#abc">Clipped text</p>
                 </body></html>"#,
@@ -1340,7 +1340,7 @@ mod tests {
         // The pre_snapshot + opacity_descendants path is exercised.
         let pdf = crate::engine::Engine::builder()
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <p style="opacity:0.5;background:#def">Faded paragraph</p>
                 </body></html>"#,

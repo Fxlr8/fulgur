@@ -17,13 +17,13 @@ fn test_inline_svg_renders_to_pdf() {
         </svg>
     </body></html>"#;
 
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"), "output should be a PDF");
     assert!(!pdf.is_empty());
 
     // A page that successfully drew the SVG is larger than an empty page:
     let empty_html = r#"<html><body></body></html>"#;
-    let empty_pdf = engine.render_html(empty_html).unwrap();
+    let empty_pdf = engine.render(empty_html).unwrap();
     assert!(
         pdf.len() > empty_pdf.len(),
         "PDF with SVG ({} bytes) must be larger than empty PDF ({} bytes)",
@@ -48,8 +48,8 @@ fn test_svg_with_border_and_padding_renders() {
         </svg>
     </body></html>"#;
 
-    let styled_pdf = engine.render_html(styled_html).unwrap();
-    let plain_pdf = engine.render_html(plain_html).unwrap();
+    let styled_pdf = engine.render(styled_html).unwrap();
+    let plain_pdf = engine.render(plain_html).unwrap();
 
     assert!(styled_pdf.starts_with(b"%PDF"));
     assert!(plain_pdf.starts_with(b"%PDF"));
@@ -79,7 +79,7 @@ fn test_multiple_svgs_on_same_page() {
         </svg>
     </body></html>"#;
 
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 
     // Two SVGs should produce a larger PDF than one
@@ -88,7 +88,7 @@ fn test_multiple_svgs_on_same_page() {
             <circle cx="25" cy="25" r="20" fill="red"/>
         </svg>
     </body></html>"#;
-    let single_pdf = engine.render_html(single_html).unwrap();
+    let single_pdf = engine.render(single_html).unwrap();
     assert!(
         pdf.len() > single_pdf.len(),
         "PDF with 2 SVGs ({} bytes) should exceed PDF with 1 SVG ({} bytes)",
@@ -110,7 +110,7 @@ fn test_svg_does_not_split_across_pages() {
         </svg>
     </body></html>"#;
 
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // PDF should contain at least 2 pages.
     assert!(
@@ -130,7 +130,7 @@ fn test_svg_with_parent_opacity() {
         </div>
     </body></html>"#;
 
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // Smoke test: opacity propagation should not panic and should emit a valid PDF.
     // Byte-level opacity detection is fragile; the main goal here is to exercise
@@ -152,8 +152,8 @@ fn test_svg_with_visibility_hidden_is_skipped() {
         </svg>
     </body></html>"#;
 
-    let visible_pdf = engine.render_html(visible_html).unwrap();
-    let hidden_pdf = engine.render_html(hidden_html).unwrap();
+    let visible_pdf = engine.render(visible_html).unwrap();
+    let hidden_pdf = engine.render(hidden_html).unwrap();
     assert!(visible_pdf.starts_with(b"%PDF"));
     assert!(hidden_pdf.starts_with(b"%PDF"));
 

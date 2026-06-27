@@ -9,7 +9,7 @@ fn test_render_simple_html() {
         .build();
 
     let html = "<html><body><h1>Hello World</h1><p>This is a test.</p></body></html>";
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 100);
 }

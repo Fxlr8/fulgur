@@ -21,7 +21,7 @@ fn render_example(name: &str) -> Vec<u8> {
         .build();
 
     engine
-        .render_html(&html)
+        .render(&html)
         .expect("render_html should succeed")
 }
 
@@ -60,7 +60,7 @@ fn dashed_uniform_border_keeps_per_edge_phase() {
     "#;
 
     let engine = Engine::builder().page_size(PageSize::A4).build();
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
 
     let Some(counts) = count_ops(&pdf) else {
         eprintln!("qpdf not installed — skipping");
@@ -84,7 +84,7 @@ fn double_uniform_border_uses_two_rects() {
     "#;
 
     let engine = Engine::builder().page_size(PageSize::A4).build();
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
 
     let Some(counts) = count_ops(&pdf) else {
         eprintln!("qpdf not installed — skipping");
@@ -120,7 +120,7 @@ fn double_uniform_border_below_3px_falls_back_to_solid() {
     "#;
 
     let engine = Engine::builder().page_size(PageSize::A4).build();
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
 
     let Some(counts) = count_ops(&pdf) else {
         eprintln!("qpdf not installed — skipping");
@@ -157,7 +157,7 @@ fn double_per_edge_below_3px_falls_back_to_solid() {
     "#;
 
     let engine = Engine::builder().page_size(PageSize::A4).build();
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
 
     let Some(counts) = count_ops(&pdf) else {
         eprintln!("qpdf not installed — skipping");

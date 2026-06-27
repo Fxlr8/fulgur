@@ -42,7 +42,7 @@ fn multicol_basic_2col_renders() {
         <div class="b"></div><div class="b"></div>
       </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render_html(html).expect("render");
+    let pdf = Engine::builder().build().render(html).expect("render");
     assert!(!pdf.is_empty());
     assert_eq!(page_count(&pdf), 1);
 }
@@ -61,7 +61,7 @@ fn multicol_column_width_resolution_renders() {
         <div class="b"></div>
       </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render_html(html).expect("render");
+    let pdf = Engine::builder().build().render(html).expect("render");
     assert!(!pdf.is_empty());
 }
 
@@ -79,7 +79,7 @@ fn multicol_balance_renders() {
         <div class="b"></div><div class="b"></div>
       </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render_html(html).expect("render");
+    let pdf = Engine::builder().build().render(html).expect("render");
     assert!(!pdf.is_empty());
     assert_eq!(page_count(&pdf), 1);
 }
@@ -108,6 +108,6 @@ fn multicol_page_spanning_renders_without_panic() {
         <div class="b"></div><div class="b"></div>
       </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render_html(html).expect("render");
+    let pdf = Engine::builder().build().render(html).expect("render");
     assert!(!pdf.is_empty());
 }

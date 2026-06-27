@@ -32,7 +32,7 @@ fn test_list_style_position_inside_text_marker_renders() {
             <li>Item three</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         pdf.len() > 500,
@@ -51,7 +51,7 @@ fn test_list_style_position_inside_ordered_list() {
             <li>Third item</li>
         </ol>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         pdf.len() > 500,
@@ -74,7 +74,7 @@ fn test_list_style_position_inside_image_marker() {
             <li>Image inside</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"), "output should be a valid PDF");
     assert!(
         pdf_contains(&pdf, b"/Subtype /Image") || pdf_contains(&pdf, b"/Subtype/Image"),
@@ -92,7 +92,7 @@ fn test_outside_markers_still_work_after_inside_changes() {
             <li>Outside three</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         pdf.len() > 500,
@@ -120,7 +120,7 @@ fn test_inside_marker_with_block_child_does_not_crash() {
             <li><p>Nested paragraph</p></li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -133,7 +133,7 @@ fn test_inside_empty_li_does_not_crash() {
             <li>Not empty</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -159,7 +159,7 @@ fn test_inside_image_marker_with_before_pseudo_does_not_crash() {
             <li>Item with pseudo</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // Both the marker image and the ::before image should be embedded.
     assert!(
@@ -181,7 +181,7 @@ fn test_inside_and_outside_in_same_document() {
             <li>Inside item B</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         pdf.len() > 500,

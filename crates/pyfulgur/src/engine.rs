@@ -204,7 +204,7 @@ impl PyEngineBuilder {
 ///     ```python
 ///     from pyfulgur import Engine, PageSize
 ///     engine = Engine(page_size=PageSize.A4, title="Hello")
-///     engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
+///     engine.render_file("<h1>Hi</h1>", "out.pdf")
 ///     ```
 #[pyclass(name = "Engine", module = "pyfulgur")]
 pub struct PyEngine {
@@ -305,7 +305,7 @@ impl PyEngine {
         // assert_impl_all! で compile time に検査している。Python スレッドから
         // 並列で render できるよう、GIL を解放してから呼ぶ。
         let bytes = py
-            .detach(|| self.inner.render_html(&html))
+            .detach(|| self.inner.render(&html))
             .map_err(crate::error::map_fulgur_error)?;
         Ok(PyBytes::new(py, &bytes))
     }
@@ -322,7 +322,7 @@ impl PyEngine {
     ///     RenderError: When rendering or writing fails.
     ///     FileNotFoundError: When the parent directory does not exist.
     fn render_html_to_file(&self, py: Python<'_>, html: String, path: PathBuf) -> PyResult<()> {
-        py.detach(|| self.inner.render_html_to_file(&html, &path))
+        py.detach(|| self.inner.render_file(&html, &path))
             .map_err(crate::error::map_fulgur_error)
     }
 }

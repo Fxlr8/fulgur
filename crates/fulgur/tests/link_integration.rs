@@ -25,7 +25,7 @@ fn engine_with_png(name: &str) -> Engine {
 #[test]
 fn external_link_produces_uri_action_in_pdf() {
     let html = r#"<html><body><p><a href="https://example.com">click</a></p></body></html>"#;
-    let bytes = engine().render_html(html).expect("render");
+    let bytes = engine().render(html).expect("render");
     assert!(bytes.starts_with(b"%PDF"));
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("/Link"), "missing /Link annotation subtype");
@@ -43,7 +43,7 @@ fn internal_anchor_produces_destination() {
         <div style="height:1500px"></div>
         <h2 id="section">Target</h2>
     </body></html>"##;
-    let bytes = engine().render_html(html).expect("render");
+    let bytes = engine().render(html).expect("render");
     assert!(bytes.starts_with(b"%PDF"));
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("/Link"), "missing /Link annotation");
@@ -59,7 +59,7 @@ fn internal_anchor_produces_destination() {
 #[test]
 fn unresolved_internal_anchor_is_ignored_not_error() {
     let html = r##"<html><body><p><a href="#nope">dangling</a></p></body></html>"##;
-    let bytes = engine().render_html(html).expect("render should not fail");
+    let bytes = engine().render(html).expect("render should not fail");
     assert!(bytes.starts_with(b"%PDF"));
 }
 
@@ -72,7 +72,7 @@ fn multiline_link_merges_into_single_annotation_with_multiple_quads() {
         r##"<html><body><div style="width:200px"><p><a href="https://multiline.test">{}</a></p></div></body></html>"##,
         long
     );
-    let bytes = engine().render_html(&html).unwrap();
+    let bytes = engine().render(&html).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     // Single <a> with text broken across multiple lines → one LinkAnnotation
     // that carries multiple QuadPoints. PDF writer emits /QuadPoints array
@@ -100,7 +100,7 @@ fn link_spanning_page_break_emits_annotation_on_each_page() {
         <div style="width:120pt;font-size:40pt;line-height:1.2"><a href="https://cross.test">{link_text}</a></div>
     </body></html>"##
     );
-    let bytes = engine().render_html(&html).unwrap();
+    let bytes = engine().render(&html).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     // Page-crossing links must produce ONE annotation per page (can't share across pages).
     // Expect the URI to appear at least twice in the PDF byte stream (once per /URI entry).
@@ -118,7 +118,7 @@ fn link_works_through_gcpm_render_path() {
         <head><style>@page { margin: 2cm; @top-center { content: "Header"; } }</style></head>
         <body><p><a href="https://gcpm.test">click</a></p></body>
     </html>"##;
-    let bytes = engine().render_html(html).unwrap();
+    let bytes = engine().render(html).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("/Link"), "GCPM path missing /Link");
     assert!(text.contains("https://gcpm.test"), "GCPM path missing URI");
@@ -136,7 +136,7 @@ fn margin_box_running_element_link_keeps_pdf_annotation() {
             <p>body</p>
         </body>
     </html>"##;
-    let bytes = engine().render_html(html).unwrap();
+    let bytes = engine().render(html).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(
         text.contains("/Link"),
@@ -185,7 +185,7 @@ fn margin_box_running_element_link_keeps_pdf_annotation() {
 #[ignore = "blocked on InlineBox → InlineImage materialisation in extract_paragraph; see TODO above"]
 fn anchor_wrapping_inline_image_is_clickable() {
     let html = r##"<html><body><p><a href="https://img.test"><img src="pixel.png" width="100" height="50"/></a></p></body></html>"##;
-    let bytes = engine_with_png("pixel.png").render_html(html).unwrap();
+    let bytes = engine_with_png("pixel.png").render(html).unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(
         text.contains("/Link"),
