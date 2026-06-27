@@ -149,6 +149,11 @@ impl Px {
 }
 
 impl Pt {
+    /// The zero length. Use instead of `0.0_f32.pt()` for clamp idioms
+    /// (`x.max(Pt::ZERO)`); the private field means `Pt(0.0)` is not
+    /// constructible outside this module.
+    pub const ZERO: Pt = Pt(0.0);
+
     /// Raw `f32` value. Use only at FFI boundaries.
     #[inline]
     pub const fn to_f32(self) -> f32 {
@@ -226,6 +231,7 @@ mod tests {
 
     #[test]
     fn pt_max_min_mirror_f32() {
+        assert_eq!(Pt::ZERO, Pt(0.0));
         assert_eq!(Pt(1.0).max(Pt(2.0)), Pt(2.0));
         assert_eq!(Pt(1.0).min(Pt(2.0)), Pt(1.0));
         // identical to f32::max/min, including the 0.0 clamp idiom

@@ -2321,19 +2321,18 @@ fn paint_multicol_rule_for_page(
 
     let x_base = margin_left_pt.pt() + target_frag.x.px().in_pt();
     let y_base = margin_top_pt.pt() + target_frag.y.px().in_pt();
-    let zero = 0.0_f32.pt();
 
     for group in &entry.groups {
         if group.n < 2 || group.col_heights.len() != group.n as usize {
             continue;
         }
         let group_top = group.y_offset - consumed;
-        let max_h = group.col_heights.iter().copied().fold(zero, Pt::max);
+        let max_h = group.col_heights.iter().copied().fold(Pt::ZERO, Pt::max);
         let group_bottom = group_top + max_h;
-        if group_bottom <= zero || group_top >= cutoff {
+        if group_bottom <= Pt::ZERO || group_top >= cutoff {
             continue;
         }
-        let visible_top = group_top.max(zero);
+        let visible_top = group_top.max(Pt::ZERO);
         let y_top = y_base + visible_top;
         // Mirror `MulticolRulePageable::slice_for_page`
         // (`pageable.rs:3221-3223`): subtract the portion of each
@@ -2341,16 +2340,16 @@ fn paint_multicol_rule_for_page(
         // the visible strip on this page. Without this, a column rule
         // segment whose group straddles a page boundary extends past
         // the actual visible column content.
-        let consumed_above = (visible_top - group_top).max(zero);
-        let visible_h = (group_bottom.min(cutoff) - visible_top).max(zero);
+        let consumed_above = (visible_top - group_top).max(Pt::ZERO);
+        let visible_h = (group_bottom.min(cutoff) - visible_top).max(Pt::ZERO);
         for i in 0..(group.n as usize - 1) {
             let h_left = (group.col_heights[i] - consumed_above)
-                .max(zero)
+                .max(Pt::ZERO)
                 .min(visible_h);
             let h_right = (group.col_heights[i + 1] - consumed_above)
-                .max(zero)
+                .max(Pt::ZERO)
                 .min(visible_h);
-            if h_left <= zero || h_right <= zero {
+            if h_left <= Pt::ZERO || h_right <= Pt::ZERO {
                 continue;
             }
             let rule_x = x_base
