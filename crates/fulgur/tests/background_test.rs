@@ -35,9 +35,7 @@ fn test_background_image_renders_to_pdf() {
         .page_size(PageSize::A4)
         .margin(Margin::uniform(72.0))
         .build()
-        .render(
-            r#"<html><body><div style="width:200px;height:200px">Hello</div></body></html>"#,
-        )
+        .render(r#"<html><body><div style="width:200px;height:200px">Hello</div></body></html>"#)
         .unwrap();
     assert!(
         pdf.len() > pdf_no_bg.len(),

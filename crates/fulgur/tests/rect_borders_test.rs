@@ -20,9 +20,7 @@ fn render_example(name: &str) -> Vec<u8> {
         .base_path(root)
         .build();
 
-    engine
-        .render(&html)
-        .expect("render should succeed")
+    engine.render(&html).expect("render should succeed")
 }
 
 #[test]

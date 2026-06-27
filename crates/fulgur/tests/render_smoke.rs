@@ -951,9 +951,7 @@ fn render_v2_smoke_body_overflow_hidden_multi_page_content_survives() {
     let without_clip = r##"<!DOCTYPE html><html><head><style>html,body{margin:0;padding:0;background:#fff}.tall{height:1500px;background:#cef}</style></head><body><div class="tall"></div></body></html>"##;
     let engine = fulgur::engine::Engine::builder().build();
     let pdf_clip = engine.render(with_clip).expect("v2 render w/ clip");
-    let pdf_plain = engine
-        .render(without_clip)
-        .expect("v2 render w/o clip");
+    let pdf_plain = engine.render(without_clip).expect("v2 render w/o clip");
     let ratio = pdf_clip.len() as f32 / pdf_plain.len() as f32;
     assert!(
         ratio > 0.95 && ratio < 1.05,
@@ -1495,10 +1493,7 @@ fn render_v2_smoke_inline_block_css_transform_branch() {
         <p>text <span style="display:inline-block;width:60px;height:30px;background:red;
                              transform:rotate(15deg)">rotated</span> text</p>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
 }
@@ -1511,10 +1506,7 @@ fn render_v2_smoke_inline_block_overflow_hidden_clip_branch() {
             <span style="margin-left:100px">clipped</span>
         </span> text</p>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
 }
@@ -1529,10 +1521,7 @@ fn render_v2_smoke_inline_block_opacity_descendant_branch() {
             </span>
         </span> text</p>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
 }
@@ -1606,10 +1595,7 @@ fn render_v2_smoke_border_groove_and_ridge() {
         <div class="grv">grooved box</div>
         <div class="rdg">ridge box</div>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
 }
@@ -1625,10 +1611,7 @@ fn render_v2_smoke_border_inset_and_outset() {
         <div class="ins">inset box</div>
         <div class="ots">outset box</div>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -1640,10 +1623,7 @@ fn render_v2_smoke_border_radius_with_style_rounded_path() {
     let html = r#"<!DOCTYPE html><html><head><style>
         .rnd { border: 4pt solid #444; border-radius: 12pt; padding: 8pt; }
     </style></head><body><div class="rnd">rounded</div></body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -1658,10 +1638,7 @@ fn render_v2_smoke_overflow_hidden_with_border_radius() {
     </style></head><body>
         <div class="clipped"><div class="inner">overflow content</div></div>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -1674,10 +1651,7 @@ fn render_v2_smoke_inline_block_with_background_and_text() {
     let html = r#"<!DOCTYPE html><html><body>
         <p>before <span style="display:inline-block; background:#fce; padding:4pt; border:1pt solid #888;">inline-block with background</span> after</p>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -1689,10 +1663,7 @@ fn render_v2_smoke_inline_block_with_overflow_clip_and_text() {
     let html = r#"<!DOCTYPE html><html><body>
         <p>x <span style="display:inline-block; overflow:hidden; width:60pt; height:20pt; background:#cef;">overflow inline-block text</span> y</p>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -1706,10 +1677,7 @@ fn render_v2_smoke_empty_li_inside_position_marker_paragraph() {
     </style></head><body>
         <ul><li></li><li>second</li></ul>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -1725,10 +1693,7 @@ fn render_v2_smoke_li_inside_with_block_child_synthesizes_marker_paragraph() {
     </style></head><body>
         <ul><li><div class="blk"></div></li></ul>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -1845,10 +1810,7 @@ fn render_v2_smoke_li_with_opacity_records_opacity_descendants() {
     </style></head><body>
         <ul><li><div class="blk">child</div></li></ul>
     </body></html>"#;
-    let pdf = Engine::builder()
-        .build()
-        .render(html)
-        .expect("v2 render");
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
 
@@ -3115,11 +3077,10 @@ fn tagged_pdf_link_in_opacity_block_with_inline_box_child() {
         </div>
     </body></html>"#;
 
-    let pdf = Engine::builder()
-        .tagged(true)
-        .build()
-        .render(html)
-        .expect("opacity inline-root with inline-box child and link in tagged PDF must not panic");
+    let pdf =
+        Engine::builder().tagged(true).build().render(html).expect(
+            "opacity inline-root with inline-box child and link in tagged PDF must not panic",
+        );
 
     assert!(!pdf.is_empty());
     let s = String::from_utf8_lossy(&pdf);
@@ -3364,15 +3325,9 @@ fn render_table_pagebreak_does_not_scale_quadratically() {
     fn time_render(n: usize) -> std::time::Duration {
         let html = build(n);
         // Warm up so the first call doesn't pay font / GCPM init costs.
-        let _ = fulgur::Engine::builder()
-            .build()
-            .render(&html)
-            .unwrap();
+        let _ = fulgur::Engine::builder().build().render(&html).unwrap();
         let start = std::time::Instant::now();
-        let _ = fulgur::Engine::builder()
-            .build()
-            .render(&html)
-            .unwrap();
+        let _ = fulgur::Engine::builder().build().render(&html).unwrap();
         start.elapsed()
     }
 
@@ -4325,9 +4280,7 @@ fn table_caption_text_renders_in_pdf() {
           <tbody><tr><td>cellone</td><td>celltwo</td></tr></tbody>
         </table>
     </body></html>"#;
-    let pdf = noto_engine()
-        .render(html)
-        .expect("render must succeed");
+    let pdf = noto_engine().render(html).expect("render must succeed");
     assert!(!pdf.is_empty());
 
     let Some(text) = extract_pdf_text(&pdf) else {
@@ -4364,9 +4317,7 @@ fn caption_and_cell_ys(caption_side: &str) -> (f32, f32, f32) {
           </table>
         </body></html>"#
     );
-    let pdf = noto_engine()
-        .render(&html)
-        .expect("render must succeed");
+    let pdf = noto_engine().render(&html).expect("render must succeed");
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("caption-side.pdf");
     std::fs::write(&path, &pdf).expect("write pdf");
@@ -4425,9 +4376,7 @@ fn table_caption_with_nested_inline_renders() {
           <tbody><tr><td>cellone</td></tr></tbody>
         </table>
     </body></html>"#;
-    let pdf = noto_engine()
-        .render(html)
-        .expect("render must succeed");
+    let pdf = noto_engine().render(html).expect("render must succeed");
     let Some(text) = extract_pdf_text(&pdf) else {
         eprintln!("pdftotext not available; skipping text assertion");
         return;
@@ -4450,9 +4399,7 @@ fn table_with_two_captions_does_not_panic() {
           <tbody><tr><td>cellone</td></tr></tbody>
         </table>
     </body></html>"#;
-    let pdf = noto_engine()
-        .render(html)
-        .expect("render must succeed");
+    let pdf = noto_engine().render(html).expect("render must succeed");
     assert!(!pdf.is_empty());
     assert!(pdf.starts_with(b"%PDF"));
 }
@@ -4473,9 +4420,7 @@ fn caption_big_text_count(extra_css: &str) -> usize {
           </table>
         </body></html>"#
     );
-    let pdf = noto_engine()
-        .render(&html)
-        .expect("render must succeed");
+    let pdf = noto_engine().render(&html).expect("render must succeed");
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("caption-display.pdf");
     std::fs::write(&path, &pdf).expect("write pdf");
@@ -4564,9 +4509,7 @@ fn table_caption_side_ignored_for_non_table_caption_display() {
             <tbody><tr><td>cellone</td></tr><tr><td>celltwo</td></tr></tbody>
           </table>
         </body></html>"#;
-    let pdf = noto_engine()
-        .render(html)
-        .expect("render must succeed");
+    let pdf = noto_engine().render(html).expect("render must succeed");
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("caption-block-bottom.pdf");
     std::fs::write(&path, &pdf).expect("write pdf");
@@ -4662,9 +4605,7 @@ fn full_width_table_max_cell_x(with_caption: bool) -> f32 {
           </table>
         </body></html>"#
     );
-    let pdf = noto_engine()
-        .render(&html)
-        .expect("render must succeed");
+    let pdf = noto_engine().render(&html).expect("render must succeed");
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("fullwidth.pdf");
     std::fs::write(&path, &pdf).expect("write pdf");
