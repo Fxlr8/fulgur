@@ -4707,3 +4707,20 @@ fn pathological_tall_block_render_is_bounded() {
         .expect("render must terminate and succeed");
     assert!(!pdf.is_empty(), "expected a non-empty bounded PDF");
 }
+
+/// fulgur-2map.2: the multicol column-rule pt carrier (units::Pt) renders
+/// end-to-end through record_multicol_rule + paint_multicol_rule_for_page.
+#[test]
+fn multicol_column_rule_renders() {
+    let html = r#"<!doctype html><html><body>
+      <div style="column-count:3; column-gap:20px; column-rule:2px solid #333;">
+        <p>alpha beta gamma delta epsilon zeta eta theta iota kappa
+        lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega</p>
+      </div>
+    </body></html>"#;
+    let pdf = fulgur::Engine::builder()
+        .build()
+        .render_html(html)
+        .expect("render multicol column-rule");
+    assert!(!pdf.is_empty());
+}
