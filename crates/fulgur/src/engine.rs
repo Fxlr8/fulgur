@@ -611,8 +611,15 @@ impl Engine {
     }
 
     /// Render a template with data to PDF bytes.
-    /// The template is expanded via MiniJinja, then passed to render().
+    ///
+    /// The template is expanded via MiniJinja, then passed to [`render`](Engine::render).
     /// Returns an error if no template was set via the builder.
+    ///
+    /// **Migration note:** This method was previously named `render()` (no arguments).
+    /// Because the new [`render`](Engine::render) method occupies that name with a
+    /// different signature, no `#[deprecated]` alias can be provided — existing calls
+    /// to `engine.render()` with no arguments will produce a compile error and must be
+    /// updated to `engine.render_template()`.
     pub fn render_template(&self) -> Result<Vec<u8>> {
         let (name, content) = self
             .template

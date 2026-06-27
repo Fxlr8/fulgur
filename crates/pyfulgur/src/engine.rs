@@ -204,7 +204,7 @@ impl PyEngineBuilder {
 ///     ```python
 ///     from pyfulgur import Engine, PageSize
 ///     engine = Engine(page_size=PageSize.A4, title="Hello")
-///     engine.render_file("<h1>Hi</h1>", "out.pdf")
+///     engine.render_html_to_file("<h1>Hi</h1>", "out.pdf")
 ///     ```
 #[pyclass(name = "Engine", module = "pyfulgur")]
 pub struct PyEngine {
