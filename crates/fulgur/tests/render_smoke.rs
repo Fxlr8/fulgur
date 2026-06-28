@@ -4694,6 +4694,104 @@ fn multicol_column_rule_renders() {
     assert!(!pdf.is_empty());
 }
 
+// ===== P1a (fulgur-2map.3) byte-neutral units::Pt migration coverage =====
+// These end-to-end smoke tests drive the three migration lines that only the
+// VRT suite exercised (and so were missing from the non-VRT codecov patch
+// measurement): `background.rs:554` (`compute_inner_radii` call in
+// `draw_background_layer`), `convert/inline_root.rs:197-198` (the pseudo-only
+// inline-root `Size { width: width.pt(), height: height.pt() }` producer), and
+// `convert/list_item.rs:203-204` (the empty-`<li>` inside-marker `Size`
+// producer). See CLAUDE.md "Coverage scope" Gotcha.
+
+/// 1x1 raster PNG used as a `content: url(...)` / `list-style-image` asset so
+/// the pseudo-image and inside-image-marker paths resolve deterministically
+/// without depending on system fonts.
+fn smoke_tiny_png() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ]
+}
+
+#[test]
+fn background_image_layer_with_border_radius_inner_radii_renders() {
+    // Covers `background.rs:554` — the `compute_inner_radii(&style.border_radii
+    // .map(Pt::to_f32), ..)` call inside `draw_background_layer`'s
+    // `style.has_radius()` arm. Only reached when a background *image* layer
+    // (here a linear gradient) co-occurs with a non-zero `border-radius`;
+    // existing gradient smoke tests lacked the radius. Border + padding give
+    // the inner-radii insets a non-trivial value.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:120pt;height:60pt;background:linear-gradient(to right,#f00,#00f);border:4pt solid #333;border-radius:14pt;padding:6pt;">grad rounded</div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn inline_root_block_wrapper_pseudo_only_size_renders() {
+    // Covers `convert/inline_root.rs:196-199` — the second `Size { width:
+    // width.pt(), height: height.pt() }` producer in the `else if before_inline
+    // .is_some() || after_inline.is_some()` arm (no real text, so
+    // `extract_paragraph` returns `None`). An `display:inline-block` span with
+    // an inline `::before` image and a visual block style (background + border)
+    // makes `needs_block` true while keeping the paragraph empty, hitting the
+    // pseudo-only block-wrapper path. A plain `inline` span instead routes
+    // through the first (already-covered) producer.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", smoke_tiny_png());
+    bundle.add_css(
+        r#".px{display:inline-block;background:#eee;border:2pt solid #333;}
+.px::before{content:url("dot.png");}"#,
+    );
+    let html = r#"<!DOCTYPE html><html><body><p>x <span class="px"></span> y</p></body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn list_item_inside_marker_empty_li_block_size_renders() {
+    // Covers `convert/list_item.rs:202-205` — the `Size` producer in the
+    // empty-`<li>` (`children.is_empty()`) arm of the inside-positioned-marker
+    // branch. The marker must *resolve* for the producer to run: with a
+    // bundled `list-style-image` the inside-image marker resolves, unlike the
+    // disc-glyph path which yields `None` without a bundled font (that is why
+    // `render_v2_smoke_empty_li_inside_position_marker_paragraph` does not
+    // reach this line).
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", smoke_tiny_png());
+    bundle.add_css(r#"ul{list-style-position:inside;list-style-image:url("dot.png");}"#);
+    let html = r#"<!DOCTYPE html><html><body><ul><li></li><li>second</li></ul></body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn border_radius_px_and_percent_resolve_radius_renders() {
+    // coderabbit follow-up for P1a: exercise `convert/style/border.rs`'s
+    // `resolve_radius` closure (`.px().in_pt()`) through both a percentage
+    // basis (`50%`, which depends on the border-box size) and an absolute
+    // length (`8px`), guarding against a 4/3x px<->pt regression. Backgrounds
+    // make the rounded fills actually paint.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="width:80pt;height:40pt;background:#cef;border-radius:50%;"></div>
+        <div style="width:80pt;height:40pt;background:#fce;border-radius:8px;"></div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
 /// fulgur-5biq: Engine is Send + Sync — can be shared across threads.
 ///
 /// If `Engine` ever stops being `Send + Sync` this test will fail to compile.

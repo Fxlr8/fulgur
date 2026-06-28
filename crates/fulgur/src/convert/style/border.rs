@@ -1,11 +1,11 @@
 //! border-color, border-radius, border-style extraction.
 //!
 //! border_radii basis is CSS px (Stylo length-percentage operates in CSS px),
-//! converted to pt via px_to_pt before storage. See coordinate-system.md.
+//! converted to pt via `.px().in_pt()` before storage. See coordinate-system.md.
 
 use super::{StyleContext, absolute_to_rgba};
-use crate::convert::px_to_pt;
 use crate::draw_primitives::{BlockStyle, BorderStyleValue};
+use crate::units::F32Units;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     // Border color (use top border color for all sides for simplicity)
@@ -18,15 +18,6 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     // pt-space widths/heights (see `compute_padding_box_inner_radii`).
     let width = ctx.layout.size.width;
     let height = ctx.layout.size.height;
-    let resolve_radius =
-        |r: &style::values::computed::length_percentage::NonNegativeLengthPercentage,
-         basis: f32|
-         -> f32 {
-            px_to_pt(
-                r.0.resolve(style::values::computed::Length::new(basis))
-                    .px(),
-            )
-        };
 
     let tl = ctx.styles.clone_border_top_left_radius();
     let tr = ctx.styles.clone_border_top_right_radius();
@@ -60,6 +51,19 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     ];
 }
 
+/// Resolve one border-radius corner component to PDF pt. Stylo resolves the
+/// length-percentage in CSS px (`Length::px()` -> f32 CSS px); `F32Units`
+/// (`f32 -> Px`) then `.in_pt()` converts to `Pt`. Byte-neutral.
+fn resolve_radius(
+    r: &style::values::computed::length_percentage::NonNegativeLengthPercentage,
+    basis: f32,
+) -> crate::units::Pt {
+    let radius_css_px: f32 =
+        r.0.resolve(style::values::computed::Length::new(basis))
+            .px();
+    radius_css_px.px().in_pt()
+}
+
 fn map_border_style(bs: style::values::specified::BorderStyle) -> BorderStyleValue {
     use style::values::specified::BorderStyle as BS;
     match bs {
@@ -77,9 +81,28 @@ fn map_border_style(bs: style::values::specified::BorderStyle) -> BorderStyleVal
 
 #[cfg(test)]
 mod tests {
-    use super::map_border_style;
+    use super::{map_border_style, resolve_radius};
     use crate::draw_primitives::BorderStyleValue;
+    use style::values::computed::{Length, LengthPercentage, Percentage};
+    use style::values::generics::NonNegative;
     use style::values::specified::BorderStyle as BS;
+
+    #[test]
+    fn resolve_radius_absolute_px_to_pt() {
+        // An absolute 8 CSS px radius converts to 8 * 0.75 = 6 pt, and the
+        // basis is irrelevant for an absolute length (pass a nonzero basis to
+        // prove it is ignored).
+        let r = NonNegative(LengthPercentage::new_length(Length::new(8.0)));
+        assert_eq!(resolve_radius(&r, 200.0).to_f32(), 6.0);
+    }
+
+    #[test]
+    fn resolve_radius_percentage_of_basis_to_pt() {
+        // 50% of a 100 CSS px basis is 50 CSS px, which converts to
+        // 50 * 0.75 = 37.5 pt.
+        let r = NonNegative(LengthPercentage::new_percent(Percentage(0.5)));
+        assert_eq!(resolve_radius(&r, 100.0).to_f32(), 37.5);
+    }
 
     #[test]
     fn none_and_hidden_collapse_to_none() {

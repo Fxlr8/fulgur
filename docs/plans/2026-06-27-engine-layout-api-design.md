@@ -233,6 +233,25 @@ Deferred to P1d (`fulgur-2map.6`): typing the px source
 `multicol_layout::ColumnGroupGeometry` to `Px`, and
 `column_css::ColumnRuleSpec.width` to `Pt`.
 
+### P1a outcome (fulgur-2map.3) — Size + BlockStyle migrated
+
+Phase P1a typed the two single-unit-pt `draw_primitives` structs to `units::Pt`,
+byte-neutral (examples_determinism + VRT goldens unchanged):
+
+- `Size { width, height }` → `units::Pt`. Producers tag pt-f32 with `.pt()`;
+  draw-layer consumers untag with `.to_f32()` at use.
+- `BlockStyle` `border_widths` / `padding` → `[units::Pt; 4]`, `border_radii`
+  → `[[units::Pt; 2]; 4]`. Producers (`box_metrics`, `border`) convert
+  per-element via `Px::in_pt`; ~46 readers untag with `.to_f32()` /
+  `.map(Pt::to_f32)`. Drawing-helper signatures stayed `f32` (untag at call
+  sites) — deeper helper typing is a later phase.
+
+Discriminator applied: `Affine2D` + `Point2` are **dual-stage** (transform
+`e`/`f` and transform-origin are CSS px at `compute_transform`, folded to pt
+later; `convert/mod.rs` documents the unresolved basis ambiguity), so they were
+**spun out to `fulgur-1ino`** rather than blanket-typed. The `type Pt = f32`
+alias removal remains P2 (`fulgur-2map.8`).
+
 ## 8. 決定性 / 受け入れ条件
 
 - `layout_to_drawables` 抽出後・newtype 移行後とも `examples_determinism` golden と

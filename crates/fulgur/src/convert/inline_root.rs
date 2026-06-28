@@ -129,7 +129,10 @@ pub(super) fn try_convert(
                     opacity,
                     visible,
                     id: extract_block_id(node),
-                    layout_size: Some(Size { width, height }),
+                    layout_size: Some(Size {
+                        width: width.pt(),
+                        height: height.pt(),
+                    }),
                     clip_descendants: Vec::new(),
                     opacity_descendants: Vec::new(),
                 },
@@ -190,7 +193,10 @@ pub(super) fn try_convert(
                     opacity,
                     visible,
                     id: extract_block_id(node),
-                    layout_size: Some(Size { width, height }),
+                    layout_size: Some(Size {
+                        width: width.pt(),
+                        height: height.pt(),
+                    }),
                     clip_descendants: Vec::new(),
                     opacity_descendants: Vec::new(),
                 },
@@ -360,7 +366,7 @@ fn pageable_last_baseline_from_drawables(
         let top_inset = out
             .block_styles
             .get(&node_id)
-            .map(|b| b.style.border_widths[0] + b.style.padding[0])
+            .map(|b| b.style.border_widths[0].to_f32() + b.style.padding[0].to_f32())
             .unwrap_or(0.0);
         if let Some(line) = para.lines.last() {
             return Some(top_inset + line.baseline);
@@ -619,6 +625,7 @@ mod tests {
         InlineBoxItem, InlineImage, LineItem, LinkTarget, ShapedGlyphRun, ShapedLine,
         TextDecoration, VerticalAlign,
     };
+    use crate::units::F32Units;
     use blitz_html::HtmlDocument;
     use std::ops::Deref;
     use std::sync::Arc;
@@ -1318,8 +1325,8 @@ mod tests {
         out.paragraphs
             .insert(node_id, make_paragraph_entry(&[12.0]));
         let mut entry = make_block_entry_plain();
-        entry.style.border_widths[0] = 4.0; // top border
-        entry.style.padding[0] = 2.0; // top padding
+        entry.style.border_widths[0] = 4.0_f32.pt(); // top border
+        entry.style.padding[0] = 2.0_f32.pt(); // top padding
         out.block_styles.insert(node_id, entry);
         let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
         // top_inset = 4 + 2 = 6; baseline = 12 → Some(18).

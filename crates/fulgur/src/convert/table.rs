@@ -41,7 +41,10 @@ fn convert_table(
             opacity,
             visible,
             id: extract_block_id(node),
-            layout_size: Some(Size { width, height }),
+            layout_size: Some(Size {
+                width: width.pt(),
+                height: height.pt(),
+            }),
             width,
             cached_height: height,
             clip_descendants: Vec::new(),

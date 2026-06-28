@@ -80,8 +80,8 @@ pub type Pt = f32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Size {
-    pub width: Pt,
-    pub height: Pt,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
 }
 
 /// 2×3 affine transformation matrix used for CSS `transform`.
@@ -610,11 +610,11 @@ pub struct BlockStyle {
     /// Border color as RGBA
     pub border_color: [u8; 4],
     /// Border widths: top, right, bottom, left
-    pub border_widths: [f32; 4],
+    pub border_widths: [crate::units::Pt; 4],
     /// Padding: top, right, bottom, left
-    pub padding: [f32; 4],
+    pub padding: [crate::units::Pt; 4],
     /// Border radii: [top-left, top-right, bottom-right, bottom-left] × [rx, ry]
-    pub border_radii: [[f32; 2]; 4],
+    pub border_radii: [[crate::units::Pt; 2]; 4],
     /// Border styles: top, right, bottom, left
     pub border_styles: [BorderStyleValue; 4],
     /// `overflow-x` value
@@ -878,23 +878,25 @@ pub struct BackgroundLayer {
 impl BlockStyle {
     /// Whether any border radius is non-zero.
     pub fn has_radius(&self) -> bool {
-        self.border_radii.iter().any(|r| r[0] > 0.0 || r[1] > 0.0)
+        self.border_radii
+            .iter()
+            .any(|r| r[0].to_f32() > 0.0 || r[1].to_f32() > 0.0)
     }
 
     /// Whether this style has any visual properties (background, border, or padding).
     pub fn has_visual_style(&self) -> bool {
         self.background_color.is_some()
             || !self.background_layers.is_empty()
-            || self.border_widths.iter().any(|&w| w > 0.0)
-            || self.padding.iter().any(|&p| p > 0.0)
+            || self.border_widths.iter().any(|&w| w.to_f32() > 0.0)
+            || self.padding.iter().any(|&p| p.to_f32() > 0.0)
             || !self.box_shadows.is_empty()
     }
 
     /// Returns (left_inset, top_inset) for content positioning inside border+padding.
     pub fn content_inset(&self) -> (f32, f32) {
         (
-            self.border_widths[3] + self.padding[3],
-            self.border_widths[0] + self.padding[0],
+            self.border_widths[3].to_f32() + self.padding[3].to_f32(),
+            self.border_widths[0].to_f32() + self.padding[0].to_f32(),
         )
     }
 
@@ -1087,7 +1089,7 @@ pub(crate) fn compute_overflow_clip_path(
     }
 
     // padding-box = border-box inset by border widths (top, right, bottom, left)
-    let bw = &style.border_widths;
+    let bw = style.border_widths.map(crate::units::Pt::to_f32);
     let pb_x = x + bw[3];
     let pb_y = y + bw[0];
     let pb_w = w - bw[1] - bw[3];
@@ -1119,7 +1121,10 @@ pub(crate) fn compute_overflow_clip_path(
     let has_radius = style.has_radius();
 
     if both_axes && has_radius {
-        let inner_radii = compute_padding_box_inner_radii(&style.border_radii, bw);
+        let inner_radii = compute_padding_box_inner_radii(
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+            &bw,
+        );
         build_rounded_rect_path(cx, cy, cw, ch, &inner_radii)
     } else {
         build_overflow_rect_path(cx, cy, cw, ch)
@@ -1424,7 +1429,7 @@ pub(crate) fn draw_block_border(
     w: f32,
     h: f32,
 ) {
-    let [bt, br, bb, bl] = style.border_widths;
+    let [bt, br, bb, bl] = style.border_widths.map(crate::units::Pt::to_f32);
     let [st, sr, sb, sl] = style.border_styles;
     if !(bt > 0.0 || br > 0.0 || bb > 0.0 || bl > 0.0) {
         return;
@@ -1435,9 +1440,12 @@ pub(crate) fn draw_block_border(
     let uniform_style = st == sr && sr == sb && sb == sl;
     if style.has_radius() && uniform_width && uniform_style && st != BorderStyleValue::None {
         let inset = bt / 2.0;
-        let inset_radii = style
-            .border_radii
-            .map(|[rx, ry]| [(rx - inset).max(0.0), (ry - inset).max(0.0)]);
+        let inset_radii = style.border_radii.map(|[rx, ry]| {
+            [
+                (rx.to_f32() - inset).max(0.0),
+                (ry.to_f32() - inset).max(0.0),
+            ]
+        });
         if let Some(path) = build_rounded_rect_path(
             x + inset,
             y + inset,
@@ -1573,6 +1581,7 @@ pub(crate) fn clamp_marker_size(
 #[cfg(test)]
 mod dp_unit_tests {
     use super::*;
+    use crate::units::F32Units;
     use std::sync::Arc;
 
     // ── DestinationRegistry transform stack ─────────────────
@@ -1691,7 +1700,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Visible,
-            border_widths: [1.0, 1.0, 1.0, 1.0],
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.pt()),
             ..Default::default()
         };
         // y axis non-clip → expanded to ±INFINITE (line 988).
@@ -1703,8 +1712,8 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Clip,
-            border_widths: [2.0, 2.0, 2.0, 2.0],
-            border_radii: [[8.0, 8.0]; 4],
+            border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.pt()),
+            border_radii: [[8.0, 8.0]; 4].map(|p| p.map(|v| v.pt())),
             ..Default::default()
         };
         // both axes clipped + has_radius → rounded path branch (lines 999-1000).
@@ -1716,7 +1725,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Clip,
-            border_widths: [50.0, 50.0, 50.0, 50.0],
+            border_widths: [50.0, 50.0, 50.0, 50.0].map(|v| v.pt()),
             ..Default::default()
         };
         // border-widths exceed the box → cw / ch ≤ 0 → returns None.
@@ -2003,7 +2012,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_has_radius_true_when_any_nonzero() {
         let mut s = BlockStyle::default();
-        s.border_radii[2] = [0.0, 5.0];
+        s.border_radii[2] = [0.0, 5.0].map(|v| v.pt());
         assert!(s.has_radius());
     }
 
@@ -2019,7 +2028,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_has_visual_style_border_width() {
         let s = BlockStyle {
-            border_widths: [0.0, 1.0, 0.0, 0.0],
+            border_widths: [0.0, 1.0, 0.0, 0.0].map(|v| v.pt()),
             ..Default::default()
         };
         assert!(s.has_visual_style());
@@ -2028,7 +2037,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_has_visual_style_padding() {
         let s = BlockStyle {
-            padding: [0.0, 0.0, 0.0, 3.0],
+            padding: [0.0, 0.0, 0.0, 3.0].map(|v| v.pt()),
             ..Default::default()
         };
         assert!(s.has_visual_style());
@@ -2051,8 +2060,8 @@ mod dp_unit_tests {
     #[test]
     fn block_style_content_inset_sums_left_border_and_left_padding() {
         let s = BlockStyle {
-            border_widths: [5.0, 0.0, 0.0, 3.0], // top, right, bottom, left
-            padding: [7.0, 0.0, 0.0, 2.0],       // top, right, bottom, left
+            border_widths: [5.0, 0.0, 0.0, 3.0].map(|v| v.pt()), // top, right, bottom, left
+            padding: [7.0, 0.0, 0.0, 2.0].map(|v| v.pt()),       // top, right, bottom, left
             ..Default::default()
         };
         let (left, top) = s.content_inset();
@@ -2089,7 +2098,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_needs_block_wrapper_from_radius_alone() {
         let s = BlockStyle {
-            border_radii: [[5.0, 5.0]; 4],
+            border_radii: [[5.0, 5.0]; 4].map(|p| p.map(|v| v.pt())),
             ..Default::default()
         };
         assert!(s.needs_block_wrapper());
@@ -2253,7 +2262,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Clip,
-            border_widths: [1.0, 1.0, 1.0, 1.0],
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.pt()),
             ..Default::default()
         };
         assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
@@ -2266,7 +2275,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Clip,
-            border_widths: [1.0, 1.0, 1.0, 1.0],
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.pt()),
             ..Default::default()
         };
         assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
@@ -2396,9 +2405,9 @@ mod dp_unit_tests {
         // → rounded-rect stroke path (lines 1441-1458 in draw_block_border).
         let style = BlockStyle {
             border_color: [0, 0, 0, 255],
-            border_widths: [2.0, 2.0, 2.0, 2.0],
+            border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.pt()),
             border_styles: [BorderStyleValue::Solid; 4],
-            border_radii: [[4.0, 4.0]; 4],
+            border_radii: [[4.0, 4.0]; 4].map(|p| p.map(|v| v.pt())),
             ..Default::default()
         };
         with_canvas_smoke(|canvas| {
@@ -2413,7 +2422,7 @@ mod dp_unit_tests {
         //   stroke_inset_rect (1307-1308) and colored_stroke (1323-1324).
         let style = BlockStyle {
             border_color: [0, 0, 100, 255],
-            border_widths: [6.0, 6.0, 6.0, 6.0],
+            border_widths: [6.0, 6.0, 6.0, 6.0].map(|v| v.pt()),
             border_styles: [BorderStyleValue::Double; 4],
             ..Default::default()
         };
@@ -2429,7 +2438,7 @@ mod dp_unit_tests {
         // apply_border_style(Solid) + stroke_line.
         let style = BlockStyle {
             border_color: [200, 100, 0, 255],
-            border_widths: [2.0, 4.0, 2.0, 4.0],
+            border_widths: [2.0, 4.0, 2.0, 4.0].map(|v| v.pt()),
             border_styles: [BorderStyleValue::Solid; 4],
             ..Default::default()
         };
@@ -2445,7 +2454,7 @@ mod dp_unit_tests {
         // draw_border_line Groove arm (lines 1369-1397).
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0],
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
             border_styles: [BorderStyleValue::Groove; 4],
             ..Default::default()
         };
@@ -2458,7 +2467,7 @@ mod dp_unit_tests {
     fn draw_block_border_ridge_per_side_smoke() {
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0],
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
             border_styles: [BorderStyleValue::Ridge; 4],
             ..Default::default()
         };
@@ -2472,7 +2481,7 @@ mod dp_unit_tests {
         // draw_border_line Inset arm (lines 1399-1408).
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0],
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
             border_styles: [BorderStyleValue::Inset; 4],
             ..Default::default()
         };
@@ -2485,7 +2494,7 @@ mod dp_unit_tests {
     fn draw_block_border_outset_per_side_smoke() {
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0],
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
             border_styles: [BorderStyleValue::Outset; 4],
             ..Default::default()
         };
@@ -2500,7 +2509,7 @@ mod dp_unit_tests {
         // draw_border_line Double arm (lines 1354-1367).
         let style = BlockStyle {
             border_color: [0, 0, 0, 255],
-            border_widths: [6.0, 2.0, 2.0, 2.0],
+            border_widths: [6.0, 2.0, 2.0, 2.0].map(|v| v.pt()),
             border_styles: [
                 BorderStyleValue::Double,
                 BorderStyleValue::Solid,
