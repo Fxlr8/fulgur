@@ -180,4 +180,62 @@ mod tests {
         assert!(store.get_html(999).is_none());
         assert!(store.name_of(999).is_none());
     }
+
+    #[test]
+    fn default_gives_empty_store() {
+        let store = RunningElementStore::default();
+        assert_eq!(store.instance_count(), 0);
+        assert_eq!(store.instance_for_node(0), None);
+    }
+
+    #[test]
+    fn instance_count_tracks_registrations() {
+        let mut store = RunningElementStore::new();
+        assert_eq!(store.instance_count(), 0);
+        store.register(1, "header".to_string(), "<h1>A</h1>".to_string());
+        assert_eq!(store.instance_count(), 1);
+        store.register(2, "header".to_string(), "<h1>B</h1>".to_string());
+        assert_eq!(store.instance_count(), 2);
+    }
+
+    // --- escape_attribute_value ---
+
+    fn escape(s: &str) -> String {
+        let mut out = String::new();
+        escape_attribute_value(s, &mut out);
+        out
+    }
+
+    #[test]
+    fn escape_attribute_value_ampersand() {
+        assert_eq!(escape("a&b"), "a&amp;b");
+        assert_eq!(escape("&&"), "&amp;&amp;");
+    }
+
+    #[test]
+    fn escape_attribute_value_double_quote() {
+        assert_eq!(escape("say \"hi\""), "say &quot;hi&quot;");
+    }
+
+    #[test]
+    fn escape_attribute_value_angle_brackets() {
+        assert_eq!(escape("a<b>c"), "a&lt;b&gt;c");
+        assert_eq!(escape("<>"), "&lt;&gt;");
+    }
+
+    #[test]
+    fn escape_attribute_value_passthrough_regular_chars() {
+        assert_eq!(escape("hello world!"), "hello world!");
+        assert_eq!(escape("abc123"), "abc123");
+    }
+
+    #[test]
+    fn escape_attribute_value_empty() {
+        assert_eq!(escape(""), "");
+    }
+
+    #[test]
+    fn escape_attribute_value_all_specials_combined() {
+        assert_eq!(escape("&\"<>"), "&amp;&quot;&lt;&gt;");
+    }
 }
