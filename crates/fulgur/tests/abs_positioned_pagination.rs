@@ -79,7 +79,8 @@ fn count_blocks_with_size(
         .values()
         .filter(|entry| {
             entry.layout_size.is_some_and(|s| {
-                (s.width - target_w).abs() < 0.5 && (s.height - target_h).abs() < 0.5
+                (s.width.to_f32() - target_w).abs() < 0.5
+                    && (s.height.to_f32() - target_h).abs() < 0.5
             })
         })
         .count()

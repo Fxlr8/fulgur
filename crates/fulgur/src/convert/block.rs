@@ -94,7 +94,10 @@ fn insert_block_entry(
             opacity,
             visible,
             id: extract_block_id(node),
-            layout_size: Some(Size { width, height }),
+            layout_size: Some(Size {
+                width: width.pt(),
+                height: height.pt(),
+            }),
             clip_descendants: Vec::new(),
             opacity_descendants: Vec::new(),
         },

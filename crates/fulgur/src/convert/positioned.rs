@@ -1445,8 +1445,9 @@ mod tests {
             .block_styles
             .iter()
             .find(|(_, b)| {
-                b.layout_size
-                    .is_some_and(|s| (s.width - 75.0).abs() < 0.5 && (s.height - 75.0).abs() < 0.5)
+                b.layout_size.is_some_and(|s| {
+                    (s.width.to_f32() - 75.0).abs() < 0.5 && (s.height.to_f32() - 75.0).abs() < 0.5
+                })
             })
             .map(|(id, e)| (*id, e))
             .expect("marker block (75×75 pt) must exist in block_styles");
@@ -1528,8 +1529,9 @@ mod tests {
             .block_styles
             .iter()
             .find(|(_, b)| {
-                b.layout_size
-                    .is_some_and(|s| (s.width - 75.0).abs() < 0.5 && (s.height - 75.0).abs() < 0.5)
+                b.layout_size.is_some_and(|s| {
+                    (s.width.to_f32() - 75.0).abs() < 0.5 && (s.height.to_f32() - 75.0).abs() < 0.5
+                })
             })
             .map(|(id, e)| (*id, e))
             .expect("marker block (75×75 pt) must exist in block_styles");

@@ -80,8 +80,8 @@ pub type Pt = f32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Size {
-    pub width: Pt,
-    pub height: Pt,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
 }
 
 /// 2×3 affine transformation matrix used for CSS `transform`.

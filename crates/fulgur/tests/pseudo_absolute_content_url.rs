@@ -157,8 +157,9 @@ fn absolute_pseudo_with_right_bottom_offsets_by_image_size() {
         .block_styles
         .iter()
         .find(|(_, b)| {
-            b.layout_size
-                .is_some_and(|s| (s.width - 150.0).abs() < 0.5 && (s.height - 150.0).abs() < 0.5)
+            b.layout_size.is_some_and(|s| {
+                (s.width.to_f32() - 150.0).abs() < 0.5 && (s.height.to_f32() - 150.0).abs() < 0.5
+            })
         })
         .map(|(id, e)| (*id, e))
         .expect("marker block should exist with 150x150 pt layout_size");

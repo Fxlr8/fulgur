@@ -1634,7 +1634,7 @@ fn draw_under_clip(
 
     let total_width = block
         .layout_size
-        .map(|s| s.width)
+        .map(|s| s.width.to_f32())
         .unwrap_or_else(|| px_to_pt(frag.width));
     // Mirror `draw_block_inner_paint` / `draw_under_opacity`'s
     // `is_split` height fix. When this `overflow: hidden | clip`
@@ -1653,7 +1653,7 @@ fn draw_under_clip(
             if is_split && frag.height > 0.0 {
                 px_to_pt(frag.height)
             } else {
-                s.height
+                s.height.to_f32()
             }
         })
         .unwrap_or_else(|| px_to_pt(frag.height));
@@ -2051,7 +2051,7 @@ fn draw_under_opacity(
             let svg_for_block = drawables.svgs.get(&node_id);
             let total_width = block
                 .layout_size
-                .map(|s| s.width)
+                .map(|s| s.width.to_f32())
                 .unwrap_or_else(|| px_to_pt(frag.width));
             // Mirror `draw_block_inner_paint`'s `is_split` height fix.
             // When this opacity-scoped block spans multiple pages
@@ -2069,7 +2069,7 @@ fn draw_under_opacity(
                     if is_split && frag.height > 0.0 {
                         px_to_pt(frag.height)
                     } else {
-                        s.height
+                        s.height.to_f32()
                     }
                 })
                 .unwrap_or_else(|| px_to_pt(frag.height));
@@ -2549,7 +2549,8 @@ fn paint_root_block_v2(
         return;
     };
 
-    let h = height_override.unwrap_or(size.height);
+    let h = height_override.unwrap_or(size.height.to_f32());
+    let w = size.width.to_f32();
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
         if entry.visible {
@@ -2558,7 +2559,7 @@ fn paint_root_block_v2(
                 &entry.style,
                 margin_left_pt,
                 margin_top_pt,
-                size.width,
+                w,
                 h,
             );
             crate::background::draw_background(
@@ -2566,7 +2567,7 @@ fn paint_root_block_v2(
                 &entry.style,
                 margin_left_pt,
                 margin_top_pt,
-                size.width,
+                w,
                 h,
             );
             crate::draw_primitives::draw_block_border(
@@ -2574,7 +2575,7 @@ fn paint_root_block_v2(
                 &entry.style,
                 margin_left_pt,
                 margin_top_pt,
-                size.width,
+                w,
                 h,
             );
         }
@@ -2595,7 +2596,7 @@ fn draw_block_inner_paint(
 ) {
     let total_width = entry
         .layout_size
-        .map(|s| s.width)
+        .map(|s| s.width.to_f32())
         .unwrap_or_else(|| crate::convert::px_to_pt(frag.width));
     // For split blocks (one fragment per page), `frag.height` reports
     // the per-page slice height. `entry.layout_size.height` always
@@ -2621,7 +2622,7 @@ fn draw_block_inner_paint(
             if is_split && frag.height > 0.0 {
                 crate::convert::px_to_pt(frag.height)
             } else {
-                s.height
+                s.height.to_f32()
             }
         })
         .unwrap_or_else(|| crate::convert::px_to_pt(frag.height));
@@ -2673,15 +2674,21 @@ fn table_box_size(
     entry: &crate::drawables::TableEntry,
     frag: &crate::pagination_layout::Fragment,
 ) -> (f32, f32) {
-    let total_width = entry.layout_size.map(|s| s.width).unwrap_or(entry.width);
-    let total_height = entry.layout_size.map(|s| s.height).unwrap_or_else(|| {
-        let from_frag = crate::convert::px_to_pt(frag.height);
-        if from_frag > 0.0 {
-            from_frag
-        } else {
-            entry.cached_height
-        }
-    });
+    let total_width = entry
+        .layout_size
+        .map(|s| s.width.to_f32())
+        .unwrap_or(entry.width);
+    let total_height = entry
+        .layout_size
+        .map(|s| s.height.to_f32())
+        .unwrap_or_else(|| {
+            let from_frag = crate::convert::px_to_pt(frag.height);
+            if from_frag > 0.0 {
+                from_frag
+            } else {
+                entry.cached_height
+            }
+        });
     (total_width, total_height)
 }
 
@@ -4758,9 +4765,10 @@ mod tests {
     fn table_box_size_with_layout_size_uses_layout_dimensions() {
         // When layout_size is Some, both width and height come from it,
         // ignoring entry.width, entry.cached_height, and frag.height.
+        use crate::units::F32Units;
         let sz = crate::draw_primitives::Size {
-            width: 120.0,
-            height: 80.0,
+            width: 120.0_f32.pt(),
+            height: 80.0_f32.pt(),
         };
         let entry = make_table_entry_for_size(Some(sz), 200.0, 50.0);
         let frag = make_frag_with_height(99.0);
