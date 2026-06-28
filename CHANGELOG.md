@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.0] - 2026-06-28
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(units): add Px/Pt newtype coordinate units (P0 of layout() epic) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/508
+* feat(engine): add render_batch; optional rayon parallel feature by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/512
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.19.0...v0.20.0
+
 ## [0.19.0] - 2026-06-26
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
