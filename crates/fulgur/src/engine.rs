@@ -640,9 +640,13 @@ impl Engine {
 
     /// Render multiple HTML strings to PDFs, sharing this engine's parsed fonts.
     ///
-    /// Returns one `Result<Vec<u8>>` per input in the same order. A failure in one
-    /// item does not abort the rest. With the `parallel` feature enabled the items
-    /// are processed concurrently via rayon; without it they run sequentially.
+    /// Returns one `Result<Vec<u8>>` per input in the same order as the input
+    /// slice. A failure in one item does not abort the rest.
+    ///
+    /// With the `parallel` feature enabled the items are processed concurrently
+    /// via rayon's global thread pool. Callers managing many concurrent batches
+    /// should consider [`rayon::ThreadPoolBuilder`] to bound concurrency.
+    /// Without the feature items run sequentially.
     pub fn render_batch<S: AsRef<str> + Sync>(&self, htmls: &[S]) -> Vec<Result<Vec<u8>>> {
         #[cfg(feature = "parallel")]
         {
