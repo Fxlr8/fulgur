@@ -1118,6 +1118,7 @@ dependencies = [
  "lopdf",
  "minijinja",
  "parley",
+ "rayon",
  "serde",
  "serde_json",
  "skrifa 0.42.1",
