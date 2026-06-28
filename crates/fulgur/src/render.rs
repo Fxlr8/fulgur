@@ -2380,12 +2380,12 @@ fn build_multicol_stroke(
     use crate::column_css::ColumnRuleStyle;
     use crate::draw_primitives::{alpha_to_opacity, colored_stroke};
 
-    if rule.width <= 0.0 || rule.style == ColumnRuleStyle::None {
+    if rule.width <= crate::units::Pt::ZERO || rule.style == ColumnRuleStyle::None {
         return None;
     }
     let opacity = alpha_to_opacity(rule.color[3]);
-    let base = colored_stroke(&rule.color, rule.width, opacity);
-    let w = rule.width;
+    let base = colored_stroke(&rule.color, rule.width.to_f32(), opacity);
+    let w = rule.width.to_f32();
     let stroke = match rule.style {
         ColumnRuleStyle::None => return None,
         ColumnRuleStyle::Solid => base,
@@ -5217,8 +5217,9 @@ mod tests {
         width: f32,
         style: crate::column_css::ColumnRuleStyle,
     ) -> crate::column_css::ColumnRuleSpec {
+        use crate::units::F32Units;
         crate::column_css::ColumnRuleSpec {
-            width,
+            width: width.pt(),
             style,
             color: [0, 0, 0, 255],
         }

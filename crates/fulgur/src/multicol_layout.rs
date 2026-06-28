@@ -3328,9 +3328,9 @@ mod tests {
             .expect("at least one multicol rule entry");
         assert_eq!(entry.rule.style, crate::column_css::ColumnRuleStyle::Solid);
         assert!(
-            (entry.rule.width - 2.0).abs() < 1e-3,
+            (entry.rule.width.to_f32() - 2.0).abs() < 1e-3,
             "width should be 2pt, got {}",
-            entry.rule.width
+            entry.rule.width.to_f32()
         );
         assert_eq!(entry.rule.color, [255, 0, 0, 255]);
         assert!(

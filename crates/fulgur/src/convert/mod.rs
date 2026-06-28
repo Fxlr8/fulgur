@@ -660,7 +660,9 @@ fn record_multicol_rule(
         .column_styles
         .get(&node_id)
         .and_then(|props| props.rule)
-        .filter(|r| r.style != crate::column_css::ColumnRuleStyle::None && r.width > 0.0)
+        .filter(|r| {
+            r.style != crate::column_css::ColumnRuleStyle::None && r.width > crate::units::Pt::ZERO
+        })
     else {
         return;
     };

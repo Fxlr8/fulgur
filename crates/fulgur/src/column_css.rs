@@ -46,6 +46,7 @@ use cssparser::{
 };
 
 use crate::draw_primitives::{BreakAfter, BreakBefore, BreakInside};
+use crate::units::F32Units;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -68,7 +69,7 @@ pub enum ColumnRuleStyle {
 /// A fully-resolved `column-rule` specification. Width is in PDF points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColumnRuleSpec {
-    pub width: f32,
+    pub width: crate::units::Pt,
     pub style: ColumnRuleStyle,
     /// RGBA colour, matching the `[u8; 4]` convention used by
     /// `paragraph::TextRun` and `draw_primitives::BlockStyle::border_color`.
@@ -78,7 +79,7 @@ pub struct ColumnRuleSpec {
 impl Default for ColumnRuleSpec {
     fn default() -> Self {
         Self {
-            width: 1.0,
+            width: 1.0_f32.pt(),
             style: ColumnRuleStyle::None,
             color: [0, 0, 0, 255],
         }
@@ -567,7 +568,7 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
         } else if name.eq_ignore_ascii_case("column-rule-width") {
             if let Ok(w) = input.parse_entirely(parse_length) {
                 let mut spec = self.props.rule.unwrap_or_default();
-                spec.width = w;
+                spec.width = w.pt();
                 self.props.rule = Some(spec);
             }
         } else if name.eq_ignore_ascii_case("column-rule-style") {
@@ -706,7 +707,7 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
 
     let mut spec = ColumnRuleSpec::default();
     if let Some(w) = width {
-        spec.width = w;
+        spec.width = w.pt();
     }
     if let Some(s) = style {
         spec.style = s;
@@ -1040,7 +1041,7 @@ mod tests {
         let css = "column-rule-width: 2pt; column-rule-style: solid; column-rule-color: red;";
         let props = parse_declaration_block(css);
         let rule = props.rule.expect("rule");
-        assert!((rule.width - 2.0).abs() < 1e-3);
+        assert!((rule.width.to_f32() - 2.0).abs() < 1e-3);
         assert_eq!(rule.style, ColumnRuleStyle::Solid);
         assert_eq!(rule.color, [255, 0, 0, 255]);
     }
@@ -1049,7 +1050,7 @@ mod tests {
     fn parses_column_rule_shorthand() {
         let props = parse_declaration_block("column-rule: 1px dashed #0a0;");
         let rule = props.rule.expect("rule");
-        assert!((rule.width - 0.75).abs() < 1e-2); // 1px → 0.75pt
+        assert!((rule.width.to_f32() - 0.75).abs() < 1e-2); // 1px → 0.75pt
         assert_eq!(rule.style, ColumnRuleStyle::Dashed);
         assert_eq!(rule.color, [0x00, 0xAA, 0x00, 0xFF]);
     }
@@ -1058,7 +1059,7 @@ mod tests {
     fn parses_column_rule_shorthand_any_order() {
         let props = parse_declaration_block("column-rule: red 3pt dotted;");
         let rule = props.rule.expect("rule");
-        assert!((rule.width - 3.0).abs() < 1e-3);
+        assert!((rule.width.to_f32() - 3.0).abs() < 1e-3);
         assert_eq!(rule.style, ColumnRuleStyle::Dotted);
         assert_eq!(rule.color, [255, 0, 0, 255]);
     }
@@ -1069,7 +1070,7 @@ mod tests {
         let rule = props.rule.expect("rule");
         assert_eq!(rule.style, ColumnRuleStyle::Dashed);
         // Defaults: 1pt, black.
-        assert!((rule.width - 1.0).abs() < 1e-3);
+        assert!((rule.width.to_f32() - 1.0).abs() < 1e-3);
         assert_eq!(rule.color, [0, 0, 0, 255]);
     }
 
@@ -1130,7 +1131,7 @@ mod tests {
     #[test]
     fn px_length_converts_to_pt() {
         let props = parse_declaration_block("column-rule-width: 4px;");
-        let w = props.rule.expect("rule").width;
+        let w = props.rule.expect("rule").width.to_f32();
         assert!((w - 3.0).abs() < 1e-3); // 4px * 72/96 = 3pt
     }
 
@@ -1140,9 +1141,9 @@ mod tests {
         let props = parse_declaration_block("column-rule-width: 1em;");
         let rule = props.rule.expect("rule");
         assert!(
-            (rule.width - 12.0).abs() < 1e-3,
+            (rule.width.to_f32() - 12.0).abs() < 1e-3,
             "1em expected 12pt (16px × 72/96), got {}",
-            rule.width
+            rule.width.to_f32()
         );
     }
 
@@ -1152,9 +1153,9 @@ mod tests {
         let props = parse_declaration_block("column-rule-width: 0.25rem;");
         let rule = props.rule.expect("rule");
         assert!(
-            (rule.width - 3.0).abs() < 1e-3,
+            (rule.width.to_f32() - 3.0).abs() < 1e-3,
             "0.25rem expected 3pt (4px × 72/96), got {}",
-            rule.width
+            rule.width.to_f32()
         );
     }
 
@@ -1164,9 +1165,9 @@ mod tests {
         let rule = props.rule.expect("rule");
         // 0.1em × 16 px × 72/96 = 1.2pt
         assert!(
-            (rule.width - 1.2).abs() < 1e-3,
+            (rule.width.to_f32() - 1.2).abs() < 1e-3,
             "0.1em expected 1.2pt, got {}",
-            rule.width
+            rule.width.to_f32()
         );
         assert_eq!(rule.style, ColumnRuleStyle::Solid);
         assert_eq!(rule.color, [255, 0, 0, 255]);
@@ -1184,7 +1185,7 @@ mod tests {
         let css = "column-rule-width: 5pt; column-rule-color: blue;";
         let props = parse_declaration_block(css);
         let rule = props.rule.expect("rule");
-        assert!((rule.width - 5.0).abs() < 1e-3);
+        assert!((rule.width.to_f32() - 5.0).abs() < 1e-3);
         assert_eq!(rule.color, [0, 0, 255, 255]);
         // No `column-rule-style` — default `None` applies.
         assert_eq!(rule.style, ColumnRuleStyle::None);
@@ -1482,7 +1483,7 @@ mod tests {
 
         let b = table.get(&b_id).expect("b entry");
         let b_rule = b.rule.expect("b rule");
-        assert!((b_rule.width - 2.0).abs() < 1e-3);
+        assert!((b_rule.width.to_f32() - 2.0).abs() < 1e-3);
         assert_eq!(b_rule.style, ColumnRuleStyle::Dashed);
         assert_eq!(b_rule.color, [255, 0, 0, 255]);
     }
