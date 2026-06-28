@@ -573,13 +573,13 @@ pub(super) fn extract_paragraph(
                         .insert(node_id, descendants);
 
                     let link = ctx.link_cache.lookup(doc, node_id);
-                    let height_pt = positioned.height.px().in_pt();
+                    let height = positioned.height.px().in_pt();
                     // Read baseline from `out` (Drawables). The Drawables-aware
                     // lookup queries `out.paragraphs[node_id]` (and
                     // `block_styles[node_id]` for top-inset) directly.
                     let baseline_shift =
                         inline_box_baseline_offset_from_drawables(doc, out, node_id)
-                            .map(|bo| height_pt - bo.pt())
+                            .map(|bo| height - bo.pt())
                             .unwrap_or(crate::units::Pt::ZERO);
                     let computed_y =
                         positioned.y.px().in_pt() - accumulated_line_top + baseline_shift;
@@ -591,7 +591,7 @@ pub(super) fn extract_paragraph(
                     items.push(LineItem::InlineBox(InlineBoxItem {
                         node_id: content,
                         width: positioned.width.px().in_pt(),
-                        height: height_pt,
+                        height,
                         x_offset: positioned.x.px().in_pt(),
                         computed_y,
                         link,
@@ -602,13 +602,13 @@ pub(super) fn extract_paragraph(
             }
         }
 
-        let line_height_pt = metrics.line_height.px().in_pt();
+        let line_height = metrics.line_height.px().in_pt();
         shaped_lines.push(ShapedLine {
-            height: line_height_pt,
+            height: line_height,
             baseline: metrics.baseline.px().in_pt(),
             items,
         });
-        accumulated_line_top += line_height_pt;
+        accumulated_line_top += line_height;
     }
 
     if shaped_lines.is_empty() {

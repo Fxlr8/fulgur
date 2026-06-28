@@ -939,7 +939,7 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
                 continue;
             }
             VerticalAlign::Baseline => baseline - img.height,
-            VerticalAlign::Middle => baseline - (metrics.x_height / 2.0).pt() - img.height / 2.0,
+            VerticalAlign::Middle => baseline - metrics.x_height.pt() / 2.0 - img.height / 2.0,
             VerticalAlign::Sub => baseline + metrics.subscript_offset.pt() - img.height,
             VerticalAlign::Super => baseline - metrics.superscript_offset.pt() - img.height,
             VerticalAlign::TextTop => baseline - metrics.ascent.pt(),

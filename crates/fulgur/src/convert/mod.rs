@@ -974,9 +974,9 @@ fn shape_paragraph_glyph_runs(
             // `convert_multicol_paragraph_slices`'s scope note.
         }
 
-        let line_height_pt = metrics.line_height.px().in_pt();
+        let line_height = metrics.line_height.px().in_pt();
         shaped_lines.push(ShapedLine {
-            height: line_height_pt,
+            height: line_height,
             baseline: metrics.baseline.px().in_pt(),
             items,
         });

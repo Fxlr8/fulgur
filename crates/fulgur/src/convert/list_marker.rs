@@ -181,6 +181,10 @@ pub(super) fn extract_marker_lines(
     for line in parley_layout.lines() {
         let metrics = line.metrics();
         if line_height_pt == 0.0 {
+            // Stays f32: this feeds the f32 marker-row height returned from
+            // this fn, a distinct sink from the `Pt`-typed `ShapedLine.height`
+            // below (`.px().in_pt()`). The dual conversion idiom is intentional,
+            // not an inconsistency.
             line_height_pt = px_to_pt(metrics.line_height);
         }
         let mut items = Vec::new();

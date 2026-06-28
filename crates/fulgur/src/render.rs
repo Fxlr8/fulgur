@@ -3244,12 +3244,12 @@ fn paragraph_lines_for_page(
         .px()
         .in_pt();
 
-    let eps = 0.01_f32;
+    let eps = 0.01_f32.pt();
     let mut line_top = crate::units::Pt::ZERO;
     let mut start_idx = 0usize;
     while start_idx < all_lines.len() {
         let next_top = line_top + all_lines[start_idx].height;
-        if next_top > consumed + eps.pt() {
+        if next_top > consumed + eps {
             break;
         }
         line_top = next_top;
@@ -3260,7 +3260,7 @@ fn paragraph_lines_for_page(
     let mut accum = crate::units::Pt::ZERO;
     while end_idx < all_lines.len() {
         let line_h = all_lines[end_idx].height;
-        if accum + line_h > target_h + eps.pt() {
+        if accum + line_h > target_h + eps {
             break;
         }
         accum += line_h;
