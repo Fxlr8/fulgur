@@ -130,7 +130,11 @@ jobs:
         run: cargo nextest run --workspace --exclude fulgur-vrt
       - name: Run tests with coverage
         if: matrix.coverage
-        run: cargo llvm-cov nextest --workspace --exclude fulgur-vrt --profile ci --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --profile ci --no-report
+          cargo llvm-cov nextest --workspace --exclude fulgur-vrt --features fulgur/parallel --profile ci --no-report
+          cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload coverage artifact
         if: matrix.coverage
         uses: actions/upload-artifact@v7
