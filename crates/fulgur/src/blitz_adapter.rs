@@ -5126,7 +5126,7 @@ mod tests {
         // inline `column-rule` beats the stylesheet's rule declaration.
         let b_props = table.get(&b).expect("b in table");
         let b_rule = b_props.rule.expect("b rule");
-        assert!((b_rule.width - 2.0).abs() < 1e-3);
+        assert!((b_rule.width.to_f32() - 2.0).abs() < 1e-3);
         assert_eq!(b_rule.style, crate::column_css::ColumnRuleStyle::Dashed);
         assert_eq!(b_rule.color, [255, 0, 0, 255]); // inline red beats stylesheet blue
         // Inline `column-rule` overrides only the rule field — `column-fill`

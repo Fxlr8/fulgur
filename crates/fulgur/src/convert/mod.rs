@@ -660,7 +660,9 @@ fn record_multicol_rule(
         .column_styles
         .get(&node_id)
         .and_then(|props| props.rule)
-        .filter(|r| r.style != crate::column_css::ColumnRuleStyle::None && r.width > 0.0)
+        .filter(|r| {
+            r.style != crate::column_css::ColumnRuleStyle::None && r.width > crate::units::Pt::ZERO
+        })
     else {
         return;
     };
@@ -674,17 +676,12 @@ fn record_multicol_rule(
         .groups
         .iter()
         .map(|g| crate::drawables::ColumnRuleGeometry {
-            x_offset: g.x_offset.px().in_pt(),
-            y_offset: g.y_offset.px().in_pt(),
-            col_w: g.col_w.px().in_pt(),
-            gap: g.gap.px().in_pt(),
+            x_offset: g.x_offset.in_pt(),
+            y_offset: g.y_offset.in_pt(),
+            col_w: g.col_w.in_pt(),
+            gap: g.gap.in_pt(),
             n: g.n,
-            col_heights: g
-                .col_heights
-                .iter()
-                .copied()
-                .map(|h| h.px().in_pt())
-                .collect(),
+            col_heights: g.col_heights.iter().copied().map(|h| h.in_pt()).collect(),
         })
         .collect();
     out.multicol_rules.insert(
@@ -740,9 +737,9 @@ fn convert_multicol_paragraph_slices(
         if group.paragraph_splits.is_empty() {
             continue;
         }
-        let group_x_pt = px_to_pt(group.x_offset);
-        let group_y_pt = px_to_pt(group.y_offset);
-        let col_w_pt = px_to_pt(group.col_w);
+        let group_x_pt = group.x_offset.in_pt().to_f32();
+        let group_y_pt = group.y_offset.in_pt().to_f32();
+        let col_w_pt = group.col_w.in_pt().to_f32();
 
         for split in &group.paragraph_splits {
             let source_id = split.source_node_id;
@@ -785,9 +782,9 @@ fn convert_multicol_paragraph_slices(
                     .map(|s| css_text_align_to_parley_alignment(s.clone_text_align()))
                     .unwrap_or(parley::Alignment::Start);
                 let mut cloned = text_layout.layout.clone();
-                cloned.break_all_lines(Some(group.col_w));
+                cloned.break_all_lines(Some(group.col_w.to_f32()));
                 cloned.align(
-                    Some(group.col_w),
+                    Some(group.col_w.to_f32()),
                     alignment,
                     parley::AlignmentOptions::default(),
                 );
@@ -858,10 +855,10 @@ fn convert_multicol_paragraph_slices(
                 inline_root::recalculate_paragraph_line_boxes(&mut lines);
 
                 let origin_pt = (
-                    group_x_pt + px_to_pt(col_slice.origin.x),
-                    group_y_pt + px_to_pt(col_slice.origin.y),
+                    group_x_pt + col_slice.origin.x.in_pt().to_f32(),
+                    group_y_pt + col_slice.origin.y.in_pt().to_f32(),
                 );
-                let size_pt = (col_w_pt, px_to_pt(col_slice.size.height));
+                let size_pt = (col_w_pt, col_slice.size.height.in_pt().to_f32());
 
                 slices.push(crate::drawables::ParagraphSlice {
                     origin_pt,

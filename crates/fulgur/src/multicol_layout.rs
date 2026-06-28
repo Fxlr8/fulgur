@@ -14,6 +14,7 @@
 //! wired into Taffy via `compute_leaf_layout`; multicol uses the same
 //! mechanism one layer up.
 
+use crate::units::F32Units;
 use blitz_dom::BaseDocument;
 use std::collections::BTreeMap;
 use taffy::{
@@ -43,10 +44,10 @@ pub struct ColumnLineSlice {
     /// Slice top-left in CSS pixels, relative to the column group
     /// segment (matches `ColumnGroupGeometry::col_heights`'s frame).
     /// Zero for placeholder entries — gate on `line_range.is_empty()`.
-    pub origin: taffy::Point<f32>,
+    pub origin: taffy::Point<crate::units::Px>,
     /// Slice size — `col_w × Σ line_height(line_range)`. CSS pixels.
     /// Zero for placeholder entries.
-    pub size: taffy::Size<f32>,
+    pub size: taffy::Size<crate::units::Px>,
 }
 
 /// Plan for one paragraph distributed across `ColumnGroupGeometry`'s
@@ -84,22 +85,22 @@ pub struct ParagraphSplitEntry {
 pub struct ColumnGroupGeometry {
     /// Horizontal offset from the container's border-box left to column 0's
     /// left edge. Equals the container's (padding-left + border-left).
-    pub x_offset: f32,
+    pub x_offset: crate::units::Px,
     /// Vertical offset from the container's border-box top to this group's
     /// top. Includes the container's (padding-top + border-top); subsequent
     /// groups accumulate prior segment heights on top of that.
-    pub y_offset: f32,
+    pub y_offset: crate::units::Px,
     /// Width of a single column, in CSS pixels.
-    pub col_w: f32,
+    pub col_w: crate::units::Px,
     /// Horizontal gap between adjacent columns, in CSS pixels.
-    pub gap: f32,
+    pub gap: crate::units::Px,
     /// Number of columns this group balances across.
     pub n: u32,
     /// Per-column filled height. `col_heights[i]` is the bottom-most
     /// placement's `(location.y + size.height)` minus `y_offset` for column
     /// `i`, clamped to `>= 0.0`. An entry of `0.0` means column `i` received
     /// no placements. Always has length == `n`.
-    pub col_heights: Vec<f32>,
+    pub col_heights: Vec<crate::units::Px>,
     /// Inline-root paragraphs distributed across the columns of this
     /// group. Empty when no child paragraph needed splitting.
     pub paragraph_splits: Vec<ParagraphSplitEntry>,
@@ -672,7 +673,12 @@ pub fn compute_multicol_layout(
                     cursor_y,
                     child_inputs,
                 );
-                let seg_h = geometry.col_heights.iter().copied().fold(0.0_f32, f32::max);
+                let seg_h = geometry
+                    .col_heights
+                    .iter()
+                    .copied()
+                    .map(crate::units::Px::to_f32)
+                    .fold(0.0_f32, f32::max);
                 placements.extend(group_placements);
                 group_geometries.push(geometry);
                 cursor_y += seg_h;
@@ -704,8 +710,8 @@ pub fn compute_multicol_layout(
     // border-box origin) can use `group.x_offset + col_x_math` and
     // `group.y_offset` directly without reapplying the container's padding.
     for group in group_geometries.iter_mut() {
-        group.x_offset = inset_left;
-        group.y_offset += inset_top;
+        group.x_offset = inset_left.px();
+        group.y_offset += inset_top.px();
     }
 
     // Stash the per-container geometry for downstream consumers (Task 4's
@@ -854,12 +860,16 @@ fn layout_self_inline_root_container(
             *first = original_h;
         }
         let geometry = ColumnGroupGeometry {
-            x_offset: inset_left,
-            y_offset: inset_top,
-            col_w,
-            gap,
+            x_offset: inset_left.px(),
+            y_offset: inset_top.px(),
+            col_w: col_w.px(),
+            gap: gap.px(),
             n,
-            col_heights,
+            col_heights: col_heights
+                .iter()
+                .copied()
+                .map(crate::units::F32Units::px)
+                .collect(),
             paragraph_splits: Vec::new(),
         };
         tree.geometry.insert(
@@ -934,10 +944,13 @@ fn layout_self_inline_root_container(
             // `compute_multicol_layout` would normally shift this into the
             // border-box frame in the post-loop fixup; here we apply the
             // shift ourselves on the geometry below before returning.
-            origin: Point { x: col_x, y: 0.0 },
+            origin: Point {
+                x: col_x.px(),
+                y: 0.0_f32.px(),
+            },
             size: Size {
-                width: col_w,
-                height: *slice_h,
+                width: col_w.px(),
+                height: (*slice_h).px(),
             },
         });
     }
@@ -963,12 +976,16 @@ fn layout_self_inline_root_container(
     //    (mirrors the post-loop shift that the segment path applies in
     //    `compute_multicol_layout`).
     let geometry = ColumnGroupGeometry {
-        x_offset: inset_left,
-        y_offset: inset_top,
-        col_w,
-        gap,
+        x_offset: inset_left.px(),
+        y_offset: inset_top.px(),
+        col_w: col_w.px(),
+        gap: gap.px(),
         n,
-        col_heights,
+        col_heights: col_heights
+            .iter()
+            .copied()
+            .map(crate::units::F32Units::px)
+            .collect(),
         paragraph_splits,
     };
 
@@ -1229,8 +1246,14 @@ fn layout_column_group(
                     // `y_offset`). The container-level border-box shift
                     // applied in `compute_multicol_layout` updates these
                     // alongside the rest of the geometry.
-                    origin: Point { x: col_x, y: col_y },
-                    size,
+                    origin: Point {
+                        x: col_x.px(),
+                        y: col_y.px(),
+                    },
+                    size: taffy::Size {
+                        width: size.width.px(),
+                        height: size.height.px(),
+                    },
                 });
             }
         }
@@ -1275,8 +1298,8 @@ fn layout_column_group(
     // Taffy storage).
     for slices in placed_slices.values() {
         for slice in slices.iter().skip(1) {
-            let idx = resolve_col_idx(slice.origin.x);
-            let bottom = slice.origin.y + slice.size.height;
+            let idx = resolve_col_idx(slice.origin.x.to_f32());
+            let bottom = (slice.origin.y + slice.size.height).to_f32();
             if bottom > col_heights[idx] {
                 col_heights[idx] = bottom;
             }
@@ -1300,7 +1323,7 @@ fn layout_column_group(
         .map(|(source_id, mut slices)| {
             let mut by_col: Vec<Option<ColumnLineSlice>> = (0..n).map(|_| None).collect();
             for slice in slices.drain(..) {
-                let idx = resolve_col_idx(slice.origin.x);
+                let idx = resolve_col_idx(slice.origin.x.to_f32());
                 by_col[idx] = Some(slice);
             }
             let column_slices: Vec<ColumnLineSlice> =
@@ -1318,12 +1341,16 @@ fn layout_column_group(
         // frame; `compute_multicol_layout` shifts them into the border-box
         // frame after every segment is placed (see the inset loop that runs
         // over `group_geometries` in that function).
-        x_offset: 0.0,
-        y_offset,
-        col_w,
-        gap,
+        x_offset: 0.0_f32.px(),
+        y_offset: y_offset.px(),
+        col_w: col_w.px(),
+        gap: gap.px(),
         n,
-        col_heights,
+        col_heights: col_heights
+            .iter()
+            .copied()
+            .map(crate::units::F32Units::px)
+            .collect(),
         paragraph_splits,
     };
 
@@ -2874,7 +2901,7 @@ mod tests {
             "col_heights length must equal n"
         );
         assert!(
-            group.col_heights[0] > 0.0 && group.col_heights[1] > 0.0,
+            group.col_heights[0].to_f32() > 0.0 && group.col_heights[1].to_f32() > 0.0,
             "balance should populate both columns, got col_heights={:?}",
             group.col_heights
         );
@@ -2883,12 +2910,17 @@ mod tests {
         // (group.y_offset + tallest) should match the container's border-box
         // content bottom (container_h minus inset_bottom). Since this fixture
         // has no padding/border, y_offset == 0 and tallest == container_h.
-        let tallest = group.col_heights.iter().copied().fold(0.0_f32, f32::max);
+        let tallest = group
+            .col_heights
+            .iter()
+            .copied()
+            .map(crate::units::Px::to_f32)
+            .fold(0.0_f32, f32::max);
         let container_h = doc.get_unrounded_layout(mc_node_id).size.height;
         assert!(
-            (group.y_offset + tallest - container_h).abs() < 1.0,
+            (group.y_offset.to_f32() + tallest - container_h).abs() < 1.0,
             "group bottom ({}) should match container height ({})",
-            group.y_offset + tallest,
+            group.y_offset.to_f32() + tallest,
             container_h
         );
     }
@@ -2982,12 +3014,13 @@ mod tests {
         assert_eq!(group.n, 2);
         assert_eq!(group.col_heights.len(), 2);
         assert!(
-            group.col_heights[0] > 0.0,
+            group.col_heights[0].to_f32() > 0.0,
             "first column must contain the paragraph, got {:?}",
             group.col_heights
         );
         assert_eq!(
-            group.col_heights[1], 0.0,
+            group.col_heights[1].to_f32(),
+            0.0,
             "column-fill: auto must leave the second column empty when content fits in the first, got {:?}",
             group.col_heights
         );
@@ -3021,12 +3054,12 @@ mod tests {
 
         // Both columns must be filled.
         assert!(
-            group.col_heights[0] > 0.0,
+            group.col_heights[0].to_f32() > 0.0,
             "col 0 must be filled, got {:?}",
             group.col_heights
         );
         assert!(
-            group.col_heights[1] > 0.0,
+            group.col_heights[1].to_f32() > 0.0,
             "col 1 must be filled (the bug we're fixing), got {:?}",
             group.col_heights
         );
@@ -3113,12 +3146,12 @@ mod tests {
         // Both columns must end up with content (the long paragraph
         // straddles them after the atomic sibling fills part of col 0).
         assert!(
-            group.col_heights[0] > 0.0,
+            group.col_heights[0].to_f32() > 0.0,
             "col 0 must be filled, got {:?}",
             group.col_heights,
         );
         assert!(
-            group.col_heights[1] > 0.0,
+            group.col_heights[1].to_f32() > 0.0,
             "col 1 must be filled, got {:?}",
             group.col_heights,
         );
@@ -3182,12 +3215,12 @@ mod tests {
             .expect("multicol container should have a geometry entry");
         let group = &mc_geom.groups[0];
         assert!(
-            group.col_heights[0] > 0.0,
+            group.col_heights[0].to_f32() > 0.0,
             "col 0 must be filled, got {:?}",
             group.col_heights
         );
         assert!(
-            group.col_heights[1] > 0.0,
+            group.col_heights[1].to_f32() > 0.0,
             "self-inline-root container must spread lines across both columns, got {:?}",
             group.col_heights
         );
@@ -3240,12 +3273,13 @@ mod tests {
         let group = &mc_geom.groups[0];
         assert_eq!(group.n, 2);
         assert!(
-            group.col_heights[0] > 0.0,
+            group.col_heights[0].to_f32() > 0.0,
             "col 0 must be filled, got {:?}",
             group.col_heights
         );
         assert_eq!(
-            group.col_heights[1], 0.0,
+            group.col_heights[1].to_f32(),
+            0.0,
             "column-fill: auto must leave col 1 empty when content fits in col 0, got {:?}",
             group.col_heights
         );
@@ -3294,9 +3328,9 @@ mod tests {
             .expect("at least one multicol rule entry");
         assert_eq!(entry.rule.style, crate::column_css::ColumnRuleStyle::Solid);
         assert!(
-            (entry.rule.width - 2.0).abs() < 1e-3,
+            (entry.rule.width.to_f32() - 2.0).abs() < 1e-3,
             "width should be 2pt, got {}",
-            entry.rule.width
+            entry.rule.width.to_f32()
         );
         assert_eq!(entry.rule.color, [255, 0, 0, 255]);
         assert!(

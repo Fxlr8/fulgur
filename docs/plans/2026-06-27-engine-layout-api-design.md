@@ -252,6 +252,27 @@ later; `convert/mod.rs` documents the unresolved basis ambiguity), so they were
 **spun out to `fulgur-1ino`** rather than blanket-typed. The `type Pt = f32`
 alias removal remains P2 (`fulgur-2map.8`).
 
+### P1d outcome (fulgur-2map.6) — multicol/column geometry migrated
+
+Phase P1d typed the multicol geometry source structs to `units` newtypes,
+byte-neutral (examples_determinism + VRT goldens unchanged):
+
+- `multicol_layout::ColumnGroupGeometry` coords → `units::Px`
+  (`col_heights: Vec<f32>` → `Vec<Px>`); tagged at construction, readers untag.
+- `multicol_layout::ColumnLineSlice` `origin`/`size` →
+  `taffy::Point<Px>` / `taffy::Size<Px>` (taffy generics accept `Px`; no bound
+  friction, so it was migrated in-place rather than spun out).
+- `column_css::ColumnRuleSpec.width` → `units::Pt` (parser tags with `.pt()`;
+  `> Pt::ZERO` filter; `.to_f32()` at the krilla `colored_stroke` boundary).
+
+Fallout cleanup: `convert::record_multicol_rule` dropped the spike's now-redundant
+`.px()` tag (`g.x_offset.px().in_pt()` → `g.x_offset.in_pt()`), and
+`convert_multicol_paragraph_slices`'s px→pt locals became `.in_pt().to_f32()`.
+
+With P1a + P1d done, the only remaining single-unit deferral is the transform
+fold (`fulgur-1ino`, Affine2D + Point2). The `type Pt = f32` alias removal
+remains P2 (`fulgur-2map.8`).
+
 ## 8. 決定性 / 受け入れ条件
 
 - `layout_to_drawables` 抽出後・newtype 移行後とも `examples_determinism` golden と
