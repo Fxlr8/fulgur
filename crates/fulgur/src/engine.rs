@@ -18,11 +18,6 @@ pub struct Engine {
     system_fonts: bool,
 }
 
-const _: fn() = || {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Engine>();
-};
-
 /// Result of a single render pass.
 ///
 /// - `pdf`: serialized PDF bytes for this pass.

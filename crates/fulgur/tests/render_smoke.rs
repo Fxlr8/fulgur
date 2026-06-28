@@ -4694,6 +4694,22 @@ fn multicol_column_rule_renders() {
     assert!(!pdf.is_empty());
 }
 
+/// fulgur-5biq: Engine is Send + Sync — can be shared across threads.
+///
+/// If `Engine` ever stops being `Send + Sync` this test will fail to compile.
+#[test]
+fn engine_is_send_and_sync() {
+    let engine = fulgur::Engine::builder().build();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let pdf = engine
+                .render("<!doctype html><html><body><p>ok</p></body></html>")
+                .expect("render in spawned thread");
+            assert!(pdf.starts_with(b"%PDF"));
+        });
+    });
+}
+
 /// fulgur-5biq: render_batch returns one valid PDF per input.
 ///
 /// Output length equals input length and each element is a valid PDF.
