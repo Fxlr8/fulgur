@@ -7,6 +7,7 @@ use crate::gcpm::counter::resolve_content_to_html_with_anchor;
 use crate::gcpm::margin_box::{Edge, MarginBoxPosition, MarginBoxRect, compute_edge_layout};
 use crate::gcpm::running::RunningElementStore;
 use crate::gcpm::target_ref::AnchorMap;
+use crate::units::F32Units;
 use krilla::SerializeSettings;
 use krilla::configure::{Configuration, Validator};
 use krilla::tagging::{Identifier, Node, TagGroup, TagTree};
@@ -1285,7 +1286,7 @@ fn paint_multicol_paragraph_slices(
             }
             let abs_x = container_x_pt + slice.origin_pt.0;
             let abs_y = container_y_pt + slice_top;
-            crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x, abs_y, None);
+            crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x.pt(), abs_y.pt(), None);
         }
     });
     if use_run_tagging {
@@ -3080,7 +3081,7 @@ fn draw_list_item_marker(
 
     match &entry.marker {
         ListItemMarker::Text { lines, width } if !lines.is_empty() => {
-            crate::paragraph::draw_shaped_lines(canvas, lines, x - *width, y, None);
+            crate::paragraph::draw_shaped_lines(canvas, lines, (x - *width).pt(), y.pt(), None);
         }
         ListItemMarker::Image {
             marker,
@@ -3210,7 +3211,7 @@ fn draw_paragraph_inner_paint(
         margin_left_pt,
         margin_top_pt,
     });
-    crate::paragraph::draw_shaped_lines(canvas, &slice, x, y, inline_box_ctx);
+    crate::paragraph::draw_shaped_lines(canvas, &slice, x.pt(), y.pt(), inline_box_ctx);
 }
 
 /// Phase 4 PR 3 follow-up (PR #302 Devin): mirror
@@ -3235,20 +3236,20 @@ fn paragraph_lines_for_page(
         return Some(all_lines.to_vec());
     }
 
-    let target_h = crate::convert::px_to_pt(fragments[target_pos].height);
-    let consumed: f32 = crate::convert::px_to_pt(
-        fragments[..target_pos]
-            .iter()
-            .map(|f| f.height)
-            .sum::<f32>(),
-    );
+    let target_h = fragments[target_pos].height.px().in_pt();
+    let consumed: crate::units::Pt = fragments[..target_pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<f32>()
+        .px()
+        .in_pt();
 
     let eps = 0.01_f32;
-    let mut line_top: f32 = 0.0;
+    let mut line_top = crate::units::Pt::ZERO;
     let mut start_idx = 0usize;
     while start_idx < all_lines.len() {
         let next_top = line_top + all_lines[start_idx].height;
-        if next_top > consumed + eps {
+        if next_top > consumed + eps.pt() {
             break;
         }
         line_top = next_top;
@@ -3256,10 +3257,10 @@ fn paragraph_lines_for_page(
     }
 
     let mut end_idx = start_idx;
-    let mut accum = 0.0_f32;
+    let mut accum = crate::units::Pt::ZERO;
     while end_idx < all_lines.len() {
         let line_h = all_lines[end_idx].height;
-        if accum + line_h > target_h + eps {
+        if accum + line_h > target_h + eps.pt() {
             break;
         }
         accum += line_h;
@@ -4274,20 +4275,20 @@ mod tests {
         crate::paragraph::ShapedGlyphRun {
             font_data: std::sync::Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: crate::paragraph::TextDecoration::default(),
             glyphs: vec![],
             text: text.to_string(),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link,
         }
     }
 
     fn make_shaped_line(items: Vec<crate::paragraph::LineItem>) -> crate::paragraph::ShapedLine {
         crate::paragraph::ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items,
         }
     }
@@ -4333,10 +4334,10 @@ mod tests {
     fn para_has_link_runs_inline_box_returns_false() {
         let item = crate::paragraph::InlineBoxItem {
             node_id: None,
-            width: 10.0,
-            height: 10.0,
-            x_offset: 0.0,
-            computed_y: 0.0,
+            width: 10.0_f32.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
@@ -4357,13 +4358,13 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: std::sync::Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 20.0,
-            height: 20.0,
-            x_offset: 0.0,
+            width: 20.0_f32.pt(),
+            height: 20.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: Some(span),
         };
         let line = make_shaped_line(vec![crate::paragraph::LineItem::Image(img)]);
@@ -4376,13 +4377,13 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: std::sync::Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 10.0,
-            height: 10.0,
-            x_offset: 0.0,
+            width: 10.0_f32.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
         };
         let line = make_shaped_line(vec![crate::paragraph::LineItem::Image(img)]);
@@ -4443,21 +4444,21 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: std::sync::Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 10.0,
-            height: 10.0,
-            x_offset: 0.0,
+            width: 10.0_f32.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
         };
         let inline_box = crate::paragraph::InlineBoxItem {
             node_id: None,
-            width: 10.0,
-            height: 10.0,
-            x_offset: 0.0,
-            computed_y: 0.0,
+            width: 10.0_f32.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
@@ -4485,8 +4486,8 @@ mod tests {
 
     fn make_line(height_pt: f32, baseline_pt: f32) -> crate::paragraph::ShapedLine {
         crate::paragraph::ShapedLine {
-            height: height_pt,
-            baseline: baseline_pt,
+            height: height_pt.pt(),
+            baseline: baseline_pt.pt(),
             items: vec![],
         }
     }
@@ -4515,7 +4516,7 @@ mod tests {
         let sliced = result.unwrap();
         assert_eq!(sliced.len(), 3);
         assert!(
-            (sliced[0].baseline - 12.0).abs() < 0.01,
+            (sliced[0].baseline.to_f32() - 12.0).abs() < 0.01,
             "baseline unchanged on non-split"
         );
     }
@@ -4535,7 +4536,7 @@ mod tests {
         let sliced = result.unwrap();
         assert_eq!(sliced.len(), 1, "page 0 should contain exactly one line");
         assert!(
-            (sliced[0].baseline - 9.0).abs() < 0.01,
+            (sliced[0].baseline.to_f32() - 9.0).abs() < 0.01,
             "page 0 baseline unchanged (consumed=0)"
         );
     }
@@ -4554,7 +4555,7 @@ mod tests {
         let sliced = result.unwrap();
         assert_eq!(sliced.len(), 1, "page 1 should contain exactly one line");
         assert!(
-            (sliced[0].baseline - 9.0).abs() < 0.01,
+            (sliced[0].baseline.to_f32() - 9.0).abs() < 0.01,
             "baseline rebased: 21pt - 12pt consumed = 9pt"
         );
     }
@@ -5089,19 +5090,19 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 10.0,
-            height: 8.0,
-            x_offset: 0.0,
+            width: 10.0_f32.pt(),
+            height: 8.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 15.0,
+            computed_y: 15.0_f32.pt(),
             link: None,
         };
         let line0 = make_line(12.0, 9.0); // page 0: no items
         let line1 = crate::paragraph::ShapedLine {
-            height: 12.0,
-            baseline: 21.0,
+            height: 12.0_f32.pt(),
+            baseline: 21.0_f32.pt(),
             items: vec![crate::paragraph::LineItem::Image(img)],
         };
         let fragments = vec![
@@ -5114,9 +5115,9 @@ mod tests {
         assert_eq!(sliced.len(), 1, "one line on page 1");
         if let crate::paragraph::LineItem::Image(img) = &sliced[0].items[0] {
             assert!(
-                (img.computed_y - 3.0).abs() < 0.01,
+                (img.computed_y.to_f32() - 3.0).abs() < 0.01,
                 "expected computed_y=3.0 after rebasing, got {}",
-                img.computed_y,
+                img.computed_y.to_f32(),
             );
         } else {
             panic!("expected Image item in sliced line");
@@ -5161,17 +5162,17 @@ mod tests {
         d.semantics.insert(node_id, make_h1_semantic_entry(None));
         let ib = crate::paragraph::InlineBoxItem {
             node_id: None,
-            width: 50.0,
-            height: 20.0,
-            x_offset: 0.0,
-            computed_y: 0.0,
+            width: 50.0_f32.pt(),
+            height: 20.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
         };
         let line = crate::paragraph::ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![crate::paragraph::LineItem::InlineBox(ib)],
         };
         d.paragraphs.insert(node_id, make_para(vec![line]));

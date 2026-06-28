@@ -2,6 +2,7 @@ use super::inline_root;
 use super::positioned::{is_absolutely_positioned, walk_absolute_children};
 use super::replaced::{make_image_entry, resolve_image_dimensions};
 use super::*;
+use crate::units::F32Units;
 
 /// Build an `ImageEntry` for a `::before`/`::after` pseudo-element node
 /// whose computed `content` resolves to a single `url(...)` image.
@@ -179,13 +180,13 @@ pub(super) fn build_inline_pseudo_image(
     Some(InlineImage {
         data,
         format,
-        width: w,
-        height: h,
-        x_offset: 0.0,
+        width: w.pt(),
+        height: h.pt(),
+        x_offset: crate::units::Pt::ZERO,
         vertical_align,
         opacity,
         visible,
-        computed_y: 0.0,
+        computed_y: crate::units::Pt::ZERO,
         link: None,
     })
 }
@@ -219,7 +220,7 @@ pub(super) fn inject_inline_pseudo_images(
                     LineItem::InlineBox(ib) => ib.x_offset += shift,
                 }
             }
-            img.x_offset = 0.0;
+            img.x_offset = crate::units::Pt::ZERO;
             first_line.items.insert(0, LineItem::Image(img));
         }
     }
@@ -235,12 +236,12 @@ pub(super) fn inject_inline_pseudo_images(
                                 .glyphs
                                 .iter()
                                 .map(|g| g.x_advance * run.font_size)
-                                .sum::<f32>()
+                                .sum::<crate::units::Pt>()
                     }
                     LineItem::Image(i) => i.x_offset + i.width,
                     LineItem::InlineBox(ib) => ib.x_offset + ib.width,
                 })
-                .fold(0.0_f32, f32::max);
+                .fold(crate::units::Pt::ZERO, crate::units::Pt::max);
             img.x_offset = last_end;
             last_line.items.push(LineItem::Image(img));
         }
@@ -268,52 +269,53 @@ mod tests {
         InlineBoxItem, InlineImage, LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine,
         TextDecoration, VerticalAlign,
     };
+    use crate::units::F32Units;
     use std::sync::Arc;
 
     fn make_image(width: f32) -> InlineImage {
         InlineImage {
             data: Arc::new(vec![]),
             format: ImageFormat::Png,
-            width,
-            height: 10.0,
-            x_offset: 0.0,
+            width: width.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
         }
     }
 
     fn empty_line() -> ShapedLine {
         ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![],
         }
     }
 
     fn image_line(x_offset: f32, width: f32) -> ShapedLine {
         ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![LineItem::Image(InlineImage {
                 data: Arc::new(vec![]),
                 format: ImageFormat::Png,
-                width,
-                height: 10.0,
-                x_offset,
+                width: width.pt(),
+                height: 10.0_f32.pt(),
+                x_offset: x_offset.pt(),
                 vertical_align: VerticalAlign::Baseline,
                 opacity: 1.0,
                 visible: true,
-                computed_y: 0.0,
+                computed_y: crate::units::Pt::ZERO,
                 link: None,
             })],
         }
     }
 
-    fn approx(a: f32, b: f32) -> bool {
-        (a - b).abs() < 0.001
+    fn approx(a: crate::units::Pt, b: f32) -> bool {
+        (a.to_f32() - b).abs() < 0.001
     }
 
     // ── empty-lines guards ───────────────────────────────────────────────────
@@ -348,7 +350,11 @@ mod tests {
         assert_eq!(lines[0].items.len(), 1);
         match &lines[0].items[0] {
             LineItem::Image(img) => {
-                assert!(approx(img.x_offset, 0.0), "x_offset={}", img.x_offset);
+                assert!(
+                    approx(img.x_offset, 0.0),
+                    "x_offset={}",
+                    img.x_offset.to_f32()
+                );
                 assert!(approx(img.width, 20.0));
             }
             _ => panic!("expected Image at index 0"),
@@ -368,7 +374,11 @@ mod tests {
         }
         match &lines[0].items[1] {
             LineItem::Image(img) => {
-                assert!(approx(img.x_offset, 20.0), "shifted x={}", img.x_offset);
+                assert!(
+                    approx(img.x_offset, 20.0),
+                    "shifted x={}",
+                    img.x_offset.to_f32()
+                );
             }
             _ => panic!("expected shifted Image at index 1"),
         }
@@ -381,7 +391,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 10.0,
+            font_size: 10.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![ShapedGlyph {
@@ -392,19 +402,19 @@ mod tests {
                 text_range: 0..1,
             }],
             text: "a".to_string(),
-            x_offset: 3.0,
+            x_offset: 3.0_f32.pt(),
             link: None,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![LineItem::Text(run)],
         }];
         super::inject_inline_pseudo_images(&mut lines, Some(make_image(20.0)), None);
         assert_eq!(lines[0].items.len(), 2);
         match &lines[0].items[1] {
             LineItem::Text(r) => {
-                assert!(approx(r.x_offset, 23.0), "x_offset={}", r.x_offset);
+                assert!(approx(r.x_offset, 23.0), "x_offset={}", r.x_offset.to_f32());
             }
             _ => panic!("expected Text at index 1"),
         }
@@ -414,24 +424,24 @@ mod tests {
     fn before_shifts_inline_box_items() {
         let ib = InlineBoxItem {
             node_id: None,
-            width: 30.0,
-            height: 10.0,
-            x_offset: 5.0,
-            computed_y: 0.0,
+            width: 30.0_f32.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: 5.0_f32.pt(),
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![LineItem::InlineBox(ib)],
         }];
         super::inject_inline_pseudo_images(&mut lines, Some(make_image(10.0)), None);
         assert_eq!(lines[0].items.len(), 2);
         match &lines[0].items[1] {
             LineItem::InlineBox(b) => {
-                assert!(approx(b.x_offset, 15.0), "x_offset={}", b.x_offset);
+                assert!(approx(b.x_offset, 15.0), "x_offset={}", b.x_offset.to_f32());
             }
             _ => panic!("expected InlineBox at index 1"),
         }
@@ -448,7 +458,7 @@ mod tests {
                 assert!(
                     approx(img.x_offset, 7.0),
                     "second-line x_offset={}",
-                    img.x_offset
+                    img.x_offset.to_f32()
                 );
             }
             _ => panic!("expected untouched Image in second line"),
@@ -468,7 +478,7 @@ mod tests {
                 assert!(
                     approx(img.x_offset, 15.0),
                     "after x_offset={}",
-                    img.x_offset
+                    img.x_offset.to_f32()
                 );
             }
             _ => panic!("expected appended after Image"),
@@ -482,7 +492,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 4.0,
+            font_size: 4.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![
@@ -502,12 +512,12 @@ mod tests {
                 },
             ],
             text: "ab".to_string(),
-            x_offset: 2.0,
+            x_offset: 2.0_f32.pt(),
             link: None,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![LineItem::Text(run)],
         }];
         super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(20.0)));
@@ -516,7 +526,7 @@ mod tests {
                 assert!(
                     approx(img.x_offset, 34.0),
                     "after x_offset={}",
-                    img.x_offset
+                    img.x_offset.to_f32()
                 );
             }
             _ => panic!("expected appended after Image"),
@@ -528,17 +538,17 @@ mod tests {
         // x_offset=3, width=7 → end=10
         let ib = InlineBoxItem {
             node_id: None,
-            width: 7.0,
-            height: 5.0,
-            x_offset: 3.0,
-            computed_y: 0.0,
+            width: 7.0_f32.pt(),
+            height: 5.0_f32.pt(),
+            x_offset: 3.0_f32.pt(),
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![LineItem::InlineBox(ib)],
         }];
         super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(5.0)));
@@ -547,7 +557,7 @@ mod tests {
                 assert!(
                     approx(img.x_offset, 10.0),
                     "after x_offset={}",
-                    img.x_offset
+                    img.x_offset.to_f32()
                 );
             }
             _ => panic!("expected appended after Image"),
@@ -561,7 +571,11 @@ mod tests {
         assert_eq!(lines[0].items.len(), 1);
         match &lines[0].items[0] {
             LineItem::Image(img) => {
-                assert!(approx(img.x_offset, 0.0), "x_offset={}", img.x_offset);
+                assert!(
+                    approx(img.x_offset, 0.0),
+                    "x_offset={}",
+                    img.x_offset.to_f32()
+                );
             }
             _ => panic!("expected after Image in empty line"),
         }
@@ -582,27 +596,27 @@ mod tests {
         // item3: Image x=1 w=8 → end=9
         // fold(f32::max) must yield 13
         let mut lines = vec![ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![
                 LineItem::Image(InlineImage {
                     data: Arc::new(vec![]),
                     format: ImageFormat::Png,
-                    width: 5.0,
-                    height: 10.0,
-                    x_offset: 0.0,
+                    width: 5.0_f32.pt(),
+                    height: 10.0_f32.pt(),
+                    x_offset: crate::units::Pt::ZERO,
                     vertical_align: VerticalAlign::Baseline,
                     opacity: 1.0,
                     visible: true,
-                    computed_y: 0.0,
+                    computed_y: crate::units::Pt::ZERO,
                     link: None,
                 }),
                 LineItem::InlineBox(InlineBoxItem {
                     node_id: None,
-                    width: 10.0,
-                    height: 5.0,
-                    x_offset: 3.0,
-                    computed_y: 0.0,
+                    width: 10.0_f32.pt(),
+                    height: 5.0_f32.pt(),
+                    x_offset: 3.0_f32.pt(),
+                    computed_y: crate::units::Pt::ZERO,
                     link: None,
                     opacity: 1.0,
                     visible: true,
@@ -610,13 +624,13 @@ mod tests {
                 LineItem::Image(InlineImage {
                     data: Arc::new(vec![]),
                     format: ImageFormat::Png,
-                    width: 8.0,
-                    height: 10.0,
-                    x_offset: 1.0,
+                    width: 8.0_f32.pt(),
+                    height: 10.0_f32.pt(),
+                    x_offset: 1.0_f32.pt(),
                     vertical_align: VerticalAlign::Baseline,
                     opacity: 1.0,
                     visible: true,
-                    computed_y: 0.0,
+                    computed_y: crate::units::Pt::ZERO,
                     link: None,
                 }),
             ],
@@ -627,7 +641,7 @@ mod tests {
                 assert!(
                     approx(img.x_offset, 13.0),
                     "after x_offset={}",
-                    img.x_offset
+                    img.x_offset.to_f32()
                 );
             }
             _ => panic!("expected after Image appended"),
@@ -676,13 +690,21 @@ mod tests {
         }
         match &lines[0].items[1] {
             LineItem::Image(img) => {
-                assert!(approx(img.x_offset, 8.0), "shifted x={}", img.x_offset);
+                assert!(
+                    approx(img.x_offset, 8.0),
+                    "shifted x={}",
+                    img.x_offset.to_f32()
+                );
             }
             _ => panic!("expected shifted Image at 1"),
         }
         match lines[0].items.last().unwrap() {
             LineItem::Image(img) => {
-                assert!(approx(img.x_offset, 18.0), "after x={}", img.x_offset);
+                assert!(
+                    approx(img.x_offset, 18.0),
+                    "after x={}",
+                    img.x_offset.to_f32()
+                );
             }
             _ => panic!("expected after Image at end"),
         }

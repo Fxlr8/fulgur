@@ -2065,10 +2065,10 @@ fn multicol_inline_root_split_emits_paragraph_slices_case_b() {
         // wasn't rebased and is still parley-absolute).
         let first = &slice.lines[0];
         assert!(
-            first.baseline > 0.0 && first.baseline <= first.height,
+            first.baseline.to_f32() > 0.0 && first.baseline <= first.height,
             "slice line[0].baseline must be slice-local: got baseline={}, height={}",
-            first.baseline,
-            first.height,
+            first.baseline.to_f32(),
+            first.height.to_f32(),
         );
     }
     // The two slices must land in different x columns.
@@ -2112,10 +2112,10 @@ fn multicol_inline_root_split_emits_paragraph_slices_case_a() {
         assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
         let first = &slice.lines[0];
         assert!(
-            first.baseline > 0.0 && first.baseline <= first.height,
+            first.baseline.to_f32() > 0.0 && first.baseline <= first.height,
             "slice line[0].baseline must be slice-local: got baseline={}, height={}",
-            first.baseline,
-            first.height,
+            first.baseline.to_f32(),
+            first.height.to_f32(),
         );
     }
     assert_ne!(
@@ -2318,7 +2318,7 @@ fn multicol_inline_root_split_honours_text_align_center() {
         line.items
             .iter()
             .find_map(|item| match item {
-                LineItem::Text(t) => Some(t.x_offset),
+                LineItem::Text(t) => Some(t.x_offset.to_f32()),
                 _ => None,
             })
             .expect("first line of slice must have a text item")

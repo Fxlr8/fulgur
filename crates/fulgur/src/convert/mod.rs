@@ -839,7 +839,7 @@ fn convert_multicol_paragraph_slices(
                 //    aligned with `ParagraphEntry::lines`'s contract
                 //    (every consumer of `Vec<ShapedLine>` expects
                 //    `recalculate_paragraph_line_boxes` to have run).
-                let consumed: f32 = all_lines[..col_slice.line_range.start]
+                let consumed: crate::units::Pt = all_lines[..col_slice.line_range.start]
                     .iter()
                     .map(|l| l.height)
                     .sum();
@@ -913,7 +913,7 @@ fn shape_paragraph_glyph_runs(
                 let font_index = font_ref.index;
                 let font_arc = ctx.get_or_insert_font(font_ref);
                 let font_size_parley = run.font_size();
-                let font_size = px_to_pt(font_size_parley);
+                let font_size = font_size_parley.px().in_pt();
 
                 let brush = &glyph_run.style().brush;
                 let color = get_text_color(doc, brush.id);
@@ -956,7 +956,7 @@ fn shape_paragraph_glyph_runs(
 
                 if !glyphs.is_empty() {
                     let run_text = text.to_string();
-                    let run_x_offset = px_to_pt(glyph_run.offset());
+                    let run_x_offset = glyph_run.offset().px().in_pt();
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
@@ -974,10 +974,10 @@ fn shape_paragraph_glyph_runs(
             // `convert_multicol_paragraph_slices`'s scope note.
         }
 
-        let line_height_pt = px_to_pt(metrics.line_height);
+        let line_height_pt = metrics.line_height.px().in_pt();
         shaped_lines.push(ShapedLine {
             height: line_height_pt,
-            baseline: px_to_pt(metrics.baseline),
+            baseline: metrics.baseline.px().in_pt(),
             items,
         });
     }

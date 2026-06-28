@@ -6,6 +6,7 @@ use skrifa::MetadataProvider;
 
 use crate::draw_primitives::{Canvas, Pt};
 use crate::image::ImageFormat;
+use crate::units::F32Units;
 
 /// Which decoration lines to draw (bitflags).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,12 +94,12 @@ pub struct LinkSpan {
 pub struct ShapedGlyphRun {
     pub font_data: Arc<Vec<u8>>,
     pub font_index: u32,
-    pub font_size: f32,
+    pub font_size: crate::units::Pt,
     pub color: [u8; 4], // RGBA
     pub decoration: TextDecoration,
     pub glyphs: Vec<ShapedGlyph>,
     pub text: String,
-    pub x_offset: f32,
+    pub x_offset: crate::units::Pt,
     pub link: Option<Arc<LinkSpan>>,
 }
 
@@ -123,9 +124,9 @@ pub enum VerticalAlign {
 pub struct InlineImage {
     pub data: Arc<Vec<u8>>,
     pub format: ImageFormat,
-    pub width: f32,
-    pub height: f32,
-    pub x_offset: f32,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
+    pub x_offset: crate::units::Pt,
     pub vertical_align: VerticalAlign,
     pub opacity: f32,
     pub visible: bool,
@@ -136,7 +137,7 @@ pub struct InlineImage {
     /// consumed height so the next fragment starts at its own paragraph
     /// origin. Contrast with `InlineBoxItem::computed_y`, which stays
     /// line-relative for its entire lifetime.
-    pub computed_y: f32,
+    pub computed_y: crate::units::Pt,
     pub link: Option<Arc<LinkSpan>>,
 }
 
@@ -145,9 +146,9 @@ pub struct InlineImage {
 #[derive(Clone, Debug)]
 pub struct InlineBoxItem {
     pub node_id: Option<usize>,
-    pub width: f32,
-    pub height: f32,
-    pub x_offset: f32,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
+    pub x_offset: crate::units::Pt,
     /// Y offset from the line top in pt. `extract_paragraph` converts
     /// Parley's paragraph-relative `y` to line-relative by subtracting the
     /// accumulated line_top. Unlike `InlineImage::computed_y`, this value
@@ -155,7 +156,7 @@ pub struct InlineBoxItem {
     /// `recalculate_line_box` does not promote it, and `split_paragraph`
     /// does not rebase it (each fragment's own `line_top` accumulator
     /// handles vertical positioning naturally).
-    pub computed_y: f32,
+    pub computed_y: crate::units::Pt,
     pub link: Option<Arc<LinkSpan>>,
     pub opacity: f32,
     pub visible: bool,
@@ -174,9 +175,9 @@ pub enum LineItem {
 /// A shaped line of text.
 #[derive(Clone)]
 pub struct ShapedLine {
-    pub height: f32,
+    pub height: crate::units::Pt,
     /// Absolute offset from the paragraph's top edge to this line's baseline (from Parley).
-    pub baseline: f32,
+    pub baseline: crate::units::Pt,
     pub items: Vec<LineItem>,
 }
 
@@ -199,7 +200,7 @@ pub struct ParagraphRender {
 
 impl ParagraphRender {
     pub fn new(lines: Vec<ShapedLine>) -> Self {
-        let cached_height: f32 = lines.iter().map(|l| l.height).sum();
+        let cached_height: f32 = lines.iter().map(|l| l.height.to_f32()).sum();
         Self {
             lines,
             cached_height,
@@ -437,17 +438,22 @@ fn draw_decoration_line(
 
 /// A contiguous span of runs sharing the same decoration attributes.
 struct DecorationSpan {
-    x: f32,
-    width: f32,
+    x: crate::units::Pt,
+    width: crate::units::Pt,
     decoration: TextDecoration,
     /// Use metrics from the first run in the span
     font_data: Arc<Vec<u8>>,
     font_index: u32,
-    font_size: f32,
+    font_size: crate::units::Pt,
 }
 
 /// Collect contiguous runs with the same decoration into spans, then draw each span once.
-fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt, baseline_y: Pt) {
+fn draw_line_decorations(
+    canvas: &mut Canvas<'_, '_>,
+    items: &[LineItem],
+    x: crate::units::Pt,
+    baseline_y: crate::units::Pt,
+) {
     let mut spans: Vec<DecorationSpan> = Vec::new();
 
     for item in items {
@@ -461,13 +467,14 @@ fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt,
         }
 
         let run_x = x + run.x_offset;
-        let run_width: f32 = run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
+        let run_width: crate::units::Pt =
+            run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
 
         // Try to extend the previous span if decoration matches
         if let Some(last) = spans.last_mut() {
             let last_end = last.x + last.width;
             let gap = (run_x - last_end).abs();
-            if last.decoration.same_appearance(&run.decoration) && gap < 0.5 {
+            if last.decoration.same_appearance(&run.decoration) && gap < 0.5_f32.pt() {
                 last.width = (run_x + run_width) - last.x;
                 continue;
             }
@@ -484,27 +491,28 @@ fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt,
     }
 
     for span in &spans {
-        let metrics = get_decoration_metrics(&span.font_data, span.font_index, span.font_size);
+        let metrics =
+            get_decoration_metrics(&span.font_data, span.font_index, span.font_size.to_f32());
 
         if span.decoration.line.contains(TextDecorationLine::UNDERLINE) {
-            let line_y = baseline_y + metrics.underline_offset;
+            let line_y = baseline_y + metrics.underline_offset.pt();
             draw_decoration_line(
                 canvas,
-                span.x,
-                line_y,
-                span.width,
+                span.x.to_f32(),
+                line_y.to_f32(),
+                span.width.to_f32(),
                 metrics.underline_thickness,
                 span.decoration.color,
                 span.decoration.style,
             );
         }
         if span.decoration.line.contains(TextDecorationLine::OVERLINE) {
-            let line_y = baseline_y - metrics.overline_pos;
+            let line_y = baseline_y - metrics.overline_pos.pt();
             draw_decoration_line(
                 canvas,
-                span.x,
-                line_y,
-                span.width,
+                span.x.to_f32(),
+                line_y.to_f32(),
+                span.width.to_f32(),
                 metrics.underline_thickness,
                 span.decoration.color,
                 span.decoration.style,
@@ -515,12 +523,12 @@ fn draw_line_decorations(canvas: &mut Canvas<'_, '_>, items: &[LineItem], x: Pt,
             .line
             .contains(TextDecorationLine::LINE_THROUGH)
         {
-            let line_y = baseline_y - metrics.strikethrough_offset;
+            let line_y = baseline_y - metrics.strikethrough_offset.pt();
             draw_decoration_line(
                 canvas,
-                span.x,
-                line_y,
-                span.width,
+                span.x.to_f32(),
+                line_y.to_f32(),
+                span.width.to_f32(),
                 metrics.strikethrough_thickness,
                 span.decoration.color,
                 span.decoration.style,
@@ -629,8 +637,8 @@ fn link_span_ptr(link: Option<&Arc<LinkSpan>>) -> Option<usize> {
 pub fn draw_shaped_lines(
     canvas: &mut Canvas<'_, '_>,
     lines: &[ShapedLine],
-    x: Pt,
-    y: Pt,
+    x: crate::units::Pt,
+    y: crate::units::Pt,
     inline_box_ctx: Option<InlineBoxRenderCtx<'_>>,
 ) {
     // Track the top edge of each line within the paragraph (paragraph y=0 at
@@ -639,7 +647,7 @@ pub fn draw_shaped_lines(
     // top via cumulative height is both simpler and more robust than trying
     // to derive it from `line.baseline` (which is an absolute baseline offset
     // and does not carry per-line ascent).
-    let mut line_top: f32 = 0.0;
+    let mut line_top = crate::units::Pt::ZERO;
     // Per-run tagging mode is active when canvas.link_run_node_id is set and
     // tagging is enabled. In this mode each glyph-run or inline-image cluster
     // bounded by `Arc<LinkSpan>` identity gets its own start_tagged/end_tagged
@@ -698,13 +706,16 @@ pub fn draw_shaped_lines(
                     };
                     canvas.surface.set_fill(Some(fill));
 
-                    let start = krilla::geom::Point::from_xy(x + run.x_offset, baseline_y);
+                    let start = krilla::geom::Point::from_xy(
+                        (x + run.x_offset).to_f32(),
+                        baseline_y.to_f32(),
+                    );
                     canvas.surface.draw_glyphs(
                         start,
                         &krilla_glyphs,
                         font,
                         &run.text,
-                        run.font_size,
+                        run.font_size.to_f32(),
                         false,
                     );
 
@@ -714,13 +725,13 @@ pub fn draw_shaped_lines(
                     // (same glyph advance accumulator); height uses the full
                     // line box so the hit area is stable across lines.
                     if let Some(link_span) = run.link.as_ref() {
-                        let run_width: f32 =
+                        let run_width: crate::units::Pt =
                             run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
                         let rect = crate::draw_primitives::Rect {
-                            x: x + run.x_offset,
-                            y: line_top_abs,
-                            width: run_width.max(0.0),
-                            height: line.height,
+                            x: (x + run.x_offset).to_f32(),
+                            y: line_top_abs.to_f32(),
+                            width: run_width.max(crate::units::Pt::ZERO).to_f32(),
+                            height: line.height.to_f32(),
                         };
                         if let Some(collector) = canvas.link_collector.as_deref_mut() {
                             collector.push_rect(link_span, rect);
@@ -739,12 +750,16 @@ pub fn draw_shaped_lines(
                         let Ok(image) = img.format.to_krilla_image(data) else {
                             return;
                         };
-                        let Some(size) = krilla::geom::Size::from_wh(img.width, img.height) else {
+                        let Some(size) =
+                            krilla::geom::Size::from_wh(img.width.to_f32(), img.height.to_f32())
+                        else {
                             return;
                         };
                         let img_y = y + img.computed_y;
-                        let transform =
-                            krilla::geom::Transform::from_translate(x + img.x_offset, img_y);
+                        let transform = krilla::geom::Transform::from_translate(
+                            (x + img.x_offset).to_f32(),
+                            img_y.to_f32(),
+                        );
                         canvas.surface.push_transform(&transform);
                         canvas.surface.draw_image(image, size);
                         canvas.surface.pop();
@@ -755,10 +770,10 @@ pub fn draw_shaped_lines(
                     // (x + x_offset, y + computed_y, width, height).
                     if let Some(link_span) = img.link.as_ref() {
                         let rect = crate::draw_primitives::Rect {
-                            x: x + img.x_offset,
-                            y: y + img.computed_y,
-                            width: img.width.max(0.0),
-                            height: img.height.max(0.0),
+                            x: (x + img.x_offset).to_f32(),
+                            y: (y + img.computed_y).to_f32(),
+                            width: img.width.max(crate::units::Pt::ZERO).to_f32(),
+                            height: img.height.max(crate::units::Pt::ZERO).to_f32(),
                         };
                         if let Some(collector) = canvas.link_collector.as_deref_mut() {
                             collector.push_rect(link_span, rect);
@@ -817,8 +832,8 @@ pub fn draw_shaped_lines(
                         let geo_y_pt = ctx.margin_top_pt
                             + ctx.drawables.body_offset_pt.1
                             + crate::convert::px_to_pt(content_frag.y);
-                        let off_x = ox - geo_x_pt;
-                        let off_y = oy - geo_y_pt;
+                        let off_x = ox.to_f32() - geo_x_pt;
+                        let off_y = oy.to_f32() - geo_y_pt;
                         let transform = krilla::geom::Transform::from_translate(off_x, off_y);
                         let link_affine =
                             crate::draw_primitives::Affine2D::translation(off_x, off_y);
@@ -852,10 +867,10 @@ pub fn draw_shaped_lines(
                     // hit-areas remain intact even for opacity<1.0 boxes.
                     if let Some(link_span) = ib.link.as_ref() {
                         let rect = crate::draw_primitives::Rect {
-                            x: ox,
-                            y: oy,
-                            width: ib.width.max(0.0),
-                            height: ib.height.max(0.0),
+                            x: ox.to_f32(),
+                            y: oy.to_f32(),
+                            width: ib.width.max(crate::units::Pt::ZERO).to_f32(),
+                            height: ib.height.max(crate::units::Pt::ZERO).to_f32(),
                         };
                         if let Some(collector) = canvas.link_collector.as_deref_mut() {
                             collector.push_rect(link_span, rect);
@@ -904,12 +919,12 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
     let original_height = line.height;
     let baseline = line.baseline;
 
-    let mut line_top: f32 = 0.0;
-    let mut line_bottom: f32 = original_height;
+    let mut line_top = crate::units::Pt::ZERO;
+    let mut line_bottom = original_height;
 
     // Phase 1: compute img_top for flow-aligned images and expand line box.
     // Store (index, img_top) for later computed_y assignment.
-    let mut positions: Vec<(usize, f32)> = Vec::new();
+    let mut positions: Vec<(usize, crate::units::Pt)> = Vec::new();
 
     for (idx, item) in line.items.iter().enumerate() {
         let img = match item {
@@ -924,12 +939,12 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
                 continue;
             }
             VerticalAlign::Baseline => baseline - img.height,
-            VerticalAlign::Middle => baseline - metrics.x_height / 2.0 - img.height / 2.0,
-            VerticalAlign::Sub => baseline + metrics.subscript_offset - img.height,
-            VerticalAlign::Super => baseline - metrics.superscript_offset - img.height,
-            VerticalAlign::TextTop => baseline - metrics.ascent,
-            VerticalAlign::TextBottom => baseline + metrics.descent - img.height,
-            VerticalAlign::Length(v) => baseline - v - img.height,
+            VerticalAlign::Middle => baseline - (metrics.x_height / 2.0).pt() - img.height / 2.0,
+            VerticalAlign::Sub => baseline + metrics.subscript_offset.pt() - img.height,
+            VerticalAlign::Super => baseline - metrics.superscript_offset.pt() - img.height,
+            VerticalAlign::TextTop => baseline - metrics.ascent.pt(),
+            VerticalAlign::TextBottom => baseline + metrics.descent.pt() - img.height,
+            VerticalAlign::Length(v) => baseline - v.pt() - img.height,
             VerticalAlign::Percent(p) => baseline - (original_height * p) - img.height,
         };
 
@@ -993,13 +1008,13 @@ mod tests {
         InlineImage {
             data: Arc::new(TEST_PNG.to_vec()),
             format: ImageFormat::Png,
-            width,
-            height,
-            x_offset: 0.0,
+            width: width.pt(),
+            height: height.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: va,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
         }
     }
@@ -1017,14 +1032,19 @@ mod tests {
     /// A text-only line: height=16, baseline=12.
     fn text_line(height: f32, baseline: f32) -> ShapedLine {
         ShapedLine {
-            height,
-            baseline,
+            height: height.pt(),
+            baseline: baseline.pt(),
             items: Vec::new(),
         }
     }
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 0.01
+    }
+
+    /// Compare a migrated `Pt` coordinate against a raw `f32` expectation.
+    fn approx_pt(a: crate::units::Pt, b: f32) -> bool {
+        (a.to_f32() - b).abs() < 0.01
     }
 
     // ---------- Baseline ----------
@@ -1041,10 +1061,22 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(approx(line.height, 16.0), "height={}", line.height);
-        assert!(approx(line.baseline, 12.0), "baseline={}", line.baseline);
+        assert!(
+            approx_pt(line.height, 16.0),
+            "height={}",
+            line.height.to_f32()
+        );
+        assert!(
+            approx_pt(line.baseline, 12.0),
+            "baseline={}",
+            line.baseline.to_f32()
+        );
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 4.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 4.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1060,10 +1092,22 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(approx(line.height, 24.0), "height={}", line.height);
-        assert!(approx(line.baseline, 20.0), "baseline={}", line.baseline);
+        assert!(
+            approx_pt(line.height, 24.0),
+            "height={}",
+            line.height.to_f32()
+        );
+        assert!(
+            approx_pt(line.baseline, 20.0),
+            "baseline={}",
+            line.baseline.to_f32()
+        );
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 0.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1080,9 +1124,17 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(approx(line.height, 16.0), "height={}", line.height);
+        assert!(
+            approx_pt(line.height, 16.0),
+            "height={}",
+            line.height.to_f32()
+        );
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 3.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 3.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1101,9 +1153,9 @@ mod tests {
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
-                approx(img.computed_y, 10.0),
+                approx_pt(img.computed_y, 10.0),
                 "computed_y={}",
-                img.computed_y
+                img.computed_y.to_f32()
             );
         }
     }
@@ -1122,7 +1174,11 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 0.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1140,7 +1196,11 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 0.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1158,7 +1218,11 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 8.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 8.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1176,7 +1240,11 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 0.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1195,9 +1263,9 @@ mod tests {
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
-                approx(img.computed_y, line.height - 8.0),
+                approx_pt(img.computed_y, line.height.to_f32() - 8.0),
                 "computed_y={}",
-                img.computed_y,
+                img.computed_y.to_f32(),
             );
         }
     }
@@ -1216,7 +1284,11 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 3.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 3.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1234,7 +1306,11 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 2.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 2.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1251,9 +1327,17 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(approx(line.height, 20.0), "height={}", line.height);
+        assert!(
+            approx_pt(line.height, 20.0),
+            "height={}",
+            line.height.to_f32()
+        );
         if let LineItem::Image(img) = &line.items[0] {
-            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 0.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1276,31 +1360,31 @@ mod tests {
         )));
 
         // Simulate the caller's coordinate conversion:
-        let y_acc = 16.0; // first line height
+        let y_acc = 16.0_f32.pt(); // first line height
         line2.baseline -= y_acc; // now line-local: 12.0
         let m = default_metrics();
         recalculate_line_box(&mut line2, &m);
         // Image fits within [0, 16): no expansion
         assert!(
-            approx(line2.height, 16.0),
+            approx_pt(line2.height, 16.0),
             "height should stay 16, got {}",
-            line2.height
+            line2.height.to_f32()
         );
         // Convert computed_y to paragraph-absolute
         if let LineItem::Image(img) = &mut line2.items[0] {
             img.computed_y += y_acc;
             // paragraph-absolute computed_y = line-local (4.0) + y_acc (16.0) = 20.0
             assert!(
-                approx(img.computed_y, 20.0),
+                approx_pt(img.computed_y, 20.0),
                 "paragraph-absolute computed_y should be 20, got {}",
-                img.computed_y
+                img.computed_y.to_f32()
             );
         }
         line2.baseline += y_acc; // restore to paragraph-absolute: 28.0
         assert!(
-            approx(line2.baseline, 28.0),
+            approx_pt(line2.baseline, 28.0),
             "baseline should be 28, got {}",
-            line2.baseline
+            line2.baseline.to_f32()
         );
     }
 
@@ -1334,17 +1418,17 @@ mod tests {
     fn line_item_inline_box_variant_can_be_constructed() {
         let item = LineItem::InlineBox(InlineBoxItem {
             node_id: Some(42),
-            width: 50.0,
-            height: 20.0,
-            x_offset: 10.0,
-            computed_y: 0.0,
+            width: 50.0_f32.pt(),
+            height: 20.0_f32.pt(),
+            x_offset: 10.0_f32.pt(),
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
         });
         match item {
             LineItem::InlineBox(ib) => {
-                assert_eq!(ib.width, 50.0);
+                assert_eq!(ib.width.to_f32(), 50.0);
                 assert_eq!(ib.node_id, Some(42));
             }
             _ => panic!("expected InlineBox variant"),
@@ -1360,12 +1444,12 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
-            font_size: 10.0,
+            font_size: 10.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
             text: String::from("hi"),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link: None,
         };
         let text = LineItem::Text(glyph_run);
@@ -1378,17 +1462,17 @@ mod tests {
         // InlineBox variant — node_id: Some(1).
         let ib = LineItem::InlineBox(InlineBoxItem {
             node_id: Some(1),
-            width: 10.0,
-            height: 5.0,
-            x_offset: 1.0,
-            computed_y: 2.0,
+            width: 10.0_f32.pt(),
+            height: 5.0_f32.pt(),
+            x_offset: 1.0_f32.pt(),
+            computed_y: 2.0_f32.pt(),
             link: None,
             opacity: 1.0,
             visible: true,
         });
         let s = format!("{:?}", ib);
         assert!(s.contains("InlineBox"), "{}", s);
-        assert!(s.contains("width: 10.0"), "{}", s);
+        assert!(s.contains("width: Pt(10.0)"), "{}", s);
     }
 
     // ---------- recalculate_line_box: Text item `continue` arms ----------
@@ -1401,12 +1485,12 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
             text: String::new(),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link: None,
         };
         let mut line = text_line(16.0, 12.0);
@@ -1414,8 +1498,16 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         // Text items are skipped: height and baseline must be unchanged.
-        assert!(approx(line.height, 16.0), "height={}", line.height);
-        assert!(approx(line.baseline, 12.0), "baseline={}", line.baseline);
+        assert!(
+            approx_pt(line.height, 16.0),
+            "height={}",
+            line.height.to_f32()
+        );
+        assert!(
+            approx_pt(line.baseline, 12.0),
+            "baseline={}",
+            line.baseline.to_f32()
+        );
     }
 
     // ---------- recalculate_line_box: Phase-1 line_bottom expansion ----------
@@ -1447,13 +1539,21 @@ mod tests {
         recalculate_line_box(&mut line, &metrics);
         // line_top stays 0 (img_top=15 > 0), shift=0
         // height = 20 - 0 = 20
-        assert!(approx(line.height, 20.0), "height={}", line.height);
-        assert!(approx(line.baseline, 12.0), "baseline={}", line.baseline);
+        assert!(
+            approx_pt(line.height, 20.0),
+            "height={}",
+            line.height.to_f32()
+        );
+        assert!(
+            approx_pt(line.baseline, 12.0),
+            "baseline={}",
+            line.baseline.to_f32()
+        );
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
-                approx(img.computed_y, 15.0),
+                approx_pt(img.computed_y, 15.0),
                 "computed_y={}",
-                img.computed_y
+                img.computed_y.to_f32()
             );
         }
     }
@@ -1475,12 +1575,24 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(approx(line.height, 20.0), "height={}", line.height);
+        assert!(
+            approx_pt(line.height, 20.0),
+            "height={}",
+            line.height.to_f32()
+        );
         // baseline = 12 + shift(4) = 16
-        assert!(approx(line.baseline, 16.0), "baseline={}", line.baseline);
+        assert!(
+            approx_pt(line.baseline, 16.0),
+            "baseline={}",
+            line.baseline.to_f32()
+        );
         if let LineItem::Image(img) = &line.items[0] {
             // computed_y = img_top + shift = -4 + 4 = 0
-            assert!(approx(img.computed_y, 0.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 0.0),
+                "computed_y={}",
+                img.computed_y.to_f32()
+            );
         }
     }
 
@@ -1546,16 +1658,16 @@ mod tests {
     #[test]
     fn recalculate_line_box_skips_inline_box_items() {
         let mut line = ShapedLine {
-            height: 16.0,
-            baseline: 12.0,
+            height: 16.0_f32.pt(),
+            baseline: 12.0_f32.pt(),
             items: vec![
                 LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Top)),
                 LineItem::InlineBox(InlineBoxItem {
                     node_id: None,
-                    width: 30.0,
-                    height: 20.0,
-                    x_offset: 0.0,
-                    computed_y: 3.0,
+                    width: 30.0_f32.pt(),
+                    height: 20.0_f32.pt(),
+                    x_offset: crate::units::Pt::ZERO,
+                    computed_y: 3.0_f32.pt(),
                     link: None,
                     opacity: 1.0,
                     visible: true,
@@ -1567,8 +1679,12 @@ mod tests {
         assert_eq!(line.items.len(), 2);
         match &line.items[1] {
             LineItem::InlineBox(ib) => {
-                assert_eq!(ib.width, 30.0);
-                assert!(approx(ib.computed_y, 3.0), "computed_y={}", ib.computed_y);
+                assert_eq!(ib.width.to_f32(), 30.0);
+                assert!(
+                    approx_pt(ib.computed_y, 3.0),
+                    "computed_y={}",
+                    ib.computed_y.to_f32()
+                );
             }
             _ => panic!("expected InlineBox at index 1"),
         }
@@ -1594,12 +1710,12 @@ mod link_span_tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
             text: String::new(),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link: None,
         };
         assert!(run.link.is_none());
