@@ -41,12 +41,12 @@ fn ahem_bundle_differs_from_no_bundle() {
 
     let pdf_none = Engine::builder()
         .build()
-        .render_html(HTML)
+        .render(HTML)
         .expect("render without bundle");
     let pdf_with = Engine::builder()
         .assets(bundle)
         .build()
-        .render_html(HTML)
+        .render(HTML)
         .expect("render with bundle");
 
     assert_ne!(

@@ -28,7 +28,7 @@ pub struct Engine {
 ///   skipped to avoid `element_text` cost on every id'd subtree on the
 ///   fast path.
 /// - `needs_pass_two`: mirrors that gate; `true` only for pass 1 of a
-///   2-pass render so `render_html` can decide whether to call
+///   2-pass render so `render` can decide whether to call
 ///   `render_pass` again with the populated map.
 struct RenderPassOutput {
     pdf: Vec<u8>,
@@ -74,7 +74,7 @@ impl Engine {
     /// `gcpm::counter::resolve_content_to_*_with_anchor` and
     /// `CounterPass::with_anchor_map` substitute real values instead of
     /// fixed-width placeholders.
-    pub fn render_html(&self, html: &str) -> Result<Vec<u8>> {
+    pub fn render(&self, html: &str) -> Result<Vec<u8>> {
         // Pass 1: render once. `render_pass` parses the full GCPM context
         // (AssetBundle, <link>-loaded stylesheets, inline <style> blocks)
         // and reports `needs_pass_two` based on that parsed view, so
@@ -603,17 +603,24 @@ impl Engine {
         })
     }
 
-    /// Render HTML string to a PDF file.
-    pub fn render_html_to_file(&self, html: &str, path: impl AsRef<Path>) -> Result<()> {
-        let pdf = self.render_html(html)?;
+    /// Render an HTML string to a PDF file.
+    pub fn render_file(&self, html: &str, path: impl AsRef<Path>) -> Result<()> {
+        let pdf = self.render(html)?;
         std::fs::write(path, pdf)?;
         Ok(())
     }
 
     /// Render a template with data to PDF bytes.
-    /// The template is expanded via MiniJinja, then passed to render_html().
+    ///
+    /// The template is expanded via MiniJinja, then passed to [`render`](Engine::render).
     /// Returns an error if no template was set via the builder.
-    pub fn render(&self) -> Result<Vec<u8>> {
+    ///
+    /// **Migration note:** This method was previously named `render()` (no arguments).
+    /// Because the new [`render`](Engine::render) method occupies that name with a
+    /// different signature, no `#[deprecated]` alias can be provided — existing calls
+    /// to `engine.render()` with no arguments will produce a compile error and must be
+    /// updated to `engine.render_template()`.
+    pub fn render_template(&self) -> Result<Vec<u8>> {
         let (name, content) = self
             .template
             .as_ref()
@@ -623,7 +630,19 @@ impl Engine {
             .as_ref()
             .map_or_else(|| serde_json::json!({}), Clone::clone);
         let html = crate::template::render_template(name, content, &data)?;
-        self.render_html(&html)
+        self.render(&html)
+    }
+
+    /// Renamed to [`render`](Engine::render).
+    #[deprecated(since = "0.19.0", note = "renamed to `render`")]
+    pub fn render_html(&self, html: &str) -> Result<Vec<u8>> {
+        self.render(html)
+    }
+
+    /// Renamed to [`render_file`](Engine::render_file).
+    #[deprecated(since = "0.19.0", note = "renamed to `render_file`")]
+    pub fn render_html_to_file(&self, html: &str, path: impl AsRef<Path>) -> Result<()> {
+        self.render_file(html, path)
     }
 
     /// Build a `Drawables` map from HTML for integration tests.
@@ -740,12 +759,12 @@ impl Engine {
             &column_styles,
         );
 
-        // Mirror the production `render_html` path so test callers that
+        // Mirror the production `render` path so test callers that
         // consult the returned geometry as a placement oracle see the
         // same `position: fixed` per-page repetition that the real
         // render emits (see the `append_position_fixed_fragments` block
-        // in `render_html`). Without this, the helper would diverge
-        // from `render_html` for documents with `position: fixed`.
+        // in `render`). Without this, the helper would diverge
+        // from `render` for documents with `position: fixed`.
         let content_w_px = crate::convert::pt_to_px(self.config.content_width());
         let content_h_px = crate::convert::pt_to_px(self.config.content_height());
         let total_pages = crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
@@ -798,7 +817,7 @@ impl Engine {
         // those corrections from tests that drive
         // `pseudo_absolute_content_url::
         // absolute_pseudo_with_right_bottom_offsets_by_image_size`.
-        // The production `render_html` path already passes
+        // The production `render` path already passes
         // `&convert_ctx.pagination_geometry` to `render_v2` after
         // convert, so this matches the production read order.
         (drawables, convert_ctx.pagination_geometry)
@@ -1187,7 +1206,7 @@ mod tests {
           <p><a class="ref" href="#t"></a></p>
           <h2 id="t" data-x="DX">Title</h2>
         </body></html>"##;
-        let pdf = Engine::builder().build().render_html(html).unwrap();
+        let pdf = Engine::builder().build().render(html).unwrap();
         assert!(!pdf.is_empty());
     }
 
@@ -1221,14 +1240,14 @@ mod tests {
             .template("test.html", "<h1>{{ title }}</h1>")
             .data(serde_json::json!({"title": "Hello"}))
             .build();
-        let result = engine.render();
+        let result = engine.render_template();
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_engine_render_without_template_errors() {
         let engine = Engine::builder().build();
-        let result = engine.render();
+        let result = engine.render_template();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Template"));
     }
@@ -1238,7 +1257,7 @@ mod tests {
         let engine = Engine::builder()
             .template("test.html", "<p>static</p>")
             .build();
-        let result = engine.render();
+        let result = engine.render_template();
         assert!(result.is_ok());
     }
 
@@ -1340,7 +1359,7 @@ mod tests {
         let path = dir.path().join("out.pdf");
         Engine::builder()
             .build()
-            .render_html_to_file("<html><body><p>test</p></body></html>", &path)
+            .render_file("<html><body><p>test</p></body></html>", &path)
             .unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"%PDF"));

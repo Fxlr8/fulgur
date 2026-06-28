@@ -32,11 +32,11 @@ fn build_engine_no_assets() -> Engine {
 fn test_img_renders_to_pdf() {
     let engine = build_engine_with_image("logo.png");
     let html = r#"<html><body><div><img src="logo.png" style="display:block;width:100px;height:100px"></div></body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 
     // Verify image data is embedded: PDF with image should be larger than without
-    let pdf_no_img = build_engine_no_assets().render_html(html).unwrap();
+    let pdf_no_img = build_engine_no_assets().render(html).unwrap();
     assert!(
         pdf.len() > pdf_no_img.len(),
         "PDF with image ({} bytes) should be larger than without ({} bytes)",
@@ -49,10 +49,10 @@ fn test_img_renders_to_pdf() {
 fn test_img_with_dot_slash_prefix() {
     let engine = build_engine_with_image("logo.png");
     let html = r#"<html><body><div><img src="./logo.png" style="display:block;width:50px;height:50px"></div></body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
 
     // Verify ./logo.png resolves to same image as logo.png
-    let pdf_no_img = build_engine_no_assets().render_html(html).unwrap();
+    let pdf_no_img = build_engine_no_assets().render(html).unwrap();
     assert!(
         pdf.len() > pdf_no_img.len(),
         "PDF with ./logo.png ({} bytes) should be larger than without ({} bytes)",
@@ -74,7 +74,7 @@ fn test_img_missing_image_no_error() {
 
     let html =
         r#"<html><body><img src="missing.png" style="width:50px;height:50px"></body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -82,6 +82,6 @@ fn test_img_missing_image_no_error() {
 fn test_img_no_assets_no_error() {
     let engine = build_engine_no_assets();
     let html = r#"<html><body><img src="logo.png" style="width:50px;height:50px"></body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }

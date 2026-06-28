@@ -5463,7 +5463,7 @@ mod tests {
     fn render_html(html: &str) -> Vec<u8> {
         crate::engine::Engine::builder()
             .build()
-            .render_html(html)
+            .render(html)
             .expect("render failed")
     }
 
@@ -5564,7 +5564,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <img src="img.png" style="width:64px;height:64px;">
                 </body></html>"#,
@@ -5678,7 +5678,7 @@ mod tests {
             .tagged(true)
             .lang("en")
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <h1>Heading One</h1>
                 <p>A paragraph of text.</p>
@@ -5766,7 +5766,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body style="margin:0">
                 <div style="background:url(red.png);width:80px;height:80px"></div>
                 </body></html>"#,
@@ -5785,7 +5785,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .bookmarks(true)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <h1>Chapter One</h1>
                 <p>Body content for chapter one.</p>
@@ -5812,7 +5812,7 @@ mod tests {
             .lang("en")
             .title("PDF/UA Test Document")
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <h1>Title</h1>
                 <p>A paragraph of body text.</p>
@@ -5834,7 +5834,7 @@ mod tests {
             .tagged(true)
             .lang("en")
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <ul>
                   <li>First item</li>
@@ -5859,7 +5859,7 @@ mod tests {
             .tagged(true)
             .lang("en")
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <p>Visit <a href="https://example.com">our website</a> for more info.</p>
                 <p>Another <a href="https://other.example.com">link here</a> too.</p>
@@ -5934,7 +5934,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(
+            .render(
                 r#"<!doctype html><html><body>
                 <div style="width:60px;height:40px;overflow:hidden">
                   <img src="red.png" style="width:100px;height:100px">

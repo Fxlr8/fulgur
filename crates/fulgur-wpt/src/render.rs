@@ -44,8 +44,8 @@ pub fn render_test(
     }
     let engine = builder.build();
     let pdf_bytes = engine
-        .render_html(&html)
-        .map_err(|e| anyhow::anyhow!("fulgur render_html failed for {}: {e}", abs.display()))?;
+        .render(&html)
+        .map_err(|e| anyhow::anyhow!("fulgur render failed for {}: {e}", abs.display()))?;
 
     // Remove stale page PNGs from prior runs so page count is accurate.
     let prefix = work_dir.join("page");

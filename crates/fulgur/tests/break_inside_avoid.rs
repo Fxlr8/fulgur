@@ -36,7 +36,7 @@ fn avoid_block_straddling_boundary_promotes_to_next_page() {
         // 200pt × 200pt expressed in mm (PageSize::custom_pt not yet available)
         .page_size(PageSize::custom(70.5556, 70.5556))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "expected avoid block to promote to page 2, got {} pages",
@@ -72,7 +72,7 @@ fn avoid_block_taller_than_page_falls_back_to_split() {
         // 200pt × 200pt expressed in mm (PageSize::custom_pt not yet available)
         .page_size(PageSize::custom(70.5556, 70.5556))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "expected oversized avoid block to still paginate, got {} pages",
@@ -101,7 +101,7 @@ fn avoid_child_inside_multicol_fits_whole_column() {
         // 300pt × 400pt expressed in mm (PageSize::custom_pt not yet available)
         .page_size(PageSize::custom(105.8333, 141.1111))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(page_count(&pdf) >= 1);
     assert!(page_count(&pdf) <= 2);
     assert!(pdf.len() > 500, "PDF looks truncated");

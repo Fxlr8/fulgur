@@ -27,7 +27,7 @@ fn test_background_image_renders_to_pdf() {
     let html = r#"<html><body>
         <div style="width:200px;height:200px;background-image:url(bg.png)">Hello</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 
     // PDF with background image should be larger than without (verifies image is embedded)
@@ -35,9 +35,7 @@ fn test_background_image_renders_to_pdf() {
         .page_size(PageSize::A4)
         .margin(Margin::uniform(72.0))
         .build()
-        .render_html(
-            r#"<html><body><div style="width:200px;height:200px">Hello</div></body></html>"#,
-        )
+        .render(r#"<html><body><div style="width:200px;height:200px">Hello</div></body></html>"#)
         .unwrap();
     assert!(
         pdf.len() > pdf_no_bg.len(),
@@ -53,7 +51,7 @@ fn test_background_no_repeat() {
     let html = r#"<html><body>
         <div style="width:200px;height:200px;background-image:url(bg.png);background-repeat:no-repeat">Content</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -63,7 +61,7 @@ fn test_background_size_cover() {
     let html = r#"<html><body>
         <div style="width:200px;height:200px;background-image:url(bg.png);background-size:cover;background-repeat:no-repeat">Content</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -73,7 +71,7 @@ fn test_background_position_center() {
     let html = r#"<html><body>
         <div style="width:200px;height:200px;background-image:url(bg.png);background-position:center;background-repeat:no-repeat">Content</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -90,7 +88,7 @@ fn test_background_multiple_layers() {
     let html = r#"<html><body>
         <div style="width:200px;height:200px;background-image:url(bg1.png),url(bg2.png);background-repeat:no-repeat">Content</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -100,7 +98,7 @@ fn test_background_clip_padding_box() {
     let html = r#"<html><body>
         <div style="width:200px;height:200px;padding:20px;border:5px solid black;background-image:url(bg.png);background-clip:padding-box;background-repeat:no-repeat">Content</div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
 }
 
@@ -118,7 +116,7 @@ fn test_background_image_svg_renders() {
     let html = r#"<html><body>
         <div style="width:100px;height:100px;background-image:url(circle.svg);background-size:contain;background-repeat:no-repeat"></div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"), "output should be a PDF");
 
     // PDF with SVG background should be larger than without (verifies SVG is embedded)
@@ -126,7 +124,7 @@ fn test_background_image_svg_renders() {
         .page_size(PageSize::A4)
         .margin(Margin::uniform(72.0))
         .build()
-        .render_html(r#"<html><body><div style="width:100px;height:100px"></div></body></html>"#)
+        .render(r#"<html><body><div style="width:100px;height:100px"></div></body></html>"#)
         .unwrap();
     assert!(
         pdf.len() > pdf_no_bg.len(),

@@ -40,8 +40,8 @@ pub fn render_html_to_pdf(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Ve
     let engine = builder.build();
 
     engine
-        .render_html(html)
-        .map_err(|e| anyhow::anyhow!("fulgur render_html failed: {e}"))
+        .render(html)
+        .map_err(|e| anyhow::anyhow!("fulgur render failed: {e}"))
 }
 
 /// Render `html` through fulgur, write the PDF into `work_dir`, rasterize

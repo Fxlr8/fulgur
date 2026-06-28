@@ -521,7 +521,7 @@ mod tests {
     fn render_test_pdf(html: &str) -> Vec<u8> {
         crate::engine::Engine::builder()
             .build()
-            .render_html(html)
+            .render(html)
             .unwrap()
     }
 
@@ -543,7 +543,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .title("Test Title".to_string())
             .build()
-            .render_html("<html><body><p>Hi</p></body></html>")
+            .render("<html><body><p>Hi</p></body></html>")
             .unwrap();
         let result = inspect_bytes(&pdf);
         assert_eq!(result.metadata.title.as_deref(), Some("Test Title"));
@@ -605,7 +605,7 @@ mod tests {
             .authors(vec!["Alice".to_string()])
             .creator("TestApp".to_string())
             .build()
-            .render_html("<html><body><p>x</p></body></html>")
+            .render("<html><body><p>x</p></body></html>")
             .unwrap();
         let result = inspect_bytes(&pdf);
         assert_eq!(result.metadata.title.as_deref(), Some("My Title"));
@@ -628,7 +628,7 @@ mod tests {
         let pdf = crate::engine::Engine::builder()
             .assets(bundle)
             .build()
-            .render_html(r#"<html><body><img src="test.png" width="50" height="50"></body></html>"#)
+            .render(r#"<html><body><img src="test.png" width="50" height="50"></body></html>"#)
             .unwrap();
         let result = inspect_bytes(&pdf);
         assert!(!result.images.is_empty(), "expected at least one image");

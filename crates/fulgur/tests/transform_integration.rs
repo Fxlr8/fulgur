@@ -208,7 +208,7 @@ fn transformed_element_produces_expected_pagination() {
         })
         .margin(Margin::uniform(10.0))
         .build();
-    let pdf = engine.render_html(html).expect("render should succeed");
+    let pdf = engine.render(html).expect("render should succeed");
     assert!(pdf.starts_with(b"%PDF-"), "PDF header missing");
 
     // Count `/Type /Page` occurrences, excluding `/Type /Pages`. Match the

@@ -20,7 +20,7 @@ fn woff2_font_renders_to_pdf() {
         <p>Hello — WOFF2 fixture rendering via AssetBundle.</p>
     </body></html>"#;
 
-    let pdf = engine.render_html(html).expect("PDF render must succeed");
+    let pdf = engine.render(html).expect("PDF render must succeed");
     assert!(
         pdf.starts_with(b"%PDF"),
         "output must start with %PDF magic"

@@ -15,7 +15,7 @@ fn test_opacity_half() {
             <p>This text should be semi-transparent</p>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         has_transparency_group(&pdf),
@@ -31,7 +31,7 @@ fn test_opacity_zero() {
             <p>This text should be invisible but preserve layout</p>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // opacity: 0 skips drawing entirely, so no transparency group needed
     assert!(
@@ -48,7 +48,7 @@ fn test_visibility_hidden() {
             <p>This text should be hidden</p>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     // visibility: hidden skips drawing, so no transparency group
     assert!(
@@ -64,7 +64,7 @@ fn test_opacity_on_div_placeholder() {
         <div style="opacity: 0.7; width: 100px; height: 100px; background-color: blue;">
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         has_transparency_group(&pdf),
@@ -83,7 +83,7 @@ fn test_nested_opacity() {
             </div>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         has_transparency_group(&pdf),
@@ -99,7 +99,7 @@ fn test_opacity_with_background() {
             <p>Semi-transparent red background</p>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(
         has_transparency_group(&pdf),
@@ -118,7 +118,7 @@ fn test_visibility_hidden_preserves_layout() {
             <p>This should appear below the hidden element</p>
         </div>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 1000);
 }
@@ -134,7 +134,7 @@ fn test_visibility_hidden_styled_inline_root() {
             Hidden text with styled background
         </p>
     </body></html>"#;
-    let pdf_hidden = engine.render_html(html_hidden).unwrap();
+    let pdf_hidden = engine.render(html_hidden).unwrap();
     assert!(pdf_hidden.starts_with(b"%PDF"));
     // visibility:hidden should not produce a transparency group
     assert!(
@@ -155,7 +155,7 @@ fn test_visibility_hidden_list_item() {
             <li>Visible list item</li>
         </ul>
     </body></html>"#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 500);
     // Neither hidden nor visible list items (with default opacity) should produce transparency groups

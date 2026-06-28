@@ -49,7 +49,7 @@ fn page_break_after_always_splits_pages() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 3,
         "expected page-break-after: always to force >= 3 pages, got {}",
@@ -76,7 +76,7 @@ fn break_after_page_splits_pages() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 3,
         "expected break-after: page to force >= 3 pages, got {}",
@@ -107,7 +107,7 @@ fn page_break_before_always_splits_pages() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 3,
         "expected page-break-before: always to force >= 3 pages, got {}",
@@ -134,7 +134,7 @@ fn break_before_page_splits_pages() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 3,
         "expected break-before: page to force >= 3 pages, got {}",
@@ -158,7 +158,7 @@ fn no_break_property_stays_on_one_page() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert_eq!(
         page_count(&pdf),
         1,
@@ -189,7 +189,7 @@ fn page_break_after_forces_split_when_both_fit_on_one_page() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "page-break-after: always should force a split even when both divs fit on one page, got {} pages",

@@ -2,7 +2,7 @@ use fulgur::{Engine, PageSize};
 
 fn render(html: &str) -> Vec<u8> {
     let engine = Engine::builder().page_size(PageSize::A4).build();
-    engine.render_html(html).expect("render should succeed")
+    engine.render(html).expect("render should succeed")
 }
 
 #[test]

@@ -42,7 +42,7 @@ mod tests {
         );
         Engine::builder()
             .build()
-            .render_html(&html)
+            .render(&html)
             .expect("render should succeed")
     }
 

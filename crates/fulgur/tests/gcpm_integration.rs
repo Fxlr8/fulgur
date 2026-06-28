@@ -25,7 +25,7 @@ fn test_counter_margin_box_values_correct() {
         <h2>Two</h2><p>Content for chapter two.</p>
         <h2>Three</h2><p>Content for chapter three.</p>
     "#;
-    let result = engine.render_html(html);
+    let result = engine.render(html);
     assert!(
         result.is_ok(),
         "Counter values should reach margin boxes: {:?}",
@@ -51,7 +51,7 @@ fn test_gcpm_no_gcpm_css_works_as_before() {
 </html>"#;
 
     let engine = Engine::builder().build();
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
 
     assert!(!pdf.is_empty(), "PDF output should not be empty");
     assert!(
@@ -80,12 +80,12 @@ fn test_deterministic_output() {
     let mut assets = AssetBundle::new();
     assets.add_css(css);
     let engine = Engine::builder().assets(assets).build();
-    let pdf1 = engine.render_html(html).unwrap();
+    let pdf1 = engine.render(html).unwrap();
 
     let mut assets2 = AssetBundle::new();
     assets2.add_css(css);
     let engine2 = Engine::builder().assets(assets2).build();
-    let pdf2 = engine2.render_html(html).unwrap();
+    let pdf2 = engine2.render(html).unwrap();
 
     assert_eq!(pdf1, pdf2, "Same input must produce identical PDF output");
 }
@@ -118,7 +118,7 @@ fn test_element_policy_multiple_chapters_last() {
 
     let engine = Engine::builder().assets(assets).build();
     let pdf = engine
-        .render_html(html)
+        .render(html)
         .expect("render should succeed with element(title, last) across multiple chapters");
 
     assert!(
@@ -155,7 +155,7 @@ fn test_element_policy_first_except() {
 
     let engine = Engine::builder().assets(assets).build();
     let pdf = engine
-        .render_html(html)
+        .render(html)
         .expect("render should succeed with element(title, first-except)");
 
     assert!(
@@ -200,7 +200,7 @@ fn test_element_policy_start() {
 
     let engine = Engine::builder().assets(assets).build();
     let pdf = engine
-        .render_html(html)
+        .render(html)
         .expect("render should succeed with element(title, start)");
 
     assert!(
@@ -238,7 +238,7 @@ fn test_element_default_policy_still_works() {
 
     let engine = Engine::builder().assets(assets).build();
     let pdf = engine
-        .render_html(html)
+        .render(html)
         .expect("render should succeed with default element() policy");
 
     assert!(
@@ -262,7 +262,7 @@ fn test_counter_chapter_before_pseudo() {
 
     let engine = Engine::builder().assets(assets).build();
     let html = "<h2>Introduction</h2><p>Some text here</p><h2>Methods</h2><p>More text</p>";
-    let result = engine.render_html(html);
+    let result = engine.render(html);
     assert!(
         result.is_ok(),
         "PDF generation with counter in ::before should succeed: {:?}",
@@ -287,7 +287,7 @@ fn test_counter_in_margin_box() {
 
     let engine = Engine::builder().assets(assets).build();
     let html = "<h2>One</h2><p>Some text</p><h2>Two</h2><p>More text</p>";
-    let result = engine.render_html(html);
+    let result = engine.render(html);
     assert!(
         result.is_ok(),
         "PDF with counter in margin box should succeed: {:?}",
@@ -308,7 +308,7 @@ fn test_counter_upper_roman_style() {
 
     let engine = Engine::builder().assets(assets).build();
     let html = "<h2>A</h2><h2>B</h2><h2>C</h2><h2>D</h2>";
-    let result = engine.render_html(html);
+    let result = engine.render(html);
     assert!(
         result.is_ok(),
         "PDF with upper-roman counter should succeed: {:?}",
@@ -330,7 +330,7 @@ fn test_counter_set() {
 
     let engine = Engine::builder().assets(assets).build();
     let html = r#"<h2>One</h2><div class="reset"></div><h2>Eleven</h2>"#;
-    let result = engine.render_html(html);
+    let result = engine.render(html);
     assert!(
         result.is_ok(),
         "PDF with counter-set should succeed: {:?}",
@@ -356,7 +356,7 @@ fn test_counter_body_and_margin_box() {
 
     let engine = Engine::builder().assets(assets).build();
     let html = "<h2>Intro</h2><p>text</p><h2>Body</h2><p>text</p><h2>End</h2><p>text</p>";
-    let result = engine.render_html(html);
+    let result = engine.render(html);
     assert!(
         result.is_ok(),
         "PDF with counter in both body and margin box should succeed: {:?}",
@@ -379,7 +379,7 @@ fn test_counter_page_still_works() {
 
     let engine = Engine::builder().assets(assets).build();
     let html = "<p>Hello World</p>";
-    let result = engine.render_html(html);
+    let result = engine.render(html);
     assert!(
         result.is_ok(),
         "counter(page) should still work: {:?}",

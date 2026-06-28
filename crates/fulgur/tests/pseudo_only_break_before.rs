@@ -63,7 +63,7 @@ fn pseudo_only_inline_root_honours_break_before_page() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .assets(make_bundle_with_image())
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "pseudo-only element with break-before:page should force new page, got {} pages",
@@ -89,7 +89,7 @@ fn empty_leaf_div_honours_break_before_page() {
     let engine = Engine::builder()
         .page_size(PageSize::custom(70.5556, 70.5556))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "empty leaf <div> with break-before:page should force new page, got {} pages",
@@ -116,7 +116,7 @@ fn bare_img_honours_break_before_page() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .assets(make_bundle_with_image())
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "bare <img> with break-before:page should force new page, got {} pages",
@@ -145,7 +145,7 @@ fn pseudo_only_list_item_honours_break_before_page() {
         .page_size(PageSize::custom(70.5556, 70.5556))
         .assets(make_bundle_with_image())
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "pseudo-only <li> with break-before:page should force new page, got {} pages",

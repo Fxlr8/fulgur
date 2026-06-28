@@ -51,7 +51,7 @@ fn abs_positioned_div_is_out_of_flow_in_pagination() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     let pages = page_count(&pdf);
     assert_eq!(
         pages, 3,
@@ -157,7 +157,7 @@ fn break_after_on_last_in_flow_with_trailing_abs_sibling_does_not_split() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     let pages = page_count(&pdf);
     assert_eq!(
         pages, 1,
@@ -184,7 +184,7 @@ fn abs_positioned_does_not_force_extra_pages_for_short_flow() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     let pages = page_count(&pdf);
     assert_eq!(
         pages, 1,
@@ -211,7 +211,7 @@ fn nested_abs_height_drives_page_count() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert_eq!(
         page_count(&pdf),
         3,
@@ -238,7 +238,7 @@ fn abs_extends_pages_despite_in_flow_content() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert_eq!(
         page_count(&pdf),
         3,
@@ -265,7 +265,7 @@ fn nested_abs_offset_resolves_against_cb_not_flow() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert_eq!(
         page_count(&pdf),
         5,
@@ -300,7 +300,7 @@ fn nested_abs_cb_is_nearest_positioned_ancestor_not_static_parent() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert_eq!(
         page_count(&pdf),
         3,
@@ -334,7 +334,7 @@ fn nested_abs_cb_uses_positioned_ancestor_padding_box() {
             })
             .margin(Margin::uniform(0.0))
             .build();
-        engine.render_html(&html).expect("render")
+        engine.render(&html).expect("render")
     };
     let pdf_plain = render("");
     let pdf_border = render("border-top: 40px solid black;");
@@ -385,7 +385,7 @@ fn abs_bottom_margin_offsets_above_sibling() {
         })
         .margin(Margin::uniform(0.0))
         .build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
 
     let Some(ys) = text_matrix_ys(&pdf) else {
         eprintln!("qpdf not installed — skipping");
@@ -423,7 +423,7 @@ fn nested_abs_text_renders_cleanly_on_extended_page() {
       </div>
     </body></html>"#;
     let engine = Engine::builder().build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
 
     // in-flow 200vh = pages 1-2; nested abs at 100vh+200vh = 300vh extends to
     // the 4th page (its start is the top of page 4).

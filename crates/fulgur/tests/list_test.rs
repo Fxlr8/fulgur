@@ -20,7 +20,7 @@ fn test_unordered_list_renders() {
             </ul>
         </body></html>
     "#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 100);
 }
@@ -37,7 +37,7 @@ fn test_ordered_list_renders() {
             </ol>
         </body></html>
     "#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 100);
 }
@@ -56,7 +56,7 @@ fn test_nested_list_renders() {
             </ul>
         </body></html>
     "#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 100);
 }
@@ -75,7 +75,7 @@ fn test_mixed_list_styles_render() {
             </ul>
         </body></html>
     "#;
-    let pdf = engine.render_html(html).unwrap();
+    let pdf = engine.render(html).unwrap();
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 100);
 }

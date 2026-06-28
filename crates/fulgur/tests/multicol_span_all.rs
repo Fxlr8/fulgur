@@ -60,7 +60,7 @@ fn span_all_subtree_that_exceeds_one_page_splits_across_pages() {
     let engine = Engine::builder()
         .page_size(PageSize::custom(105.0, 148.0))
         .build();
-    let pdf = engine.render_html(&html).expect("render");
+    let pdf = engine.render(&html).expect("render");
     assert!(
         page_count(&pdf) >= 2,
         "expected >=2 pages from oversized SpanAll, got {}",
@@ -82,6 +82,6 @@ fn span_all_fits_single_page_for_short_content() {
     </body></html>"#;
 
     let engine = Engine::builder().page_size(PageSize::A4).build();
-    let pdf = engine.render_html(html).expect("render");
+    let pdf = engine.render(html).expect("render");
     assert_eq!(page_count(&pdf), 1, "short content should fit one A4 page");
 }

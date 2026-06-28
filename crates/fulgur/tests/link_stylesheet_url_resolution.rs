@@ -45,7 +45,7 @@ fn css_internal_url_resolves_against_stylesheet_directory() {
         .page_size(PageSize::A4)
         .base_path(root)
         .build();
-    let pdf = engine.render_html(html).expect("render must succeed");
+    let pdf = engine.render(html).expect("render must succeed");
     // Note: fulgur does not fail when an image resource is unreachable,
     // so this is a soft pin: it catches "renderer panics on CSS-relative
     // url()" regressions but NOT "url resolved against the wrong base"

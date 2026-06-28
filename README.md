@@ -139,7 +139,7 @@ use fulgur::config::{PageSize, Margin};
 
 // Basic conversion
 let engine = Engine::builder().build();
-let pdf = engine.render_html("<h1>Hello</h1>")?;
+let pdf = engine.render("<h1>Hello</h1>")?;
 
 // With page options
 let engine = Engine::builder()
@@ -148,8 +148,8 @@ let engine = Engine::builder()
     .title("My Document")
     .build();
 
-let pdf = engine.render_html(html)?;
-engine.render_html_to_file(html, "output.pdf")?;
+let pdf = engine.render(html)?;
+engine.render_file(html, "output.pdf")?;
 
 // Template + JSON
 let engine = Engine::builder()
@@ -160,7 +160,7 @@ let engine = Engine::builder()
     }))
     .build();
 
-let pdf = engine.render()?;
+let pdf = engine.render_template()?;
 
 // Tagged PDF (accessibility / PDF/UA-1)
 let engine = Engine::builder()
@@ -168,7 +168,7 @@ let engine = Engine::builder()
     .build();
 // or: .pdf_ua(true) for full PDF/UA-1 conformance (implies tagged + bookmarks)
 
-let pdf = engine.render_html(html)?;
+let pdf = engine.render(html)?;
 ```
 
 ## Tagged PDF
