@@ -4791,3 +4791,68 @@ fn border_radius_px_and_percent_resolve_radius_renders() {
     let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(!pdf.is_empty());
 }
+
+/// fulgur-5biq: Engine is Send + Sync — can be shared across threads.
+///
+/// If `Engine` ever stops being `Send + Sync` this test will fail to compile.
+#[test]
+fn engine_is_send_and_sync() {
+    let engine = fulgur::Engine::builder().build();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let pdf = engine
+                .render("<!doctype html><html><body><p>ok</p></body></html>")
+                .expect("render in spawned thread");
+            assert!(pdf.starts_with(b"%PDF"));
+        });
+    });
+}
+
+/// fulgur-5biq: render_batch returns one valid PDF per input.
+///
+/// Output length equals input length and each element is a valid PDF.
+/// Ordering is guaranteed by rayon's `IndexedParallelIterator`: `par_iter()`
+/// on a slice is indexed, so `.collect::<Vec<_>>()` preserves the original order.
+#[test]
+fn render_batch_returns_one_pdf_per_input() {
+    let htmls = [
+        r#"<!doctype html><html><body><p>first</p></body></html>"#,
+        r#"<!doctype html><html><body><p>second</p></body></html>"#,
+        r#"<!doctype html><html><body><p>third</p></body></html>"#,
+    ];
+    let results = Engine::builder().build().render_batch(&htmls);
+    assert_eq!(results.len(), htmls.len());
+    for (i, result) in results.iter().enumerate() {
+        let pdf = result
+            .as_ref()
+            .unwrap_or_else(|e| panic!("item {i} failed: {e}"));
+        assert!(!pdf.is_empty(), "item {i} produced empty PDF");
+        assert!(pdf.starts_with(b"%PDF"), "item {i} not a PDF");
+    }
+}
+
+/// fulgur-5biq: a failing item in render_batch does not abort its siblings.
+/// pdf_ua(true) without a document title reliably triggers Err (NoDocumentTitle).
+/// A batch mixing titled and untitled HTML must return Ok for the titled item
+/// even when adjacent items fail.
+#[test]
+fn render_batch_failure_does_not_abort_siblings() {
+    let engine = Engine::builder().pdf_ua(true).lang("en").build();
+    // item 0: no <title> → Err (NoDocumentTitle)
+    // item 1: has <title>  → Ok
+    // item 2: no <title> → Err
+    let htmls = [
+        "<!doctype html><html lang=\"en\"><body><h1>no title</h1></body></html>",
+        "<!doctype html><html lang=\"en\"><head><title>T</title></head><body><h1>Heading</h1><p>ok</p></body></html>",
+        "<!doctype html><html lang=\"en\"><body><h1>no title either</h1></body></html>",
+    ];
+    let results = engine.render_batch(&htmls);
+    assert_eq!(results.len(), 3);
+    assert!(results[0].is_err(), "item 0 (no title) should fail");
+    assert!(
+        results[1].is_ok(),
+        "item 1 (has title) should succeed, got: {:?}",
+        results[1]
+    );
+    assert!(results[2].is_err(), "item 2 (no title) should fail");
+}
