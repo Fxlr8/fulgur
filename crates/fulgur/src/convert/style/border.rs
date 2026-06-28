@@ -1,11 +1,11 @@
 //! border-color, border-radius, border-style extraction.
 //!
 //! border_radii basis is CSS px (Stylo length-percentage operates in CSS px),
-//! converted to pt via px_to_pt before storage. See coordinate-system.md.
+//! converted to pt via `.px().in_pt()` before storage. See coordinate-system.md.
 
 use super::{StyleContext, absolute_to_rgba};
-use crate::convert::px_to_pt;
 use crate::draw_primitives::{BlockStyle, BorderStyleValue};
+use crate::units::F32Units;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     // Border color (use top border color for all sides for simplicity)
@@ -21,11 +21,13 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     let resolve_radius =
         |r: &style::values::computed::length_percentage::NonNegativeLengthPercentage,
          basis: f32|
-         -> f32 {
-            px_to_pt(
-                r.0.resolve(style::values::computed::Length::new(basis))
-                    .px(),
-            )
+         -> crate::units::Pt {
+            // Inner `.px()` is Stylo's `Length::px()` (→ f32); outer `.px()` is
+            // `F32Units` (f32 → Px); `.in_pt()` converts Px → Pt. Byte-neutral.
+            r.0.resolve(style::values::computed::Length::new(basis))
+                .px()
+                .px()
+                .in_pt()
         };
 
     let tl = ctx.styles.clone_border_top_left_radius();

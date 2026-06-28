@@ -1,20 +1,20 @@
 //! border-width and padding extraction (layout-only).
 
-use crate::convert::px_to_pt;
 use crate::draw_primitives::BlockStyle;
+use crate::units::F32Units;
 
 pub(super) fn apply_to(style: &mut BlockStyle, layout: &taffy::Layout) {
     style.border_widths = [
-        px_to_pt(layout.border.top),
-        px_to_pt(layout.border.right),
-        px_to_pt(layout.border.bottom),
-        px_to_pt(layout.border.left),
+        layout.border.top.px().in_pt(),
+        layout.border.right.px().in_pt(),
+        layout.border.bottom.px().in_pt(),
+        layout.border.left.px().in_pt(),
     ];
     style.padding = [
-        px_to_pt(layout.padding.top),
-        px_to_pt(layout.padding.right),
-        px_to_pt(layout.padding.bottom),
-        px_to_pt(layout.padding.left),
+        layout.padding.top.px().in_pt(),
+        layout.padding.right.px().in_pt(),
+        layout.padding.bottom.px().in_pt(),
+        layout.padding.left.px().in_pt(),
     ];
 }
 
@@ -44,8 +44,14 @@ mod tests {
         };
         let mut style = BlockStyle::default();
         apply_to(&mut style, &layout);
-        assert_eq!(style.border_widths, [3.0, 6.0, 9.0, 12.0]);
-        assert_eq!(style.padding, [15.0, 18.0, 21.0, 24.0]);
+        assert_eq!(
+            style.border_widths.map(crate::units::Pt::to_f32),
+            [3.0, 6.0, 9.0, 12.0]
+        );
+        assert_eq!(
+            style.padding.map(crate::units::Pt::to_f32),
+            [15.0, 18.0, 21.0, 24.0]
+        );
     }
 
     #[test]
@@ -53,7 +59,7 @@ mod tests {
         let layout = taffy::Layout::default();
         let mut style = BlockStyle::default();
         apply_to(&mut style, &layout);
-        assert_eq!(style.border_widths, [0.0; 4]);
-        assert_eq!(style.padding, [0.0; 4]);
+        assert_eq!(style.border_widths.map(crate::units::Pt::to_f32), [0.0; 4]);
+        assert_eq!(style.padding.map(crate::units::Pt::to_f32), [0.0; 4]);
     }
 }

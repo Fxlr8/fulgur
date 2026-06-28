@@ -53,8 +53,8 @@ fn maybe_insert_block_for_replaced(
 
     if style.has_visual_style() {
         let (left_inset, top_inset) = style.content_inset();
-        let right_inset = style.border_widths[1] + style.padding[1];
-        let bottom_inset = style.border_widths[2] + style.padding[2];
+        let right_inset = style.border_widths[1].to_f32() + style.padding[1].to_f32();
+        let bottom_inset = style.border_widths[2].to_f32() + style.padding[2].to_f32();
         let content_width = (width - left_inset - right_inset).max(0.0);
         let content_height = (height - top_inset - bottom_inset).max(0.0);
         out.block_styles.insert(

@@ -61,7 +61,7 @@ fn build_shadow_evenodd_clip(
             elem_y,
             elem_w,
             elem_h,
-            &style.border_radii,
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
         );
     } else {
         let box_rect = krilla::geom::Rect::from_xywh(elem_x, elem_y, elem_w, elem_h)?;
@@ -94,7 +94,10 @@ fn draw_single_box_shadow(
 
     // Build the (expanded) shadow shape.
     let shadow_path = if style.has_radius() {
-        let radii = expand_radii(&style.border_radii, shadow.spread);
+        let radii = expand_radii(
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+            shadow.spread,
+        );
         crate::draw_primitives::build_rounded_rect_path(sx, sy, sw, sh, &radii)
     } else {
         build_rect_path(sx, sy, sw, sh)
@@ -175,7 +178,10 @@ fn draw_blur_box_shadow(
     let oh = ih + 2.0 * blur;
 
     // Corner radii for the inner rect (after spread)
-    let r_inner = expand_radii(&style.border_radii, shadow.spread);
+    let r_inner = expand_radii(
+        &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+        shadow.spread,
+    );
 
     let mask_stops = blur_stops_mask(shadow.color[3], 16);
     let shadow_a = shadow.color[3] as f32 / 255.0;
@@ -504,7 +510,13 @@ fn draw_background_color(
         return;
     };
     let path = if style.has_radius() {
-        crate::draw_primitives::build_rounded_rect_path(x, y, w, h, &style.border_radii)
+        crate::draw_primitives::build_rounded_rect_path(
+            x,
+            y,
+            w,
+            h,
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+        )
     } else {
         build_rect_path(x, y, w, h)
     };
@@ -538,7 +550,11 @@ fn draw_background_layer(
     }
 
     let clip_path = if style.has_radius() {
-        let clip_radii = compute_inner_radii(&style.border_radii, style, &layer.clip);
+        let clip_radii = compute_inner_radii(
+            &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
+            style,
+            &layer.clip,
+        );
         crate::draw_primitives::build_rounded_rect_path(cx, cy, cw, ch, &clip_radii)
     } else {
         build_rect_path(cx, cy, cw, ch)
@@ -1802,8 +1818,8 @@ fn compute_origin_rect(
     w: f32,
     h: f32,
 ) -> (f32, f32, f32, f32) {
-    let bw = &style.border_widths;
-    let pad = &style.padding;
+    let bw = style.border_widths.map(crate::units::Pt::to_f32);
+    let pad = style.padding.map(crate::units::Pt::to_f32);
     match origin {
         BgBox::BorderBox => (x, y, w, h),
         BgBox::PaddingBox => (x + bw[3], y + bw[0], w - bw[1] - bw[3], h - bw[0] - bw[2]),
@@ -1824,8 +1840,8 @@ fn compute_clip_rect(
     w: f32,
     h: f32,
 ) -> (f32, f32, f32, f32) {
-    let bw = &style.border_widths;
-    let pad = &style.padding;
+    let bw = style.border_widths.map(crate::units::Pt::to_f32);
+    let pad = style.padding.map(crate::units::Pt::to_f32);
     match clip {
         BgClip::BorderBox => (x, y, w, h),
         // Text clip: Stylo doesn't expose background-clip: text; falls back to padding-box.
@@ -1847,8 +1863,8 @@ fn compute_clip_rect(
 /// Per CSS Backgrounds §5.3, inner radii are `max(outer_radius - inset, 0)` where
 /// the inset depends on the background-clip box.
 fn compute_inner_radii(outer: &[[f32; 2]; 4], style: &BlockStyle, clip: &BgClip) -> [[f32; 2]; 4] {
-    let bw = &style.border_widths;
-    let pad = &style.padding;
+    let bw = style.border_widths.map(crate::units::Pt::to_f32);
+    let pad = style.padding.map(crate::units::Pt::to_f32);
     // Insets: (top, right, bottom, left)
     let (top, right, bottom, left) = match clip {
         BgClip::BorderBox => (0.0, 0.0, 0.0, 0.0),
@@ -2145,6 +2161,7 @@ fn resolve_repeat_axis(
 mod tests {
     use super::*;
     use crate::image::ImageFormat;
+    use crate::units::F32Units;
 
     fn make_layer(iw: f32, ih: f32, size: BgSize) -> BackgroundLayer {
         BackgroundLayer {
@@ -2287,8 +2304,8 @@ mod tests {
     // Helper: BlockStyle with given border widths and padding, all else default.
     fn make_style(border_widths: [f32; 4], padding: [f32; 4]) -> BlockStyle {
         BlockStyle {
-            border_widths,
-            padding,
+            border_widths: border_widths.map(|v| v.pt()),
+            padding: padding.map(|v| v.pt()),
             ..BlockStyle::default()
         }
     }
@@ -4949,11 +4966,12 @@ mod gradient_size_tests {
 #[cfg(test)]
 mod rect_computation_tests {
     use super::{BgBox, BgClip, BlockStyle, compute_clip_rect, compute_origin_rect};
+    use crate::units::F32Units;
 
     fn style(border: [f32; 4], padding: [f32; 4]) -> BlockStyle {
         BlockStyle {
-            border_widths: border,
-            padding,
+            border_widths: border.map(|v| v.pt()),
+            padding: padding.map(|v| v.pt()),
             ..BlockStyle::default()
         }
     }
@@ -5036,11 +5054,12 @@ mod rect_computation_tests {
 #[cfg(test)]
 mod inner_radii_tests {
     use super::{BgClip, BlockStyle, compute_inner_radii};
+    use crate::units::F32Units;
 
     fn style(border: [f32; 4], padding: [f32; 4]) -> BlockStyle {
         BlockStyle {
-            border_widths: border,
-            padding,
+            border_widths: border.map(|v| v.pt()),
+            padding: padding.map(|v| v.pt()),
             ..BlockStyle::default()
         }
     }

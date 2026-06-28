@@ -1033,8 +1033,8 @@ struct ContentBox {
 /// Compute the content-box of `node` from its computed style + Taffy layout.
 fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
     let (left_inset, top_inset) = style.content_inset();
-    let right_inset = style.border_widths[1] + style.padding[1];
-    let bottom_inset = style.border_widths[2] + style.padding[2];
+    let right_inset = style.border_widths[1].to_f32() + style.padding[1].to_f32();
+    let bottom_inset = style.border_widths[2].to_f32() + style.padding[2].to_f32();
     let (border_w, border_h) = size_in_pt(node.final_layout.size);
     ContentBox {
         origin_x: left_inset,

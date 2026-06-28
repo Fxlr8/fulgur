@@ -81,10 +81,10 @@ pub(super) struct AbsCb {
 
 fn cb_padding_box(node: &Node) -> ((f32, f32), (f32, f32)) {
     let style = extract_block_style(node, None);
-    let bl_pt = style.border_widths[3];
-    let br_pt = style.border_widths[1];
-    let bt_pt = style.border_widths[0];
-    let bb_pt = style.border_widths[2];
+    let bl_pt = style.border_widths[3].to_f32();
+    let br_pt = style.border_widths[1].to_f32();
+    let bt_pt = style.border_widths[0].to_f32();
+    let bb_pt = style.border_widths[2].to_f32();
     let sz = node.final_layout.size;
     let pb_w = (sz.width - pt_to_px(bl_pt + br_pt)).max(0.0);
     let pb_h = (sz.height - pt_to_px(bt_pt + bb_pt)).max(0.0);
