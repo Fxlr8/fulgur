@@ -4693,3 +4693,22 @@ fn multicol_column_rule_renders() {
         .expect("render multicol column-rule");
     assert!(!pdf.is_empty());
 }
+
+/// fulgur-5biq: render_batch returns one result per input in order, all valid PDFs.
+#[test]
+fn render_batch_returns_ordered_results() {
+    let htmls = [
+        r#"<!doctype html><html><body><p>first</p></body></html>"#,
+        r#"<!doctype html><html><body><p>second</p></body></html>"#,
+        r#"<!doctype html><html><body><p>third</p></body></html>"#,
+    ];
+    let results = Engine::builder().build().render_batch(&htmls);
+    assert_eq!(results.len(), htmls.len());
+    for (i, result) in results.iter().enumerate() {
+        let pdf = result
+            .as_ref()
+            .unwrap_or_else(|e| panic!("item {i} failed: {e}"));
+        assert!(!pdf.is_empty(), "item {i} produced empty PDF");
+        assert!(pdf.starts_with(b"%PDF"), "item {i} not a PDF");
+    }
+}

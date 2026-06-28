@@ -18,6 +18,11 @@ pub struct Engine {
     system_fonts: bool,
 }
 
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Engine>();
+};
+
 /// Result of a single render pass.
 ///
 /// - `pdf`: serialized PDF bytes for this pass.
@@ -631,6 +636,23 @@ impl Engine {
             .map_or_else(|| serde_json::json!({}), Clone::clone);
         let html = crate::template::render_template(name, content, &data)?;
         self.render(&html)
+    }
+
+    /// Render multiple HTML strings to PDFs, sharing this engine's parsed fonts.
+    ///
+    /// Returns one `Result<Vec<u8>>` per input in the same order. A failure in one
+    /// item does not abort the rest. With the `parallel` feature enabled the items
+    /// are processed concurrently via rayon; without it they run sequentially.
+    pub fn render_batch<S: AsRef<str> + Sync>(&self, htmls: &[S]) -> Vec<Result<Vec<u8>>> {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            htmls.par_iter().map(|h| self.render(h.as_ref())).collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            htmls.iter().map(|h| self.render(h.as_ref())).collect()
+        }
     }
 
     /// Renamed to [`render`](Engine::render).
