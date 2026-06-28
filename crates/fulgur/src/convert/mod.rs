@@ -853,10 +853,10 @@ fn convert_multicol_paragraph_slices(
                 inline_root::recalculate_paragraph_line_boxes(&mut lines);
 
                 let origin_pt = (
-                    group_x_pt + px_to_pt(col_slice.origin.x),
-                    group_y_pt + px_to_pt(col_slice.origin.y),
+                    group_x_pt + col_slice.origin.x.in_pt().to_f32(),
+                    group_y_pt + col_slice.origin.y.in_pt().to_f32(),
                 );
-                let size_pt = (col_w_pt, px_to_pt(col_slice.size.height));
+                let size_pt = (col_w_pt, col_slice.size.height.in_pt().to_f32());
 
                 slices.push(crate::drawables::ParagraphSlice {
                     origin_pt,

@@ -44,10 +44,10 @@ pub struct ColumnLineSlice {
     /// Slice top-left in CSS pixels, relative to the column group
     /// segment (matches `ColumnGroupGeometry::col_heights`'s frame).
     /// Zero for placeholder entries — gate on `line_range.is_empty()`.
-    pub origin: taffy::Point<f32>,
+    pub origin: taffy::Point<crate::units::Px>,
     /// Slice size — `col_w × Σ line_height(line_range)`. CSS pixels.
     /// Zero for placeholder entries.
-    pub size: taffy::Size<f32>,
+    pub size: taffy::Size<crate::units::Px>,
 }
 
 /// Plan for one paragraph distributed across `ColumnGroupGeometry`'s
@@ -944,10 +944,13 @@ fn layout_self_inline_root_container(
             // `compute_multicol_layout` would normally shift this into the
             // border-box frame in the post-loop fixup; here we apply the
             // shift ourselves on the geometry below before returning.
-            origin: Point { x: col_x, y: 0.0 },
+            origin: Point {
+                x: col_x.px(),
+                y: 0.0_f32.px(),
+            },
             size: Size {
-                width: col_w,
-                height: *slice_h,
+                width: col_w.px(),
+                height: (*slice_h).px(),
             },
         });
     }
@@ -1243,8 +1246,14 @@ fn layout_column_group(
                     // `y_offset`). The container-level border-box shift
                     // applied in `compute_multicol_layout` updates these
                     // alongside the rest of the geometry.
-                    origin: Point { x: col_x, y: col_y },
-                    size,
+                    origin: Point {
+                        x: col_x.px(),
+                        y: col_y.px(),
+                    },
+                    size: taffy::Size {
+                        width: size.width.px(),
+                        height: size.height.px(),
+                    },
                 });
             }
         }
@@ -1289,8 +1298,8 @@ fn layout_column_group(
     // Taffy storage).
     for slices in placed_slices.values() {
         for slice in slices.iter().skip(1) {
-            let idx = resolve_col_idx(slice.origin.x);
-            let bottom = slice.origin.y + slice.size.height;
+            let idx = resolve_col_idx(slice.origin.x.to_f32());
+            let bottom = (slice.origin.y + slice.size.height).to_f32();
             if bottom > col_heights[idx] {
                 col_heights[idx] = bottom;
             }
@@ -1314,7 +1323,7 @@ fn layout_column_group(
         .map(|(source_id, mut slices)| {
             let mut by_col: Vec<Option<ColumnLineSlice>> = (0..n).map(|_| None).collect();
             for slice in slices.drain(..) {
-                let idx = resolve_col_idx(slice.origin.x);
+                let idx = resolve_col_idx(slice.origin.x.to_f32());
                 by_col[idx] = Some(slice);
             }
             let column_slices: Vec<ColumnLineSlice> =
