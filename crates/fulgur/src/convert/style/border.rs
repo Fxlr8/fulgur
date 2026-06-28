@@ -22,12 +22,14 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
         |r: &style::values::computed::length_percentage::NonNegativeLengthPercentage,
          basis: f32|
          -> crate::units::Pt {
-            // Inner `.px()` is Stylo's `Length::px()` (→ f32); outer `.px()` is
-            // `F32Units` (f32 → Px); `.in_pt()` converts Px → Pt. Byte-neutral.
-            r.0.resolve(style::values::computed::Length::new(basis))
-                .px()
-                .px()
-                .in_pt()
+            // Stylo resolves the length-percentage in CSS px: `Length::px()`
+            // returns the radius as a bare `f32` in CSS px. Then `F32Units`
+            // (`f32 -> Px`) tags it and `.in_pt()` converts `Px -> Pt`.
+            // Byte-neutral (same value, just typed).
+            let radius_css_px: f32 =
+                r.0.resolve(style::values::computed::Length::new(basis))
+                    .px();
+            radius_css_px.px().in_pt()
         };
 
     let tl = ctx.styles.clone_border_top_left_radius();

@@ -56,18 +56,21 @@ the BlockStyle readers. Proof = unchanged goldens; never `FULGUR_VRT_UPDATE=1`.
 
 ## Verification commands (end of every task)
 
+Run the full sequence in order (single copy-pasteable block):
+
 ```bash
 export FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf"
+cargo build                                          # Finished
+cargo clippy -p fulgur -- -D warnings                # clean
+cargo fmt --check                                    # clean
+cargo test -p fulgur --lib                           # all pass
+cargo test -p fulgur --test render_smoke             # all pass
+cargo test -p fulgur-cli --test examples_determinism # 11 passed; 0 failed
+cargo test -p fulgur-vrt                             # run_fulgur_vrt ... ok
 ```
 
-- `cargo build` → `Finished`
-- `cargo clippy -p fulgur -- -D warnings` → clean
-- `cargo fmt --check` → clean
-- `cargo test -p fulgur --lib` → all pass
-- `cargo test -p fulgur --test render_smoke` → all pass
-- `cargo test -p fulgur-cli --test examples_determinism` → `11 passed; 0 failed`
-- `cargo test -p fulgur-vrt` → `run_fulgur_vrt ... ok` (the **load-bearing** byte
-  proof; NO golden regeneration)
+The `cargo test -p fulgur-vrt` golden byte comparison is the **load-bearing**
+proof; NO golden regeneration (never `FULGUR_VRT_UPDATE=1`).
 
 **Baseline captured GREEN** in this worktree before editing (examples_determinism
 11/0, VRT ok). Base: `origin/main` `ca4d9b41`.
