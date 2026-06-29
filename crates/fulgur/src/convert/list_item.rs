@@ -1,5 +1,6 @@
 use super::*;
 use super::{inline_root, list_marker, positioned, pseudo};
+use crate::units::F32Units;
 
 /// Dispatcher entry for list-item nodes.
 ///
@@ -179,8 +180,8 @@ pub(super) fn try_convert(
             // Empty <li>: standalone paragraph with just the marker.
             if let Some(item) = empty_li_marker_item {
                 let lines = vec![ShapedLine {
-                    height: line_height,
-                    baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
+                    height: line_height.pt(),
+                    baseline: (line_height / DEFAULT_LINE_HEIGHT_RATIO).pt(),
                     items: vec![item],
                 }];
                 out.paragraphs.insert(
@@ -248,8 +249,8 @@ pub(super) fn try_convert(
             if let Some(item) = marker_item {
                 if !inject_marker_into_first_paragraph(out, &pre_paragraph_ids, item.clone()) {
                     let lines = vec![ShapedLine {
-                        height: line_height,
-                        baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
+                        height: line_height.pt(),
+                        baseline: (line_height / DEFAULT_LINE_HEIGHT_RATIO).pt(),
                         items: vec![item],
                     }];
                     out.paragraphs.insert(
@@ -313,7 +314,7 @@ fn inject_marker_into_first_paragraph(
             .glyphs
             .iter()
             .map(|g| g.x_advance * run.font_size)
-            .sum::<f32>(),
+            .sum::<crate::units::Pt>(),
         LineItem::Image(img) => img.width,
         LineItem::InlineBox(ib) => ib.width,
     };
@@ -386,7 +387,7 @@ fn build_list_item_body(
                     after_inline,
                 );
                 inline_root::recalculate_paragraph_line_boxes(&mut paragraph.lines);
-                paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
+                paragraph.cached_height = paragraph.lines.iter().map(|l| l.height.to_f32()).sum();
             }
             out.paragraphs.insert(
                 node.id,
@@ -403,8 +404,8 @@ fn build_list_item_body(
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
         } else if before_inline.is_some() || after_inline.is_some() {
             let mut line = ShapedLine {
-                height: 0.0,
-                baseline: 0.0,
+                height: crate::units::Pt::ZERO,
+                baseline: crate::units::Pt::ZERO,
                 items: vec![],
             };
             pseudo::inject_inline_pseudo_images(
@@ -474,13 +475,14 @@ mod tests {
         InlineBoxItem, InlineImage, LineItem, ShapedGlyph, ShapedGlyphRun, ShapedLine,
         TextDecoration, VerticalAlign,
     };
+    use crate::units::F32Units;
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
     fn make_line(items: Vec<LineItem>) -> ShapedLine {
         ShapedLine {
-            height: 12.0,
-            baseline: 9.0,
+            height: 12.0_f32.pt(),
+            baseline: 9.0_f32.pt(),
             items,
         }
     }
@@ -497,10 +499,10 @@ mod tests {
     fn inline_box(width: f32, x_offset: f32) -> LineItem {
         LineItem::InlineBox(InlineBoxItem {
             node_id: None,
-            width,
-            height: 10.0,
-            x_offset,
-            computed_y: 0.0,
+            width: width.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: x_offset.pt(),
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
@@ -573,7 +575,7 @@ mod tests {
         let LineItem::InlineBox(marker_ib) = &first_line.items[0] else {
             panic!("expected InlineBox at index 0");
         };
-        assert_eq!(marker_ib.width, 10.0);
+        assert_eq!(marker_ib.width.to_f32(), 10.0);
     }
 
     #[test]
@@ -589,8 +591,8 @@ mod tests {
             panic!("expected InlineBox at index 1");
         };
         assert!(
-            (existing.x_offset - 15.0).abs() < 0.001,
-            "got {}",
+            (existing.x_offset.to_f32() - 15.0).abs() < 0.001,
+            "got {:?}",
             existing.x_offset
         );
     }
@@ -604,13 +606,13 @@ mod tests {
         let image_marker = LineItem::Image(InlineImage {
             data: Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 8.0,
-            height: 8.0,
-            x_offset: 0.0,
+            width: 8.0_f32.pt(),
+            height: 8.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
         });
         assert!(inject_marker_into_first_paragraph(
@@ -622,7 +624,11 @@ mod tests {
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected InlineBox at index 1");
         };
-        assert!((ib.x_offset - 11.0).abs() < 0.001, "got {}", ib.x_offset);
+        assert!(
+            (ib.x_offset.to_f32() - 11.0).abs() < 0.001,
+            "got {:?}",
+            ib.x_offset
+        );
     }
 
     #[test]
@@ -635,7 +641,7 @@ mod tests {
         let text_marker = LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![
@@ -655,14 +661,18 @@ mod tests {
                 },
             ],
             text: "• ".to_string(),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link: None,
         });
         inject_marker_into_first_paragraph(&mut out, &pre, text_marker);
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected InlineBox at index 1");
         };
-        assert!((ib.x_offset - 12.0).abs() < 0.001, "got {}", ib.x_offset);
+        assert!(
+            (ib.x_offset.to_f32() - 12.0).abs() < 0.001,
+            "got {:?}",
+            ib.x_offset
+        );
     }
 
     #[test]
@@ -748,12 +758,12 @@ mod tests {
         LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![],
             text: String::new(),
-            x_offset,
+            x_offset: x_offset.pt(),
             link: None,
         })
     }
@@ -762,13 +772,13 @@ mod tests {
         LineItem::Image(InlineImage {
             data: Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width,
-            height: 10.0,
-            x_offset,
+            width: width.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: x_offset.pt(),
             vertical_align: VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
         })
     }
@@ -791,8 +801,8 @@ mod tests {
             panic!("expected Text at index 1");
         };
         assert!(
-            (shifted.x_offset - 15.0).abs() < 0.001,
-            "got {}",
+            (shifted.x_offset.to_f32() - 15.0).abs() < 0.001,
+            "got {:?}",
             shifted.x_offset
         );
     }
@@ -817,8 +827,8 @@ mod tests {
             panic!("expected Image at index 1");
         };
         assert!(
-            (shifted.x_offset - 11.0).abs() < 0.001,
-            "got {}",
+            (shifted.x_offset.to_f32() - 11.0).abs() < 0.001,
+            "got {:?}",
             shifted.x_offset
         );
     }
@@ -847,24 +857,24 @@ mod tests {
             panic!("expected Text at 1");
         };
         assert!(
-            (t.x_offset - 11.0).abs() < 0.001,
-            "text: got {}",
+            (t.x_offset.to_f32() - 11.0).abs() < 0.001,
+            "text: got {:?}",
             t.x_offset
         );
         let LineItem::Image(im) = &items[2] else {
             panic!("expected Image at 2");
         };
         assert!(
-            (im.x_offset - 12.0).abs() < 0.001,
-            "image: got {}",
+            (im.x_offset.to_f32() - 12.0).abs() < 0.001,
+            "image: got {:?}",
             im.x_offset
         );
         let LineItem::InlineBox(ib) = &items[3] else {
             panic!("expected InlineBox at 3");
         };
         assert!(
-            (ib.x_offset - 13.0).abs() < 0.001,
-            "ib: got {}",
+            (ib.x_offset.to_f32() - 13.0).abs() < 0.001,
+            "ib: got {:?}",
             ib.x_offset
         );
         // Second line must be unchanged.
@@ -872,8 +882,8 @@ mod tests {
             panic!("expected InlineBox in line 1");
         };
         assert!(
-            (l1_ib.x_offset - 0.0).abs() < 0.001,
-            "line 1 shifted unexpectedly: {}",
+            (l1_ib.x_offset.to_f32() - 0.0).abs() < 0.001,
+            "line 1 shifted unexpectedly: {:?}",
             l1_ib.x_offset
         );
     }
@@ -889,12 +899,12 @@ mod tests {
         let zero_glyph_marker = LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![],
             text: String::new(),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link: None,
         });
         assert!(inject_marker_into_first_paragraph(
@@ -907,8 +917,8 @@ mod tests {
             panic!("expected InlineBox at index 1");
         };
         assert!(
-            (ib.x_offset - 7.0).abs() < 0.001,
-            "expected no shift, got {}",
+            (ib.x_offset.to_f32() - 7.0).abs() < 0.001,
+            "expected no shift, got {:?}",
             ib.x_offset
         );
         // Marker is still inserted at index 0.

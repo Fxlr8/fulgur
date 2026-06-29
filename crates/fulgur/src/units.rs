@@ -178,6 +178,13 @@ impl Pt {
     pub fn min(self, other: Pt) -> Pt {
         Pt(self.0.min(other.0))
     }
+
+    /// Absolute value. Mirrors `f32::abs` so a migrated `(a - b).abs()`
+    /// stays byte-identical.
+    #[inline]
+    pub fn abs(self) -> Pt {
+        Pt(self.0.abs())
+    }
 }
 
 /// Constructor sugar so `value.px()` / `value.pt()` reads naturally and the
@@ -242,6 +249,15 @@ mod tests {
                 .fold(Pt(0.0), Pt::max),
             Pt(2.0)
         );
+    }
+
+    #[test]
+    fn abs_mirrors_f32() {
+        assert_eq!((-3.5_f32).pt().abs(), 3.5_f32.pt());
+        assert_eq!(2.0_f32.pt().abs(), 2.0_f32.pt());
+        // Byte-identical to the raw f32 op it replaces.
+        let v = -7.25_f32;
+        assert_eq!(v.pt().abs().to_f32(), v.abs());
     }
 
     #[test]

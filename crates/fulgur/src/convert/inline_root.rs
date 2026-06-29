@@ -1,6 +1,7 @@
 use super::*;
 use super::{list_marker, positioned, pseudo};
 use crate::paragraph::{InlineBoxItem, ParagraphRender};
+use crate::units::F32Units;
 
 /// Dispatcher entry for inline-root nodes (those with `node.flags.is_inline_root()`).
 ///
@@ -80,12 +81,12 @@ pub(super) fn try_convert(
         if before_inline.is_some() || after_inline.is_some() {
             pseudo::inject_inline_pseudo_images(&mut paragraph.lines, before_inline, after_inline);
             recalculate_paragraph_line_boxes(&mut paragraph.lines);
-            paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
+            paragraph.cached_height = paragraph.lines.iter().map(|l| l.height.to_f32()).sum();
         }
 
         // Inside list-style-image marker injection.
         if !paragraph.lines.is_empty() {
-            let first_line_height = paragraph.lines[0].height;
+            let first_line_height = paragraph.lines[0].height.to_f32();
             if let Some(inline_img) =
                 list_marker::resolve_inside_image_marker(node, first_line_height, ctx.assets)
             {
@@ -101,7 +102,7 @@ pub(super) fn try_convert(
                     .items
                     .insert(0, LineItem::Image(inline_img));
                 recalculate_paragraph_line_boxes(&mut paragraph.lines);
-                paragraph.cached_height = paragraph.lines.iter().map(|l| l.height).sum();
+                paragraph.cached_height = paragraph.lines.iter().map(|l| l.height.to_f32()).sum();
             }
         }
 
@@ -159,8 +160,8 @@ pub(super) fn try_convert(
     } else if before_inline.is_some() || after_inline.is_some() {
         // Synthesize a minimal paragraph for pseudo-only elements.
         let mut line = ShapedLine {
-            height: 0.0,
-            baseline: 0.0,
+            height: crate::units::Pt::ZERO,
+            baseline: crate::units::Pt::ZERO,
             items: vec![],
         };
         pseudo::inject_inline_pseudo_images(
@@ -242,7 +243,7 @@ pub(super) fn metrics_from_line(line: &ShapedLine) -> LineFontMetrics {
         };
         if let Ok(font_ref) = skrifa::FontRef::from_index(&run.font_data, run.font_index) {
             let metrics = font_ref.metrics(
-                skrifa::instance::Size::new(run.font_size),
+                skrifa::instance::Size::new(run.font_size.to_f32()),
                 skrifa::instance::LocationRef::default(),
             );
             return LineFontMetrics {
@@ -259,8 +260,8 @@ pub(super) fn metrics_from_line(line: &ShapedLine) -> LineFontMetrics {
 
 /// Recalculate line boxes for all lines in a paragraph.
 pub(super) fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
-    let mut original_y_acc: f32 = 0.0;
-    let mut new_y_acc: f32 = 0.0;
+    let mut original_y_acc = crate::units::Pt::ZERO;
+    let mut new_y_acc = crate::units::Pt::ZERO;
     for line in lines.iter_mut() {
         let original_height = line.height;
         let font_metrics = metrics_from_line(line);
@@ -369,7 +370,7 @@ fn pageable_last_baseline_from_drawables(
             .map(|b| b.style.border_widths[0].to_f32() + b.style.padding[0].to_f32())
             .unwrap_or(0.0);
         if let Some(line) = para.lines.last() {
-            return Some(top_inset + line.baseline);
+            return Some(top_inset + line.baseline.to_f32());
         }
     }
     // 2) Otherwise walk DOM children in REVERSE, mirroring v1's
@@ -459,7 +460,7 @@ pub(super) fn extract_paragraph(
     let text = &text_layout.text;
 
     let mut shaped_lines = Vec::new();
-    let mut accumulated_line_top: f32 = 0.0;
+    let mut accumulated_line_top = crate::units::Pt::ZERO;
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
@@ -477,7 +478,7 @@ pub(super) fn extract_paragraph(
                     let font_index = font_ref.index;
                     let font_arc = ctx.get_or_insert_font(font_ref);
                     let font_size_parley = run.font_size();
-                    let font_size = px_to_pt(font_size_parley);
+                    let font_size = font_size_parley.px().in_pt();
 
                     let brush = &glyph_run.style().brush;
                     let color = get_text_color(doc, brush.id);
@@ -526,7 +527,7 @@ pub(super) fn extract_paragraph(
 
                     if !glyphs.is_empty() {
                         let run_text = text.clone();
-                        let run_x_offset = px_to_pt(glyph_run.offset());
+                        let run_x_offset = glyph_run.offset().px().in_pt();
                         items.push(LineItem::Text(ShapedGlyphRun {
                             font_data: font_arc,
                             font_index,
@@ -572,15 +573,16 @@ pub(super) fn extract_paragraph(
                         .insert(node_id, descendants);
 
                     let link = ctx.link_cache.lookup(doc, node_id);
-                    let height_pt = px_to_pt(positioned.height);
+                    let height = positioned.height.px().in_pt();
                     // Read baseline from `out` (Drawables). The Drawables-aware
                     // lookup queries `out.paragraphs[node_id]` (and
                     // `block_styles[node_id]` for top-inset) directly.
                     let baseline_shift =
                         inline_box_baseline_offset_from_drawables(doc, out, node_id)
-                            .map(|bo| height_pt - bo)
-                            .unwrap_or(0.0);
-                    let computed_y = px_to_pt(positioned.y) - accumulated_line_top + baseline_shift;
+                            .map(|bo| height - bo.pt())
+                            .unwrap_or(crate::units::Pt::ZERO);
+                    let computed_y =
+                        positioned.y.px().in_pt() - accumulated_line_top + baseline_shift;
                     let visible = doc
                         .get_node(node_id)
                         .map(super::style::extract_opacity_visible)
@@ -588,9 +590,9 @@ pub(super) fn extract_paragraph(
                         .unwrap_or(true);
                     items.push(LineItem::InlineBox(InlineBoxItem {
                         node_id: content,
-                        width: px_to_pt(positioned.width),
-                        height: height_pt,
-                        x_offset: px_to_pt(positioned.x),
+                        width: positioned.width.px().in_pt(),
+                        height,
+                        x_offset: positioned.x.px().in_pt(),
                         computed_y,
                         link,
                         opacity: 1.0,
@@ -600,13 +602,13 @@ pub(super) fn extract_paragraph(
             }
         }
 
-        let line_height_pt = px_to_pt(metrics.line_height);
+        let line_height = metrics.line_height.px().in_pt();
         shaped_lines.push(ShapedLine {
-            height: line_height_pt,
-            baseline: px_to_pt(metrics.baseline),
+            height: line_height,
+            baseline: metrics.baseline.px().in_pt(),
             items,
         });
-        accumulated_line_top += line_height_pt;
+        accumulated_line_top += line_height;
     }
 
     if shaped_lines.is_empty() {
@@ -636,14 +638,19 @@ mod tests {
         (a - b).abs() < 0.01
     }
 
+    /// Compare a migrated `Pt` coordinate against a raw `f32` expectation.
+    fn approx_pt(a: crate::units::Pt, b: f32) -> bool {
+        (a.to_f32() - b).abs() < 0.01
+    }
+
     /// A line with no items (text-only placeholder) and a paragraph-relative
     /// baseline. `baseline` here is the offset from the paragraph top, matching
     /// the convention used by `extract_paragraph` (which stores
     /// `px_to_pt(parley_metrics.baseline)` — a paragraph-relative value).
     fn text_line(height: f32, baseline: f32) -> ShapedLine {
         ShapedLine {
-            height,
-            baseline,
+            height: height.pt(),
+            baseline: baseline.pt(),
             items: Vec::new(),
         }
     }
@@ -652,12 +659,12 @@ mod tests {
         LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(font_data),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
             text: String::new(),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link: None,
         })
     }
@@ -666,13 +673,13 @@ mod tests {
         LineItem::Image(InlineImage {
             data: Arc::new(vec![]),
             format: ImageFormat::Png,
-            width,
-            height,
-            x_offset: 0.0,
+            width: width.pt(),
+            height: height.pt(),
+            x_offset: crate::units::Pt::ZERO,
             vertical_align: va,
             opacity: 1.0,
             visible: true,
-            computed_y: 0.0,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
         })
     }
@@ -680,10 +687,10 @@ mod tests {
     fn make_inline_box() -> LineItem {
         LineItem::InlineBox(InlineBoxItem {
             node_id: None,
-            width: 10.0,
-            height: 10.0,
-            x_offset: 0.0,
-            computed_y: 0.0,
+            width: 10.0_f32.pt(),
+            height: 10.0_f32.pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
@@ -697,7 +704,7 @@ mod tests {
         items
             .iter()
             .filter_map(|item| match item {
-                LineItem::Image(img) => Some(img.computed_y),
+                LineItem::Image(img) => Some(img.computed_y.to_f32()),
                 _ => None,
             })
             .collect()
@@ -801,10 +808,11 @@ mod tests {
             l
         }];
         recalculate_paragraph_line_boxes(&mut lines);
-        assert!(approx(lines[0].height, 16.0), "height={}", lines[0].height);
+        let h = lines[0].height;
+        assert!(approx_pt(h, 16.0), "height={h:?}");
         assert!(
-            approx(lines[0].baseline, 12.0),
-            "baseline={}",
+            approx_pt(lines[0].baseline, 12.0),
+            "baseline={:?}",
             lines[0].baseline
         );
     }
@@ -830,23 +838,23 @@ mod tests {
         ];
         recalculate_paragraph_line_boxes(&mut lines);
         assert!(
-            approx(lines[0].height, 16.0),
-            "line0 height={}",
+            approx_pt(lines[0].height, 16.0),
+            "line0 height={:?}",
             lines[0].height
         );
         assert!(
-            approx(lines[0].baseline, 12.0),
-            "line0 baseline={}",
+            approx_pt(lines[0].baseline, 12.0),
+            "line0 baseline={:?}",
             lines[0].baseline
         );
         assert!(
-            approx(lines[1].height, 14.0),
-            "line1 height={}",
+            approx_pt(lines[1].height, 14.0),
+            "line1 height={:?}",
             lines[1].height
         );
         assert!(
-            approx(lines[1].baseline, 26.0),
-            "line1 baseline={}",
+            approx_pt(lines[1].baseline, 26.0),
+            "line1 baseline={:?}",
             lines[1].baseline
         );
     }
@@ -866,14 +874,19 @@ mod tests {
             l
         }];
         recalculate_paragraph_line_boxes(&mut lines);
-        assert!(approx(lines[0].height, 16.0), "height={}", lines[0].height);
+        let h = lines[0].height;
+        assert!(approx_pt(h, 16.0), "height={h:?}");
         assert!(
-            approx(lines[0].baseline, 12.0),
-            "baseline={}",
+            approx_pt(lines[0].baseline, 12.0),
+            "baseline={:?}",
             lines[0].baseline
         );
         if let LineItem::Image(img) = &lines[0].items[0] {
-            assert!(approx(img.computed_y, 4.0), "computed_y={}", img.computed_y);
+            assert!(
+                approx_pt(img.computed_y, 4.0),
+                "computed_y={:?}",
+                img.computed_y
+            );
         } else {
             panic!("expected Image at index 0");
         }
@@ -909,8 +922,8 @@ mod tests {
 
         // Line 0 must be unchanged.
         assert!(
-            approx(lines[0].height, 10.0),
-            "line0 height={}",
+            approx_pt(lines[0].height, 10.0),
+            "line0 height={:?}",
             lines[0].height
         );
 
@@ -918,8 +931,8 @@ mod tests {
         // img.computed_y = 6 → += new_y_acc(10) → 16.
         if let LineItem::Image(img) = &lines[1].items[0] {
             assert!(
-                approx(img.computed_y, 16.0),
-                "computed_y={}",
+                approx_pt(img.computed_y, 16.0),
+                "computed_y={:?}",
                 img.computed_y
             );
         } else {
@@ -1017,13 +1030,13 @@ mod tests {
 
         // Line 0 must expand.
         let (h0, b0) = (lines[0].height, lines[0].baseline);
-        assert!(approx(h0, 24.0));
-        assert!(approx(b0, 20.0));
+        assert!(approx_pt(h0, 24.0));
+        assert!(approx_pt(b0, 20.0));
 
         // Line 1 height unchanged; baseline adjusted by new_y_acc=24 not 16.
         let (h1, b1) = (lines[1].height, lines[1].baseline);
-        assert!(approx(h1, 12.0));
-        assert!(approx(b1, 32.0));
+        assert!(approx_pt(h1, 12.0));
+        assert!(approx_pt(b1, 32.0));
         // Text-only line has no images; this call covers the `_ => None` arm of image_ys.
         assert!(image_ys(&lines[1].items).is_empty());
     }
@@ -1056,7 +1069,7 @@ mod tests {
 
         // Line 0: verify expansion occurred so the test is meaningful.
         let h0 = lines[0].height;
-        assert!(approx(h0, 24.0));
+        assert!(approx_pt(h0, 24.0));
 
         // Line 1 image: computed_y = line-local img_top(4) + new_y_acc(24) = 28.
         // image_ys covers the LineItem::Image arm; the _ => None arm is covered in
@@ -1097,8 +1110,8 @@ mod tests {
             lines: baselines
                 .iter()
                 .map(|&b| ShapedLine {
-                    height: 16.0,
-                    baseline: b,
+                    height: 16.0_f32.pt(),
+                    baseline: b.pt(),
                     items: vec![],
                 })
                 .collect(),

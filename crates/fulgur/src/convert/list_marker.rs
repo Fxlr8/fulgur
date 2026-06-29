@@ -1,5 +1,6 @@
 use super::*;
 use crate::blitz_adapter::{Marker, marker_skrifa_text, marker_to_string};
+use crate::units::F32Units;
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
 /// detected asset kind. Returns `None` when there is no `list-style-image`,
@@ -136,13 +137,13 @@ pub(super) fn resolve_inside_image_marker(
             Some(InlineImage {
                 data: Arc::clone(data),
                 format,
-                width,
-                height,
-                x_offset: 0.0,
+                width: width.pt(),
+                height: height.pt(),
+                x_offset: crate::units::Pt::ZERO,
                 vertical_align: VerticalAlign::Baseline,
                 opacity: 1.0,
                 visible: true,
-                computed_y: 0.0,
+                computed_y: crate::units::Pt::ZERO,
                 link: None,
             })
         }
@@ -180,6 +181,10 @@ pub(super) fn extract_marker_lines(
     for line in parley_layout.lines() {
         let metrics = line.metrics();
         if line_height_pt == 0.0 {
+            // Stays f32: this feeds the f32 marker-row height returned from
+            // this fn, a distinct sink from the `Pt`-typed `ShapedLine.height`
+            // below (`.px().in_pt()`). The dual conversion idiom is intentional,
+            // not an inconsistency.
             line_height_pt = px_to_pt(metrics.line_height);
         }
         let mut items = Vec::new();
@@ -198,7 +203,7 @@ pub(super) fn extract_marker_lines(
                 // conversion. Glyph ratios stay unitless by dividing by
                 // the original parley value.
                 let font_size_parley = run.font_size();
-                let font_size = px_to_pt(font_size_parley);
+                let font_size = font_size_parley.px().in_pt();
 
                 let brush = &glyph_run.style().brush;
                 let color = get_text_color(doc, brush.id);
@@ -247,7 +252,7 @@ pub(super) fn extract_marker_lines(
                         decoration: Default::default(),
                         glyphs,
                         text: marker_text.clone(),
-                        x_offset: px_to_pt(glyph_run.offset()),
+                        x_offset: glyph_run.offset().px().in_pt(),
                         link: None,
                     }));
                 }
@@ -256,8 +261,8 @@ pub(super) fn extract_marker_lines(
 
         max_width = max_width.max(line_width);
         shaped_lines.push(ShapedLine {
-            height: px_to_pt(metrics.line_height),
-            baseline: px_to_pt(metrics.baseline),
+            height: metrics.line_height.px().in_pt(),
+            baseline: metrics.baseline.px().in_pt(),
             items,
         });
     }
@@ -370,12 +375,12 @@ pub(super) fn shape_marker_with_skrifa(
     Some(ShapedGlyphRun {
         font_data: Arc::clone(font_data),
         font_index,
-        font_size,
+        font_size: font_size.pt(),
         color,
         decoration: TextDecoration::default(),
         glyphs,
         text,
-        x_offset: 0.0,
+        x_offset: crate::units::Pt::ZERO,
         link: None,
     })
 }
@@ -499,7 +504,7 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::clone(&font_data),
             font_index: 0,
-            font_size: 12.0,
+            font_size: 12.0_f32.pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![ShapedGlyph {
@@ -510,12 +515,12 @@ mod tests {
                 text_range: 0..1,
             }],
             text: "A".to_string(),
-            x_offset: 0.0,
+            x_offset: crate::units::Pt::ZERO,
             link: None,
         };
         let line = ShapedLine {
-            height: 12.0,
-            baseline: 9.0,
+            height: 12.0_f32.pt(),
+            baseline: 9.0_f32.pt(),
             items: vec![LineItem::Text(glyph_run)],
         };
         let mut drawables = Drawables::new();
@@ -558,10 +563,10 @@ mod tests {
         let run = result.unwrap();
         assert_eq!(run.glyphs.len(), 2, "bullet + trailing space = 2 glyphs");
         assert_eq!(run.text, "• ");
-        assert_eq!(run.font_size, 12.0);
+        assert_eq!(run.font_size.to_f32(), 12.0);
         assert_eq!(run.color, [255, 0, 0, 255]);
         assert_eq!(run.font_index, 0);
-        assert_eq!(run.x_offset, 0.0);
+        assert_eq!(run.x_offset.to_f32(), 0.0);
     }
 
     #[test]
