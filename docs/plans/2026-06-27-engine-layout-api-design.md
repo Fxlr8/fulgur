@@ -273,6 +273,27 @@ With P1a + P1d done, the only remaining single-unit deferral is the transform
 fold (`fulgur-1ino`, Affine2D + Point2). The `type Pt = f32` alias removal
 remains P2 (`fulgur-2map.8`).
 
+### P1c outcome (fulgur-2map.5) — pagination Fragment coords migrated
+
+Phase P1c typed `pagination_layout::Fragment`'s coordinate fields to
+`units::Px`, byte-neutral (examples_determinism + VRT goldens unchanged):
+
+- `Fragment { x, y, width, height }` → `units::Px` (`page_index` stays `u32`).
+  Construction sites tag at the source with `.px()`; readers untag with
+  `.to_f32()` (px-space f32 math + the `frag.height > Px::ZERO` comparisons) or
+  `.in_pt()` / `.in_pt().to_f32()` at the render.rs px→pt boundary, across 7
+  files.
+- Internal pagination math (`cursor_y` / `page_height_px` / `child_h` / `gap`,
+  incl. the `(this_top - prev_bottom).max(0.0)` gap clamp) stays `f32`; `.px()`
+  is applied only at the `Fragment { ... }` construction boundary (mirrors P1d:
+  local stays f32, struct field becomes the newtype), keeping the hot-path
+  arithmetic byte-identical.
+- `Px::ZERO` added (mirrors `Pt::ZERO`); no `Px::max` / `Px::min` needed (no
+  `Px` clamp exists — the gap clamp stays f32).
+
+Unblocks P1e (`fulgur-2map.7`, `Drawables` aggregate coordinate fields). The
+`type Pt = f32` alias removal remains P2 (`fulgur-2map.8`).
+
 ## 8. 決定性 / 受け入れ条件
 
 - `layout_to_drawables` 抽出後・newtype 移行後とも `examples_determinism` golden と
