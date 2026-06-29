@@ -592,8 +592,8 @@ mod tests {
         };
         assert!(
             (existing.x_offset.to_f32() - 15.0).abs() < 0.001,
-            "got {}",
-            existing.x_offset.to_f32()
+            "got {:?}",
+            existing.x_offset
         );
     }
 
@@ -626,8 +626,8 @@ mod tests {
         };
         assert!(
             (ib.x_offset.to_f32() - 11.0).abs() < 0.001,
-            "got {}",
-            ib.x_offset.to_f32()
+            "got {:?}",
+            ib.x_offset
         );
     }
 
@@ -670,8 +670,8 @@ mod tests {
         };
         assert!(
             (ib.x_offset.to_f32() - 12.0).abs() < 0.001,
-            "got {}",
-            ib.x_offset.to_f32()
+            "got {:?}",
+            ib.x_offset
         );
     }
 
@@ -802,8 +802,8 @@ mod tests {
         };
         assert!(
             (shifted.x_offset.to_f32() - 15.0).abs() < 0.001,
-            "got {}",
-            shifted.x_offset.to_f32()
+            "got {:?}",
+            shifted.x_offset
         );
     }
 
@@ -828,8 +828,8 @@ mod tests {
         };
         assert!(
             (shifted.x_offset.to_f32() - 11.0).abs() < 0.001,
-            "got {}",
-            shifted.x_offset.to_f32()
+            "got {:?}",
+            shifted.x_offset
         );
     }
 
@@ -858,24 +858,24 @@ mod tests {
         };
         assert!(
             (t.x_offset.to_f32() - 11.0).abs() < 0.001,
-            "text: got {}",
-            t.x_offset.to_f32()
+            "text: got {:?}",
+            t.x_offset
         );
         let LineItem::Image(im) = &items[2] else {
             panic!("expected Image at 2");
         };
         assert!(
             (im.x_offset.to_f32() - 12.0).abs() < 0.001,
-            "image: got {}",
-            im.x_offset.to_f32()
+            "image: got {:?}",
+            im.x_offset
         );
         let LineItem::InlineBox(ib) = &items[3] else {
             panic!("expected InlineBox at 3");
         };
         assert!(
             (ib.x_offset.to_f32() - 13.0).abs() < 0.001,
-            "ib: got {}",
-            ib.x_offset.to_f32()
+            "ib: got {:?}",
+            ib.x_offset
         );
         // Second line must be unchanged.
         let LineItem::InlineBox(l1_ib) = &out.paragraphs[&5].lines[1].items[0] else {
@@ -883,8 +883,8 @@ mod tests {
         };
         assert!(
             (l1_ib.x_offset.to_f32() - 0.0).abs() < 0.001,
-            "line 1 shifted unexpectedly: {}",
-            l1_ib.x_offset.to_f32()
+            "line 1 shifted unexpectedly: {:?}",
+            l1_ib.x_offset
         );
     }
 
@@ -918,8 +918,8 @@ mod tests {
         };
         assert!(
             (ib.x_offset.to_f32() - 7.0).abs() < 0.001,
-            "expected no shift, got {}",
-            ib.x_offset.to_f32()
+            "expected no shift, got {:?}",
+            ib.x_offset
         );
         // Marker is still inserted at index 0.
         assert_eq!(out.paragraphs[&5].lines[0].items.len(), 2);

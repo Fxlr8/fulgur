@@ -5116,8 +5116,8 @@ mod tests {
         if let crate::paragraph::LineItem::Image(img) = &sliced[0].items[0] {
             assert!(
                 (img.computed_y.to_f32() - 3.0).abs() < 0.01,
-                "expected computed_y=3.0 after rebasing, got {}",
-                img.computed_y.to_f32(),
+                "expected computed_y=3.0 after rebasing, got {:?}",
+                img.computed_y,
             );
         } else {
             panic!("expected Image item in sliced line");

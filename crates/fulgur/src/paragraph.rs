@@ -1042,6 +1042,63 @@ mod tests {
         (a - b).abs() < 0.01
     }
 
+    // ---------- inline-image link rect ----------
+
+    /// Covers the inline-image link-rect arm of `draw_shaped_lines` (the
+    /// `if let Some(link_span) = img.link` block): a visible `InlineImage`
+    /// carrying an `<a>` link must push a `LinkCollector` rect whose
+    /// coordinates equal the image's drawn box
+    /// `(x + x_offset, y + computed_y, width, height)`. This path is not
+    /// reachable through `render_html` today — linked inline `<img>`
+    /// materialisation into a `LineItem::Image` with `link` set is still
+    /// pending (see `tests/link_integration.rs`) — so we drive
+    /// `draw_shaped_lines` directly with a `LinkCollector`-backed canvas.
+    #[test]
+    fn draw_shaped_lines_image_link_rect_matches_drawn_coords() {
+        let link = Arc::new(LinkSpan {
+            target: LinkTarget::External(Arc::new("https://example.com".into())),
+            alt_text: None,
+        });
+        let mut img = make_inline_image(20.0, 10.0, VerticalAlign::Baseline);
+        img.x_offset = 2.0_f32.pt();
+        img.computed_y = 3.0_f32.pt();
+        img.link = Some(Arc::clone(&link));
+
+        let mut line = text_line(16.0, 12.0);
+        line.items.push(LineItem::Image(img));
+
+        let mut lc = crate::draw_primitives::LinkCollector::new();
+        {
+            let mut doc = krilla::Document::new();
+            let settings =
+                krilla::page::PageSettings::from_wh(200.0, 200.0).expect("valid page size");
+            let mut page = doc.start_page_with(settings);
+            let mut surface = page.surface();
+            let mut canvas = Canvas {
+                surface: &mut surface,
+                bookmark_collector: None,
+                link_collector: Some(&mut lc),
+                tag_collector: None,
+                link_run_node_id: None,
+            };
+            // Draw origin (5, 7) pt; rect must land at (5+2, 7+3, 20, 10).
+            draw_shaped_lines(&mut canvas, &[line], 5.0_f32.pt(), 7.0_f32.pt(), None);
+        }
+
+        let occ = lc.take_page(0);
+        assert_eq!(occ.len(), 1, "exactly one link occurrence expected");
+        assert_eq!(occ[0].quads.len(), 1, "one rect for the linked image");
+        let pts = occ[0].quads[0].points;
+        let min_x = pts.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+        let max_x = pts.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = pts.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        let max_y = pts.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        assert!((min_x - 7.0).abs() < 1e-4, "min_x={min_x:?}");
+        assert!((max_x - 27.0).abs() < 1e-4, "max_x={max_x:?}");
+        assert!((min_y - 10.0).abs() < 1e-4, "min_y={min_y:?}");
+        assert!((max_y - 20.0).abs() < 1e-4, "max_y={max_y:?}");
+    }
+
     /// Compare a migrated `Pt` coordinate against a raw `f32` expectation.
     fn approx_pt(a: crate::units::Pt, b: f32) -> bool {
         (a.to_f32() - b).abs() < 0.01
@@ -1061,21 +1118,17 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(
-            approx_pt(line.height, 16.0),
-            "height={}",
-            line.height.to_f32()
-        );
+        assert!(approx_pt(line.height, 16.0), "height={:?}", line.height);
         assert!(
             approx_pt(line.baseline, 12.0),
-            "baseline={}",
-            line.baseline.to_f32()
+            "baseline={:?}",
+            line.baseline
         );
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 4.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1092,21 +1145,17 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(
-            approx_pt(line.height, 24.0),
-            "height={}",
-            line.height.to_f32()
-        );
+        assert!(approx_pt(line.height, 24.0), "height={:?}", line.height);
         assert!(
             approx_pt(line.baseline, 20.0),
-            "baseline={}",
-            line.baseline.to_f32()
+            "baseline={:?}",
+            line.baseline
         );
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 0.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1124,16 +1173,12 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(
-            approx_pt(line.height, 16.0),
-            "height={}",
-            line.height.to_f32()
-        );
+        assert!(approx_pt(line.height, 16.0), "height={:?}", line.height);
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 3.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1154,8 +1199,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 10.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1176,8 +1221,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 0.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1198,8 +1243,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 0.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1220,8 +1265,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 8.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1242,8 +1287,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 0.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1264,8 +1309,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, line.height.to_f32() - 8.0),
-                "computed_y={}",
-                img.computed_y.to_f32(),
+                "computed_y={:?}",
+                img.computed_y,
             );
         }
     }
@@ -1286,8 +1331,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 3.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1308,8 +1353,8 @@ mod tests {
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 2.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1327,16 +1372,12 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(
-            approx_pt(line.height, 20.0),
-            "height={}",
-            line.height.to_f32()
-        );
+        assert!(approx_pt(line.height, 20.0), "height={:?}", line.height);
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 0.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1367,8 +1408,8 @@ mod tests {
         // Image fits within [0, 16): no expansion
         assert!(
             approx_pt(line2.height, 16.0),
-            "height should stay 16, got {}",
-            line2.height.to_f32()
+            "height should stay 16, got {:?}",
+            line2.height
         );
         // Convert computed_y to paragraph-absolute
         if let LineItem::Image(img) = &mut line2.items[0] {
@@ -1376,15 +1417,15 @@ mod tests {
             // paragraph-absolute computed_y = line-local (4.0) + y_acc (16.0) = 20.0
             assert!(
                 approx_pt(img.computed_y, 20.0),
-                "paragraph-absolute computed_y should be 20, got {}",
-                img.computed_y.to_f32()
+                "paragraph-absolute computed_y should be 20, got {:?}",
+                img.computed_y
             );
         }
         line2.baseline += y_acc; // restore to paragraph-absolute: 28.0
         assert!(
             approx_pt(line2.baseline, 28.0),
-            "baseline should be 28, got {}",
-            line2.baseline.to_f32()
+            "baseline should be 28, got {:?}",
+            line2.baseline
         );
     }
 
@@ -1498,15 +1539,11 @@ mod tests {
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
         // Text items are skipped: height and baseline must be unchanged.
-        assert!(
-            approx_pt(line.height, 16.0),
-            "height={}",
-            line.height.to_f32()
-        );
+        assert!(approx_pt(line.height, 16.0), "height={:?}", line.height);
         assert!(
             approx_pt(line.baseline, 12.0),
-            "baseline={}",
-            line.baseline.to_f32()
+            "baseline={:?}",
+            line.baseline
         );
     }
 
@@ -1539,21 +1576,17 @@ mod tests {
         recalculate_line_box(&mut line, &metrics);
         // line_top stays 0 (img_top=15 > 0), shift=0
         // height = 20 - 0 = 20
-        assert!(
-            approx_pt(line.height, 20.0),
-            "height={}",
-            line.height.to_f32()
-        );
+        assert!(approx_pt(line.height, 20.0), "height={:?}", line.height);
         assert!(
             approx_pt(line.baseline, 12.0),
-            "baseline={}",
-            line.baseline.to_f32()
+            "baseline={:?}",
+            line.baseline
         );
         if let LineItem::Image(img) = &line.items[0] {
             assert!(
                 approx_pt(img.computed_y, 15.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1575,23 +1608,19 @@ mod tests {
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
-        assert!(
-            approx_pt(line.height, 20.0),
-            "height={}",
-            line.height.to_f32()
-        );
+        assert!(approx_pt(line.height, 20.0), "height={:?}", line.height);
         // baseline = 12 + shift(4) = 16
         assert!(
             approx_pt(line.baseline, 16.0),
-            "baseline={}",
-            line.baseline.to_f32()
+            "baseline={:?}",
+            line.baseline
         );
         if let LineItem::Image(img) = &line.items[0] {
             // computed_y = img_top + shift = -4 + 4 = 0
             assert!(
                 approx_pt(img.computed_y, 0.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         }
     }
@@ -1682,8 +1711,8 @@ mod tests {
                 assert_eq!(ib.width.to_f32(), 30.0);
                 assert!(
                     approx_pt(ib.computed_y, 3.0),
-                    "computed_y={}",
-                    ib.computed_y.to_f32()
+                    "computed_y={:?}",
+                    ib.computed_y
                 );
             }
             _ => panic!("expected InlineBox at index 1"),

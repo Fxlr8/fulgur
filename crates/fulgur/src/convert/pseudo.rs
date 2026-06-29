@@ -350,11 +350,7 @@ mod tests {
         assert_eq!(lines[0].items.len(), 1);
         match &lines[0].items[0] {
             LineItem::Image(img) => {
-                assert!(
-                    approx(img.x_offset, 0.0),
-                    "x_offset={}",
-                    img.x_offset.to_f32()
-                );
+                assert!(approx(img.x_offset, 0.0), "x_offset={:?}", img.x_offset);
                 assert!(approx(img.width, 20.0));
             }
             _ => panic!("expected Image at index 0"),
@@ -374,11 +370,7 @@ mod tests {
         }
         match &lines[0].items[1] {
             LineItem::Image(img) => {
-                assert!(
-                    approx(img.x_offset, 20.0),
-                    "shifted x={}",
-                    img.x_offset.to_f32()
-                );
+                assert!(approx(img.x_offset, 20.0), "shifted x={:?}", img.x_offset);
             }
             _ => panic!("expected shifted Image at index 1"),
         }
@@ -457,8 +449,8 @@ mod tests {
             LineItem::Image(img) => {
                 assert!(
                     approx(img.x_offset, 7.0),
-                    "second-line x_offset={}",
-                    img.x_offset.to_f32()
+                    "second-line x_offset={:?}",
+                    img.x_offset
                 );
             }
             _ => panic!("expected untouched Image in second line"),
@@ -477,8 +469,8 @@ mod tests {
             LineItem::Image(img) => {
                 assert!(
                     approx(img.x_offset, 15.0),
-                    "after x_offset={}",
-                    img.x_offset.to_f32()
+                    "after x_offset={:?}",
+                    img.x_offset
                 );
             }
             _ => panic!("expected appended after Image"),
@@ -525,8 +517,8 @@ mod tests {
             LineItem::Image(img) => {
                 assert!(
                     approx(img.x_offset, 34.0),
-                    "after x_offset={}",
-                    img.x_offset.to_f32()
+                    "after x_offset={:?}",
+                    img.x_offset
                 );
             }
             _ => panic!("expected appended after Image"),
@@ -556,8 +548,8 @@ mod tests {
             LineItem::Image(img) => {
                 assert!(
                     approx(img.x_offset, 10.0),
-                    "after x_offset={}",
-                    img.x_offset.to_f32()
+                    "after x_offset={:?}",
+                    img.x_offset
                 );
             }
             _ => panic!("expected appended after Image"),
@@ -571,11 +563,7 @@ mod tests {
         assert_eq!(lines[0].items.len(), 1);
         match &lines[0].items[0] {
             LineItem::Image(img) => {
-                assert!(
-                    approx(img.x_offset, 0.0),
-                    "x_offset={}",
-                    img.x_offset.to_f32()
-                );
+                assert!(approx(img.x_offset, 0.0), "x_offset={:?}", img.x_offset);
             }
             _ => panic!("expected after Image in empty line"),
         }
@@ -640,8 +628,8 @@ mod tests {
             LineItem::Image(img) => {
                 assert!(
                     approx(img.x_offset, 13.0),
-                    "after x_offset={}",
-                    img.x_offset.to_f32()
+                    "after x_offset={:?}",
+                    img.x_offset
                 );
             }
             _ => panic!("expected after Image appended"),
@@ -690,21 +678,13 @@ mod tests {
         }
         match &lines[0].items[1] {
             LineItem::Image(img) => {
-                assert!(
-                    approx(img.x_offset, 8.0),
-                    "shifted x={}",
-                    img.x_offset.to_f32()
-                );
+                assert!(approx(img.x_offset, 8.0), "shifted x={:?}", img.x_offset);
             }
             _ => panic!("expected shifted Image at 1"),
         }
         match lines[0].items.last().unwrap() {
             LineItem::Image(img) => {
-                assert!(
-                    approx(img.x_offset, 18.0),
-                    "after x={}",
-                    img.x_offset.to_f32()
-                );
+                assert!(approx(img.x_offset, 18.0), "after x={:?}", img.x_offset);
             }
             _ => panic!("expected after Image at end"),
         }

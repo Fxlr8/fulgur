@@ -808,15 +808,12 @@ mod tests {
             l
         }];
         recalculate_paragraph_line_boxes(&mut lines);
-        assert!(
-            approx_pt(lines[0].height, 16.0),
-            "height={}",
-            lines[0].height.to_f32()
-        );
+        let h = lines[0].height;
+        assert!(approx_pt(h, 16.0), "height={h:?}");
         assert!(
             approx_pt(lines[0].baseline, 12.0),
-            "baseline={}",
-            lines[0].baseline.to_f32()
+            "baseline={:?}",
+            lines[0].baseline
         );
     }
 
@@ -842,23 +839,23 @@ mod tests {
         recalculate_paragraph_line_boxes(&mut lines);
         assert!(
             approx_pt(lines[0].height, 16.0),
-            "line0 height={}",
-            lines[0].height.to_f32()
+            "line0 height={:?}",
+            lines[0].height
         );
         assert!(
             approx_pt(lines[0].baseline, 12.0),
-            "line0 baseline={}",
-            lines[0].baseline.to_f32()
+            "line0 baseline={:?}",
+            lines[0].baseline
         );
         assert!(
             approx_pt(lines[1].height, 14.0),
-            "line1 height={}",
-            lines[1].height.to_f32()
+            "line1 height={:?}",
+            lines[1].height
         );
         assert!(
             approx_pt(lines[1].baseline, 26.0),
-            "line1 baseline={}",
-            lines[1].baseline.to_f32()
+            "line1 baseline={:?}",
+            lines[1].baseline
         );
     }
 
@@ -877,21 +874,18 @@ mod tests {
             l
         }];
         recalculate_paragraph_line_boxes(&mut lines);
-        assert!(
-            approx_pt(lines[0].height, 16.0),
-            "height={}",
-            lines[0].height.to_f32()
-        );
+        let h = lines[0].height;
+        assert!(approx_pt(h, 16.0), "height={h:?}");
         assert!(
             approx_pt(lines[0].baseline, 12.0),
-            "baseline={}",
-            lines[0].baseline.to_f32()
+            "baseline={:?}",
+            lines[0].baseline
         );
         if let LineItem::Image(img) = &lines[0].items[0] {
             assert!(
                 approx_pt(img.computed_y, 4.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         } else {
             panic!("expected Image at index 0");
@@ -929,8 +923,8 @@ mod tests {
         // Line 0 must be unchanged.
         assert!(
             approx_pt(lines[0].height, 10.0),
-            "line0 height={}",
-            lines[0].height.to_f32()
+            "line0 height={:?}",
+            lines[0].height
         );
 
         // For line 1: normalize baseline → 18-10=8; img_top=8-2=6; no expansion;
@@ -938,8 +932,8 @@ mod tests {
         if let LineItem::Image(img) = &lines[1].items[0] {
             assert!(
                 approx_pt(img.computed_y, 16.0),
-                "computed_y={}",
-                img.computed_y.to_f32()
+                "computed_y={:?}",
+                img.computed_y
             );
         } else {
             panic!("expected Image in line 1 at index 0");
