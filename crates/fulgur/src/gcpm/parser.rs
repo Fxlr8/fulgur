@@ -2676,4 +2676,443 @@ mod tests {
             });
         assert_eq!(item, Some(("section".into(), CounterStyle::LowerRoman)));
     }
+
+    // -----------------------------------------------------------------------
+    // @page { size: ... } — parse_page_size_value (all variants)
+    // -----------------------------------------------------------------------
+
+    fn assert_size(css: &str, expected: PageSizeDecl) {
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.page_settings.len(),
+            1,
+            "expected 1 PageSettingsRule for: {css}"
+        );
+        let size = ctx.page_settings[0]
+            .size
+            .as_ref()
+            .expect("size should be set");
+        assert_eq!(size, &expected, "size mismatch for: {css}");
+    }
+
+    fn assert_no_page_settings(css: &str) {
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.page_settings.is_empty(),
+            "expected no PageSettingsRule for: {css}, got: {:?}",
+            ctx.page_settings
+        );
+    }
+
+    /// Helper: compare f32 values with 0.01pt tolerance (avoids float precision surprises).
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn test_page_size_auto() {
+        assert_size("@page { size: auto; }", PageSizeDecl::Auto);
+    }
+
+    #[test]
+    fn test_page_size_landscape_keyword() {
+        assert_size(
+            "@page { size: landscape; }",
+            PageSizeDecl::KeywordWithOrientation("auto".to_string(), true),
+        );
+    }
+
+    #[test]
+    fn test_page_size_portrait_keyword() {
+        assert_size(
+            "@page { size: portrait; }",
+            PageSizeDecl::KeywordWithOrientation("auto".to_string(), false),
+        );
+    }
+
+    #[test]
+    fn test_page_size_named_keyword() {
+        assert_size(
+            "@page { size: A4; }",
+            PageSizeDecl::Keyword("A4".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_page_size_named_keyword_landscape() {
+        assert_size(
+            "@page { size: A4 landscape; }",
+            PageSizeDecl::KeywordWithOrientation("A4".to_string(), true),
+        );
+    }
+
+    #[test]
+    fn test_page_size_named_keyword_portrait() {
+        assert_size(
+            "@page { size: A4 portrait; }",
+            PageSizeDecl::KeywordWithOrientation("A4".to_string(), false),
+        );
+    }
+
+    #[test]
+    fn test_page_size_letter_keyword() {
+        assert_size(
+            "@page { size: letter; }",
+            PageSizeDecl::Keyword("letter".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_page_size_two_dimensions_pt() {
+        // 100pt × 200pt — no conversion needed, 1pt = 1pt.
+        let ctx = parse_gcpm("@page { size: 100pt 200pt; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        match ctx.page_settings[0].size.as_ref().unwrap() {
+            PageSizeDecl::Custom(w, h) => {
+                assert!(approx_eq(*w, 100.0), "width={w}");
+                assert!(approx_eq(*h, 200.0), "height={h}");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_page_size_one_dimension_pt() {
+        // Single dimension: width and height are both set to the same value.
+        let ctx = parse_gcpm("@page { size: 150pt; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        match ctx.page_settings[0].size.as_ref().unwrap() {
+            PageSizeDecl::Custom(w, h) => {
+                assert!(approx_eq(*w, 150.0), "width={w}");
+                assert!(approx_eq(*h, 150.0), "height={h}");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_page_size_mm_unit() {
+        // 25.4mm = 72pt exactly (25.4 × 72 / 25.4).
+        let ctx = parse_gcpm("@page { size: 25.4mm; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        match ctx.page_settings[0].size.as_ref().unwrap() {
+            PageSizeDecl::Custom(w, h) => {
+                assert!(approx_eq(*w, 72.0), "width={w}");
+                assert!(approx_eq(*h, 72.0), "height={h}");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_page_size_in_unit() {
+        // 1in = 72pt.
+        let ctx = parse_gcpm("@page { size: 1in 2in; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        match ctx.page_settings[0].size.as_ref().unwrap() {
+            PageSizeDecl::Custom(w, h) => {
+                assert!(approx_eq(*w, 72.0), "width={w}");
+                assert!(approx_eq(*h, 144.0), "height={h}");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_page_size_cm_unit() {
+        // 2.54cm = 72pt (2.54 × 72 / 2.54).
+        let ctx = parse_gcpm("@page { size: 2.54cm; }");
+        match ctx.page_settings[0].size.as_ref().unwrap() {
+            PageSizeDecl::Custom(w, h) => {
+                assert!(approx_eq(*w, 72.0), "width={w}");
+                assert!(approx_eq(*h, 72.0), "height={h}");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_page_size_px_unit() {
+        // 96px × (72/96) = 72pt.
+        let ctx = parse_gcpm("@page { size: 96px; }");
+        match ctx.page_settings[0].size.as_ref().unwrap() {
+            PageSizeDecl::Custom(w, h) => {
+                assert!(approx_eq(*w, 72.0), "width={w}");
+                assert!(approx_eq(*h, 72.0), "height={h}");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_page_size_unknown_unit_not_stored() {
+        // `ex`, `vw`, `ch` are not supported CSS length units in this context;
+        // `css_unit_to_pt` returns None → size declaration is silently dropped.
+        assert_no_page_settings("@page { size: 100ex; }");
+        assert_no_page_settings("@page { size: 100vw 200vh; }");
+    }
+
+    #[test]
+    fn test_page_size_trailing_token_not_stored() {
+        // A size declaration with trailing tokens after the value(s) is invalid
+        // and must be silently discarded (CSS: invalid declaration → ignore).
+        assert_no_page_settings("@page { size: A4 A3; }");
+        assert_no_page_settings("@page { size: 100pt 200pt 50pt; }");
+    }
+
+    #[test]
+    fn test_page_size_with_selector() {
+        // @page { size: ... } with a selector propagates the selector correctly.
+        let ctx = parse_gcpm("@page :first { size: A4; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        let rule = &ctx.page_settings[0];
+        assert_eq!(rule.page_selector, Some(":first".to_string()));
+        assert_eq!(rule.size, Some(PageSizeDecl::Keyword("A4".to_string())));
+    }
+
+    // -----------------------------------------------------------------------
+    // @page { margin: ... } shorthand — parse_page_margin_value (all arities)
+    // -----------------------------------------------------------------------
+
+    fn margin_rule(css: &str) -> PartialMargin {
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.page_settings.len(),
+            1,
+            "expected 1 PageSettingsRule for: {css}"
+        );
+        ctx.page_settings[0].margin
+    }
+
+    #[test]
+    fn test_page_margin_shorthand_two_values() {
+        // CSS shorthand: <top/bottom> <left/right>
+        let m = margin_rule("@page { margin: 10pt 20pt; }");
+        assert!(approx_eq(m.top.unwrap(), 10.0));
+        assert!(approx_eq(m.right.unwrap(), 20.0));
+        assert!(approx_eq(m.bottom.unwrap(), 10.0));
+        assert!(approx_eq(m.left.unwrap(), 20.0));
+    }
+
+    #[test]
+    fn test_page_margin_shorthand_three_values() {
+        // CSS shorthand: <top> <left/right> <bottom>
+        let m = margin_rule("@page { margin: 10pt 20pt 30pt; }");
+        assert!(approx_eq(m.top.unwrap(), 10.0));
+        assert!(approx_eq(m.right.unwrap(), 20.0));
+        assert!(approx_eq(m.bottom.unwrap(), 30.0));
+        assert!(approx_eq(m.left.unwrap(), 20.0));
+    }
+
+    #[test]
+    fn test_page_margin_shorthand_four_values() {
+        // CSS shorthand: <top> <right> <bottom> <left>
+        let m = margin_rule("@page { margin: 10pt 20pt 30pt 40pt; }");
+        assert!(approx_eq(m.top.unwrap(), 10.0));
+        assert!(approx_eq(m.right.unwrap(), 20.0));
+        assert!(approx_eq(m.bottom.unwrap(), 30.0));
+        assert!(approx_eq(m.left.unwrap(), 40.0));
+    }
+
+    #[test]
+    fn test_page_margin_shorthand_with_mm() {
+        // 25.4mm = 72pt; confirms unit conversion works in the shorthand path.
+        let m = margin_rule("@page { margin: 25.4mm; }");
+        assert!(approx_eq(m.top.unwrap(), 72.0), "top={:?}", m.top);
+        assert!(approx_eq(m.right.unwrap(), 72.0));
+        assert!(approx_eq(m.bottom.unwrap(), 72.0));
+        assert!(approx_eq(m.left.unwrap(), 72.0));
+    }
+
+    #[test]
+    fn test_page_margin_shorthand_trailing_token_not_stored() {
+        // Trailing non-length token → declaration invalid → not stored.
+        assert_no_page_settings("@page { margin: 10pt bogus; }");
+    }
+
+    // -----------------------------------------------------------------------
+    // @page { margin-bottom: ...; margin-left: ...; } longhands
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_page_margin_longhand_bottom() {
+        let m = margin_rule("@page { margin-bottom: 15pt; }");
+        assert_eq!(m.top, None, "top must remain unset");
+        assert_eq!(m.right, None);
+        assert!(approx_eq(m.bottom.unwrap(), 15.0), "bottom={:?}", m.bottom);
+        assert_eq!(m.left, None);
+    }
+
+    #[test]
+    fn test_page_margin_longhand_left() {
+        let m = margin_rule("@page { margin-left: 25pt; }");
+        assert_eq!(m.top, None);
+        assert_eq!(m.right, None);
+        assert_eq!(m.bottom, None);
+        assert!(approx_eq(m.left.unwrap(), 25.0), "left={:?}", m.left);
+    }
+
+    #[test]
+    fn test_page_margin_all_four_longhands() {
+        let m = margin_rule(
+            "@page { margin-top: 10pt; margin-right: 20pt; margin-bottom: 30pt; margin-left: 40pt; }",
+        );
+        assert!(approx_eq(m.top.unwrap(), 10.0));
+        assert!(approx_eq(m.right.unwrap(), 20.0));
+        assert!(approx_eq(m.bottom.unwrap(), 30.0));
+        assert!(approx_eq(m.left.unwrap(), 40.0));
+    }
+
+    #[test]
+    fn test_page_margin_longhand_trailing_token_not_stored() {
+        // A trailing token in a longhand value makes the declaration invalid.
+        assert_no_page_settings("@page { margin-left: 10pt bogus; }");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unknown CSS units — css_unit_to_pt returns None
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_page_margin_unknown_unit_not_stored() {
+        // `em`, `ex`, `vw`, etc. are not supported in @page margin values.
+        assert_no_page_settings("@page { margin: 10em; }");
+        assert_no_page_settings("@page { margin-top: 5vh; }");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_content_value: unknown token silently skipped (lines 1238-1240)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_content_unknown_token_silently_skipped() {
+        // A numeric literal or other unknown token inside `content:` must be
+        // skipped; the rest of the content list is still parsed correctly.
+        let css = r#"@page { @top-center { content: 42 "hello"; } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::String("hello".to_string())],
+            "numeric token should be silently dropped"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_string_set_value: unknown content() argument (line 824)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_string_set_content_unknown_arg_silently_dropped() {
+        // content(unknown) is not a valid argument — the token is silently
+        // skipped (line 824 `_ => {}`). If it's the only value, the
+        // mapping as a whole is not created (empty values list).
+        let css = "h1 { string-set: title content(unknown); }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.string_set_mappings.is_empty(),
+            "content(unknown) alone should produce no mapping"
+        );
+    }
+
+    #[test]
+    fn test_string_set_content_unknown_arg_mixed_with_valid() {
+        // content(unknown) drops silently; valid items around it are kept.
+        let css = "h1 { string-set: title content(unknown) content(text); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![StringSetValue::ContentText],
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_counter_style: unknown style falls back to Decimal (line 920)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_counter_unknown_style_falls_back_to_decimal() {
+        // `counter(page, bogus_style)` — parse_counter_style returns Err for
+        // unknown styles; the try_parse in parse_content_value falls back to
+        // CounterStyle::Decimal via unwrap_or.
+        let css = r#"@page { @bottom-center { content: counter(page, bogus_style); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "page".into(),
+                style: CounterStyle::Decimal,
+            }]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_string_policy: unknown policy makes the item not appear (line 899)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_string_ref_unknown_policy_falls_back_to_first() {
+        // `string(title, bogus_policy)` — parse_string_policy returns Err (line 899)
+        // for unknown policies; the try_parse rolls back and unwrap_or falls back
+        // to StringPolicy::First (the default). The item IS added.
+        let css = r#"@page { @top-center { content: string(title, bogus_policy); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::StringRef {
+                name: "title".to_string(),
+                policy: StringPolicy::First,
+            }],
+            "unknown policy should fall back to First"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // position: non-running function silently ignored (line 635)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_position_non_running_function_ignored() {
+        // `position: translate(10px)` — the function is not `running()`,
+        // so the try_parse fails and the declaration is skipped (line 635).
+        // The element must NOT appear in running_mappings.
+        let css = "h1 { position: translate(10px); }";
+        let ctx = parse_gcpm(css);
+        assert!(ctx.running_mappings.is_empty());
+        assert!(ctx.cleaned_css.contains("position: translate(10px)"));
+    }
+
+    // -----------------------------------------------------------------------
+    // @page combined: size + margin in the same rule
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_page_size_and_margin_combined() {
+        let css = "@page { size: A4 landscape; margin: 20pt; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.page_settings.len(), 1);
+        let rule = &ctx.page_settings[0];
+        assert_eq!(
+            rule.size,
+            Some(PageSizeDecl::KeywordWithOrientation("A4".to_string(), true))
+        );
+        let m = rule.margin;
+        assert!(approx_eq(m.top.unwrap(), 20.0));
+        assert!(approx_eq(m.right.unwrap(), 20.0));
+        assert!(approx_eq(m.bottom.unwrap(), 20.0));
+        assert!(approx_eq(m.left.unwrap(), 20.0));
+    }
+
+    #[test]
+    fn test_page_size_does_not_appear_in_cleaned_css() {
+        // @page is removed entirely from cleaned_css (it's a Remove edit).
+        let css = "body { color: red; } @page { size: A4; margin: 10pt; } p { margin: 0; }";
+        let ctx = parse_gcpm(css);
+        assert!(!ctx.cleaned_css.contains("@page"));
+        assert!(ctx.cleaned_css.contains("body { color: red; }"));
+        assert!(ctx.cleaned_css.contains("p { margin: 0; }"));
+    }
 }
