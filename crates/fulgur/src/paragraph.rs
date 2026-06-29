@@ -1088,15 +1088,11 @@ mod tests {
         let occ = lc.take_page(0);
         assert_eq!(occ.len(), 1, "exactly one link occurrence expected");
         assert_eq!(occ[0].quads.len(), 1, "one rect for the linked image");
+        // Identity transform stack ⇒ the quad vertices are exactly the rect
+        // corners in `transform_rect`'s bl, br, tr, tl order. rect =
+        // (x + x_offset, y + computed_y, width, height) = (7, 10, 20, 10).
         let pts = occ[0].quads[0].points;
-        let min_x = pts.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
-        let max_x = pts.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = pts.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
-        let max_y = pts.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
-        assert!((min_x - 7.0).abs() < 1e-4, "min_x={min_x:?}");
-        assert!((max_x - 27.0).abs() < 1e-4, "max_x={max_x:?}");
-        assert!((min_y - 10.0).abs() < 1e-4, "min_y={min_y:?}");
-        assert!((max_y - 20.0).abs() < 1e-4, "max_y={max_y:?}");
+        assert_eq!(pts, [[7.0, 20.0], [27.0, 20.0], [27.0, 10.0], [7.0, 10.0]]);
     }
 
     /// Compare a migrated `Pt` coordinate against a raw `f32` expectation.

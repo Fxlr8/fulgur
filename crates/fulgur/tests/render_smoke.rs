@@ -2065,7 +2065,7 @@ fn multicol_inline_root_split_emits_paragraph_slices_case_b() {
         // wasn't rebased and is still parley-absolute).
         let first = &slice.lines[0];
         assert!(
-            first.baseline.to_f32() > 0.0 && first.baseline <= first.height,
+            first.baseline > fulgur::units::Pt::ZERO && first.baseline <= first.height,
             "slice line[0].baseline must be slice-local: got baseline={}, height={}",
             first.baseline.to_f32(),
             first.height.to_f32(),
@@ -2112,7 +2112,7 @@ fn multicol_inline_root_split_emits_paragraph_slices_case_a() {
         assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
         let first = &slice.lines[0];
         assert!(
-            first.baseline.to_f32() > 0.0 && first.baseline <= first.height,
+            first.baseline > fulgur::units::Pt::ZERO && first.baseline <= first.height,
             "slice line[0].baseline must be slice-local: got baseline={}, height={}",
             first.baseline.to_f32(),
             first.height.to_f32(),
