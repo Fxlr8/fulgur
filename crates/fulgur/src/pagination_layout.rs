@@ -61,6 +61,7 @@
 //! repeat `position: fixed` elements on every page (`is_repeat=true`
 //! on the resulting `PaginationGeometry`).
 
+use crate::units::F32Units;
 use blitz_dom::BaseDocument;
 use std::collections::{BTreeMap, BTreeSet};
 use taffy::{
@@ -70,17 +71,18 @@ use taffy::{
 
 /// One placement slot recorded per (source node × page).
 ///
-/// `x`, `y`, `width`, `height` are in CSS pixels — Taffy's native unit —
-/// and `y` is measured from the page's content-box top. The convert /
-/// draw layer is responsible for `px_to_pt` conversion before reaching
+/// `x`, `y`, `width`, `height` are type-enforced CSS pixels
+/// ([`crate::units::Px`]) — Taffy's native unit — and `y` is measured from
+/// the page's content-box top. The convert / draw layer is responsible for
+/// `px_to_pt` conversion ([`crate::units::Px::in_pt`]) before reaching
 /// Krilla.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fragment {
     pub page_index: u32,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
+    pub x: crate::units::Px,
+    pub y: crate::units::Px,
+    pub width: crate::units::Px,
+    pub height: crate::units::Px,
 }
 
 /// Per-source-node geometry: every page on which the node has a placement.
@@ -447,10 +449,10 @@ impl<'a> PaginationLayoutTree<'a> {
             .fragments
             .push(Fragment {
                 page_index: 0,
-                x: body_x,
-                y: 0.0,
-                width: body_w,
-                height: body_layout.size.height,
+                x: body_x.px(),
+                y: 0.0_f32.px(),
+                width: body_w.px(),
+                height: body_layout.size.height.px(),
             });
 
         // Prefer body's `layout_children` — same rationale as
@@ -559,10 +561,10 @@ impl<'a> PaginationLayoutTree<'a> {
                         .fragments
                         .push(Fragment {
                             page_index,
-                            x: body_x + layout.location.x,
-                            y: cursor_y,
-                            width: 0.0,
-                            height: 0.0,
+                            x: (body_x + layout.location.x).px(),
+                            y: cursor_y.px(),
+                            width: 0.0_f32.px(),
+                            height: 0.0_f32.px(),
                         });
                     emitted += 1;
                 }
@@ -648,10 +650,10 @@ impl<'a> PaginationLayoutTree<'a> {
                         .fragments
                         .push(Fragment {
                             page_index,
-                            x: body_x + layout.location.x,
-                            y: cursor_y,
-                            width: child_w,
-                            height: 0.0,
+                            x: (body_x + layout.location.x).px(),
+                            y: cursor_y.px(),
+                            width: child_w.px(),
+                            height: 0.0_f32.px(),
                         });
                     emitted += 1;
                 }
@@ -959,10 +961,10 @@ impl<'a> PaginationLayoutTree<'a> {
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: frag_x,
-                        y: cursor_y,
-                        width: child_w,
-                        height: first_slice_h,
+                        x: frag_x.px(),
+                        y: cursor_y.px(),
+                        width: child_w.px(),
+                        height: first_slice_h.px(),
                     });
                 record_subtree_descendants(
                     &mut self.geometry,
@@ -992,10 +994,10 @@ impl<'a> PaginationLayoutTree<'a> {
                         .fragments
                         .push(Fragment {
                             page_index,
-                            x: frag_x,
-                            y: 0.0,
-                            width: child_w,
-                            height: last_slice_h,
+                            x: frag_x.px(),
+                            y: 0.0_f32.px(),
+                            width: child_w.px(),
+                            height: last_slice_h.px(),
                         });
                     remaining -= last_slice_h;
                 }
@@ -1029,10 +1031,10 @@ impl<'a> PaginationLayoutTree<'a> {
 
             let frag = Fragment {
                 page_index,
-                x: frag_x,
-                y: cursor_y,
-                width: child_w,
-                height: child_h,
+                x: frag_x.px(),
+                y: cursor_y.px(),
+                width: child_w.px(),
+                height: child_h.px(),
             };
             self.geometry
                 .entry(child_id)
@@ -1183,10 +1185,10 @@ fn record_subtree_descendants(
             .fragments
             .push(Fragment {
                 page_index,
-                x: child_x,
-                y: child_y,
-                width: w,
-                height: h,
+                x: child_x.px(),
+                y: child_y.px(),
+                width: w.px(),
+                height: h.px(),
             });
         record_subtree_descendants(
             geometry,
@@ -1547,10 +1549,10 @@ fn fragment_block_subtree(
             .fragments
             .push(Fragment {
                 page_index: page_in,
-                x: parent_x_in_body,
-                y: cursor_in,
-                width: parent_w,
-                height: h,
+                x: parent_x_in_body.px(),
+                y: cursor_in.px(),
+                width: parent_w.px(),
+                height: h.px(),
             });
         return (page_in, cursor_in + h);
     }
@@ -1794,10 +1796,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body,
-                        y: page_start_y,
-                        width: parent_w,
-                        height: cursor_y - page_start_y,
+                        x: parent_x_in_body.px(),
+                        y: page_start_y.px(),
+                        width: parent_w.px(),
+                        height: (cursor_y - page_start_y).px(),
                     });
                 page_index += 1;
                 cursor_y = 0.0;
@@ -1814,10 +1816,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body + layout.location.x,
-                        y: cursor_y,
-                        width: child_w,
-                        height: 0.0,
+                        x: (parent_x_in_body + layout.location.x).px(),
+                        y: cursor_y.px(),
+                        width: child_w.px(),
+                        height: 0.0_f32.px(),
                     });
             }
             // Honour `break-after: page` for zero-height elements
@@ -1830,10 +1832,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body,
-                        y: page_start_y,
-                        width: parent_w,
-                        height: cursor_y - page_start_y,
+                        x: parent_x_in_body.px(),
+                        y: page_start_y.px(),
+                        width: parent_w.px(),
+                        height: (cursor_y - page_start_y).px(),
                     });
                 page_index += 1;
                 cursor_y = 0.0;
@@ -1875,10 +1877,10 @@ fn fragment_block_subtree(
                 .fragments
                 .push(Fragment {
                     page_index,
-                    x: parent_x_in_body,
-                    y: page_start_y,
-                    width: parent_w,
-                    height: cursor_y - page_start_y,
+                    x: parent_x_in_body.px(),
+                    y: page_start_y.px(),
+                    width: parent_w.px(),
+                    height: (cursor_y - page_start_y).px(),
                 });
             page_index += 1;
             cursor_y = 0.0;
@@ -2009,10 +2011,10 @@ fn fragment_block_subtree(
                                 .fragments
                                 .push(Fragment {
                                     page_index: pre_recursion_page,
-                                    x: parent_x_in_body,
-                                    y: page_start_y,
-                                    width: parent_w,
-                                    height: prev_height,
+                                    x: parent_x_in_body.px(),
+                                    y: page_start_y.px(),
+                                    width: parent_w.px(),
+                                    height: prev_height.px(),
                                 });
                         }
                     }
@@ -2028,10 +2030,10 @@ fn fragment_block_subtree(
                                 .fragments
                                 .push(Fragment {
                                     page_index: p,
-                                    x: parent_x_in_body,
-                                    y: 0.0,
-                                    width: parent_w,
-                                    height: page_height_px,
+                                    x: parent_x_in_body.px(),
+                                    y: 0.0_f32.px(),
+                                    width: parent_w.px(),
+                                    height: page_height_px.px(),
                                 });
                         }
                     }
@@ -2057,10 +2059,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body,
-                        y: page_start_y,
-                        width: parent_w,
-                        height: cursor_y - page_start_y,
+                        x: parent_x_in_body.px(),
+                        y: page_start_y.px(),
+                        width: parent_w.px(),
+                        height: (cursor_y - page_start_y).px(),
                     });
                 page_index += 1;
                 cursor_y = 0.0;
@@ -2100,10 +2102,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body,
-                        y: page_start_y,
-                        width: parent_w,
-                        height: cursor_y - page_start_y,
+                        x: parent_x_in_body.px(),
+                        y: page_start_y.px(),
+                        width: parent_w.px(),
+                        height: (cursor_y - page_start_y).px(),
                     });
             }
             page_index += 1;
@@ -2127,10 +2129,10 @@ fn fragment_block_subtree(
             .fragments
             .push(Fragment {
                 page_index,
-                x: child_x_in_body,
-                y: child_page_y,
-                width: child_w,
-                height: child_h,
+                x: child_x_in_body.px(),
+                y: child_page_y.px(),
+                width: child_w.px(),
+                height: child_h.px(),
             });
         record_subtree_descendants(
             geometry,
@@ -2157,10 +2159,10 @@ fn fragment_block_subtree(
                 .fragments
                 .push(Fragment {
                     page_index,
-                    x: parent_x_in_body,
-                    y: page_start_y,
-                    width: parent_w,
-                    height: cursor_y - page_start_y,
+                    x: parent_x_in_body.px(),
+                    y: page_start_y.px(),
+                    width: parent_w.px(),
+                    height: (cursor_y - page_start_y).px(),
                 });
             page_index += 1;
             cursor_y = 0.0;
@@ -2204,10 +2206,10 @@ fn fragment_block_subtree(
         .fragments
         .push(Fragment {
             page_index,
-            x: parent_x_in_body,
-            y: page_start_y,
-            width: parent_w,
-            height: cursor_y - page_start_y,
+            x: parent_x_in_body.px(),
+            y: page_start_y.px(),
+            width: parent_w.px(),
+            height: (cursor_y - page_start_y).px(),
         });
 
     (page_index, cursor_y)
@@ -2335,10 +2337,10 @@ fn fragment_inline_root(
             let frag_h = prev_line_bottom - frag_top_local;
             let frag = Fragment {
                 page_index,
-                x: paragraph_x,
-                y: paragraph_top_in_body,
-                width,
-                height: frag_h,
+                x: paragraph_x.px(),
+                y: paragraph_top_in_body.px(),
+                width: width.px(),
+                height: frag_h.px(),
             };
             geometry.entry(child_id).or_default().fragments.push(frag);
             emitted += 1;
@@ -2355,10 +2357,10 @@ fn fragment_inline_root(
     let frag_h = last_bottom_local - frag_top_local;
     let frag = Fragment {
         page_index,
-        x: paragraph_x,
-        y: paragraph_top_in_body,
-        width,
-        height: frag_h,
+        x: paragraph_x.px(),
+        y: paragraph_top_in_body.px(),
+        width: width.px(),
+        height: frag_h.px(),
     };
     geometry.entry(child_id).or_default().fragments.push(frag);
     emitted += 1;
@@ -2662,10 +2664,10 @@ pub fn append_position_fixed_fragments(
         for page_index in 0..pages {
             entry.fragments.push(Fragment {
                 page_index,
-                x,
-                y,
-                width: w,
-                height: h,
+                x: x.px(),
+                y: y.px(),
+                width: w.px(),
+                height: h.px(),
             });
         }
 
@@ -2738,10 +2740,10 @@ fn record_fixed_subtree_descendants(
         for page_index in 0..pages.max(1) {
             entry.fragments.push(Fragment {
                 page_index,
-                x: stored_x,
-                y: stored_y,
-                width: w,
-                height: h,
+                x: stored_x.px(),
+                y: stored_y.px(),
+                width: w.px(),
+                height: h.px(),
             });
         }
 
@@ -3185,10 +3187,10 @@ fn record_subtree_fragments_at_offset(
                     };
                     entry.fragments.push(Fragment {
                         page_index,
-                        x: stored_x,
-                        y: stored_y,
-                        width: w,
-                        height: stored_h,
+                        x: stored_x.px(),
+                        y: stored_y.px(),
+                        width: w.px(),
+                        height: stored_h.px(),
                     });
                 }
                 descendant_total_pages = descendant_total_pages.max(last_page.saturating_add(1));
@@ -3794,7 +3796,11 @@ mod tests {
         );
         let h2_pages: Vec<u32> = table
             .values()
-            .filter(|g| g.fragments.iter().any(|f| (f.height - 30.0).abs() < 0.5))
+            .filter(|g| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.height.to_f32() - 30.0).abs() < 0.5)
+            })
             .map(|g| g.fragments[0].page_index)
             .collect();
         assert_eq!(h2_pages.len(), 2, "expected 2 h2 entries, got {h2_pages:?}");
@@ -4101,7 +4107,8 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(fragments.len(), 1, "single zero-height fragment");
         assert_eq!(fragments[0].page_index, 0);
         assert_eq!(
-            fragments[0].height, 0.0,
+            fragments[0].height.to_f32(),
+            0.0,
             "running fragment must not advance the cursor"
         );
 
@@ -4129,24 +4136,24 @@ h2 { string-set: chapter-title content(text); }
         let mut geom = PaginationGeometryTable::new();
         geom.entry(10).or_default().fragments.push(Fragment {
             page_index: 0,
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 50.0,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 100.0_f32.px(),
+            height: 50.0_f32.px(),
         });
         geom.entry(20).or_default().fragments.push(Fragment {
             page_index: 0,
-            x: 0.0,
-            y: 50.0,
-            width: 100.0,
-            height: 50.0,
+            x: 0.0_f32.px(),
+            y: 50.0_f32.px(),
+            width: 100.0_f32.px(),
+            height: 50.0_f32.px(),
         });
         geom.entry(30).or_default().fragments.push(Fragment {
             page_index: 1,
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 50.0,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 100.0_f32.px(),
+            height: 50.0_f32.px(),
         });
 
         let mut markers: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
@@ -4187,17 +4194,17 @@ h2 { string-set: chapter-title content(text); }
         let mut geom = PaginationGeometryTable::new();
         geom.entry(42).or_default().fragments.push(Fragment {
             page_index: 0,
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 800.0,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 100.0_f32.px(),
+            height: 800.0_f32.px(),
         });
         geom.entry(42).or_default().fragments.push(Fragment {
             page_index: 1,
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 200.0,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 100.0_f32.px(),
+            height: 200.0_f32.px(),
         });
 
         let mut markers: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
@@ -4268,9 +4275,9 @@ h2 { string-set: chapter-title content(text); }
         let fixed_entries: Vec<_> = geom
             .iter()
             .filter(|(_, g)| {
-                g.fragments
-                    .iter()
-                    .any(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 50.0).abs() < 0.5)
+                g.fragments.iter().any(|f| {
+                    (f.width.to_f32() - 100.0).abs() < 0.5 && (f.height.to_f32() - 50.0).abs() < 0.5
+                })
             })
             .collect();
         assert_eq!(
@@ -4334,7 +4341,11 @@ h2 { string-set: chapter-title content(text); }
         // Locate the fixed div fragment by its 30px height.
         let entries: Vec<_> = geom
             .iter()
-            .filter(|(_, g)| g.fragments.iter().any(|f| (f.height - 30.0).abs() < 0.5))
+            .filter(|(_, g)| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.height.to_f32() - 30.0).abs() < 0.5)
+            })
             .collect();
         assert_eq!(entries.len(), 1, "exactly one fixed entry");
         let (_, g) = entries[0];
@@ -4343,9 +4354,9 @@ h2 { string-set: chapter-title content(text); }
         // viewport_h_px=800, height=30 → bottom edge sits at 800 → top at 770.
         // body has zero height (no in-flow content), so body_offset_xy=(0,0).
         assert!(
-            (frag.y - 770.0).abs() < 1.0,
+            (frag.y.to_f32() - 770.0).abs() < 1.0,
             "bottom:0 fixed should resolve to y=770 (viewport_h - height); got {}",
-            frag.y
+            frag.y.to_f32()
         );
     }
 
@@ -4370,16 +4381,20 @@ h2 { string-set: chapter-title content(text); }
 
         let entries: Vec<_> = geom
             .iter()
-            .filter(|(_, g)| g.fragments.iter().any(|f| (f.width - 36.0).abs() < 0.5))
+            .filter(|(_, g)| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.width.to_f32() - 36.0).abs() < 0.5)
+            })
             .collect();
         assert_eq!(entries.len(), 1, "expected one fixed entry");
         let frag = entries[0].1.fragments.first().unwrap();
         assert_eq!(frag.page_index, 0, "expected fixed fragment only on page 0");
         // With Taffy-like rounding: round(cb_h - b) - round(h) => round(800.6)-36 = 765.
         assert!(
-            (frag.y - 765.0).abs() < 0.25,
+            (frag.y.to_f32() - 765.0).abs() < 0.25,
             "fractional fixed bottom anchor should resolve to y≈765; got {}",
-            frag.y
+            frag.y.to_f32()
         );
     }
 
@@ -4404,12 +4419,12 @@ h2 { string-set: chapter-title content(text); }
         let frag = geom
             .values()
             .flat_map(|g| &g.fragments)
-            .find(|f| f.page_index == 1 && (f.height - 19.0).abs() < 0.5)
+            .find(|f| f.page_index == 1 && (f.height.to_f32() - 19.0).abs() < 0.5)
             .expect("absolute bottom:-viewport fragment should land on page 1");
         assert!(
-            (frag.y - 952.0).abs() < 0.01,
+            (frag.y.to_f32() - 952.0).abs() < 0.01,
             "absolute ref fragment should keep the same page-local bottom anchor as fixed; got {}",
-            frag.y
+            frag.y.to_f32()
         );
     }
 
@@ -4445,16 +4460,20 @@ h2 { string-set: chapter-title content(text); }
 
         let entries: Vec<_> = geom
             .iter()
-            .filter(|(_, g)| g.fragments.iter().any(|f| (f.height - 30.0).abs() < 0.5))
+            .filter(|(_, g)| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.height.to_f32() - 30.0).abs() < 0.5)
+            })
             .collect();
         assert_eq!(entries.len(), 1, "exactly one fixed entry");
         let frag = entries[0].1.fragments.first().unwrap();
         // top:0 → resolved_y=0 → stored_y = 0 - body_y_px = -body_y_px.
         assert!(
-            (frag.y - (-body_y_px)).abs() < 0.5,
+            (frag.y.to_f32() - (-body_y_px)).abs() < 0.5,
             "top:0 fixed frag.y must be -body_offset (={}); got {}",
             -body_y_px,
-            frag.y
+            frag.y.to_f32()
         );
     }
 
@@ -4494,9 +4513,9 @@ h2 { string-set: chapter-title content(text); }
         let entries: Vec<_> = geom
             .iter()
             .filter(|(_, g)| {
-                g.fragments
-                    .iter()
-                    .any(|f| (f.width - 36.0).abs() < 0.5 && (f.height - 36.0).abs() < 0.5)
+                g.fragments.iter().any(|f| {
+                    (f.width.to_f32() - 36.0).abs() < 0.5 && (f.height.to_f32() - 36.0).abs() < 0.5
+                })
             })
             .collect();
         assert_eq!(
@@ -4523,21 +4542,22 @@ h2 { string-set: chapter-title content(text); }
         let f0 = &entries[0].1.fragments[0];
         let f1 = &entries[1].1.fragments[0];
         assert!(
-            (f0.x - f1.x).abs() < 0.5 && (f0.y - f1.y).abs() < 0.5,
+            (f0.x.to_f32() - f1.x.to_f32()).abs() < 0.5
+                && (f0.y.to_f32() - f1.y.to_f32()).abs() < 0.5,
             "root and child must share (x, y); got root=({},{}) child=({},{})",
-            f0.x,
-            f0.y,
-            f1.x,
-            f1.y,
+            f0.x.to_f32(),
+            f0.y.to_f32(),
+            f1.x.to_f32(),
+            f1.y.to_f32(),
         );
 
         // Pin the y coordinate: bottom:0 with height=36 in an 800px
         // viewport places the box top at y=764. body is empty so
         // body_offset_xy=(0,0).
         assert!(
-            (f0.y - 764.0).abs() < 1.0,
+            (f0.y.to_f32() - 764.0).abs() < 1.0,
             "bottom:0 fixed (h=36) must resolve to y=764 (viewport_h - h); got {}",
-            f0.y,
+            f0.y.to_f32(),
         );
     }
 
@@ -4569,7 +4589,7 @@ h2 { string-set: chapter-title content(text); }
         let mut found = None;
         for g in geom.values() {
             for f in &g.fragments {
-                if (f.height - 30.0).abs() < 0.5 {
+                if (f.height.to_f32() - 30.0).abs() < 0.5 {
                     found = Some(f.clone());
                 }
             }
@@ -4580,9 +4600,9 @@ h2 { string-set: chapter-title content(text); }
         // body_offset compensation is a no-op and viewport-CB
         // resolution gives y = 800 - 30 = 770.
         assert!(
-            (frag.y - 770.0).abs() < 1.0,
+            (frag.y.to_f32() - 770.0).abs() < 1.0,
             "abs body-direct bottom:0 should land at y=770; got {}",
-            frag.y
+            frag.y.to_f32()
         );
     }
 
@@ -4613,7 +4633,11 @@ h2 { string-set: chapter-title content(text); }
 
         let mut tall_entries: Vec<Vec<u32>> = geom
             .values()
-            .filter(|g| g.fragments.iter().any(|f| (f.height - 1800.0).abs() < 0.5))
+            .filter(|g| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.height.to_f32() - 1800.0).abs() < 0.5)
+            })
             .map(|g| {
                 let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
                 pages.sort_unstable();
@@ -4703,7 +4727,11 @@ h2 { string-set: chapter-title content(text); }
         // Isolate the 10px-wide abs node's fragments.
         let abs_pages: Vec<u32> = geom
             .values()
-            .filter(|g| g.fragments.iter().any(|f| (f.width - 10.0).abs() < 0.5))
+            .filter(|g| {
+                g.fragments
+                    .iter()
+                    .any(|f| (f.width.to_f32() - 10.0).abs() < 0.5)
+            })
             .flat_map(|g| g.fragments.iter().map(|f| f.page_index))
             .collect();
         assert_eq!(
@@ -4738,7 +4766,7 @@ h2 { string-set: chapter-title content(text); }
         let has_later_text_fragment = geom.values().any(|g| {
             g.fragments
                 .iter()
-                .any(|f| f.page_index == 1 && f.height > 0.0 && f.height < 100.0)
+                .any(|f| f.page_index == 1 && f.height.to_f32() > 0.0 && f.height.to_f32() < 100.0)
         });
 
         assert!(
@@ -4762,9 +4790,10 @@ h2 { string-set: chapter-title content(text); }
             .values()
             .find(|g| {
                 g.is_repeat
-                    && g.fragments
-                        .iter()
-                        .any(|f| (f.width - 10.0).abs() < 0.5 && (f.height - 20.0).abs() < 0.5)
+                    && g.fragments.iter().any(|f| {
+                        (f.width.to_f32() - 10.0).abs() < 0.5
+                            && (f.height.to_f32() - 20.0).abs() < 0.5
+                    })
             })
             .map(|g| {
                 let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
@@ -4806,12 +4835,18 @@ h2 { string-set: chapter-title content(text); }
         let mut tiny_overflow_pages = None;
         let mut exact_boundary_pages = None;
         for g in geom.values() {
-            if g.fragments.iter().any(|f| (f.height - 800.1).abs() < 0.05) {
+            if g.fragments
+                .iter()
+                .any(|f| (f.height.to_f32() - 800.1).abs() < 0.05)
+            {
                 let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
                 pages.sort_unstable();
                 tiny_overflow_pages = Some(pages);
             }
-            if g.fragments.iter().any(|f| (f.height - 800.0).abs() < 0.05) {
+            if g.fragments
+                .iter()
+                .any(|f| (f.height.to_f32() - 800.0).abs() < 0.05)
+            {
                 let mut pages: Vec<u32> = g.fragments.iter().map(|f| f.page_index).collect();
                 pages.sort_unstable();
                 exact_boundary_pages = Some(pages);
@@ -4953,9 +4988,11 @@ h2 { string-set: chapter-title content(text); }
             .values()
             .flat_map(|g| g.fragments.iter())
             .filter(|f| {
-                f.page_index == 0 && (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5
+                f.page_index == 0
+                    && (f.height.to_f32() - 100.0).abs() < 0.5
+                    && (f.width.to_f32() - 100.0).abs() < 0.5
             })
-            .map(|f| f.y)
+            .map(|f| f.y.to_f32())
             .collect();
         assert_eq!(
             card_y.len(),
@@ -4994,16 +5031,16 @@ h2 { string-set: chapter-title content(text); }
         let mut candidates: Vec<_> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| f.page_index == 1 && (f.height - 30.0).abs() < 0.5)
+            .filter(|f| f.page_index == 1 && (f.height.to_f32() - 30.0).abs() < 0.5)
             .collect();
         candidates.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
         let h2 = candidates
             .first()
             .expect("expected the trailing h2 to land on page 1");
         assert!(
-            h2.y >= 100.0,
+            h2.y.to_f32() >= 100.0,
             "block sibling after split grid must continue after the grid tail; got y={} (pre-fix: y=0 overlaps the tail)",
-            h2.y
+            h2.y.to_f32()
         );
     }
 
@@ -5044,11 +5081,11 @@ h2 { string-set: chapter-title content(text); }
         for (id, g) in geom.iter() {
             for f in &g.fragments {
                 assert!(
-                    f.y.is_finite() && f.height.is_finite(),
+                    f.y.to_f32().is_finite() && f.height.to_f32().is_finite(),
                     "node {id}: non-finite fragment y={} height={} leaked through \
                      fragment_block_subtree",
-                    f.y,
-                    f.height,
+                    f.y.to_f32(),
+                    f.height.to_f32(),
                 );
             }
         }
@@ -5081,16 +5118,16 @@ h2 { string-set: chapter-title content(text); }
         let mut candidates: Vec<_> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| f.page_index == 1 && (f.height - 30.0).abs() < 0.5)
+            .filter(|f| f.page_index == 1 && (f.height.to_f32() - 30.0).abs() < 0.5)
             .collect();
         candidates.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
         let h2 = candidates
             .first()
             .expect("expected the trailing h2 to land on page 1");
         assert!(
-            h2.y >= 100.0,
+            h2.y.to_f32() >= 100.0,
             "block sibling after split flex must continue after the flex tail; got y={} (pre-fix: y=0 overlaps the tail)",
-            h2.y
+            h2.y.to_f32()
         );
     }
 
@@ -5116,8 +5153,10 @@ h2 { string-set: chapter-title content(text); }
         let mut cells: Vec<_> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.height.to_f32() - 100.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let page_one_cells: Vec<_> = cells.iter().filter(|(p, _, _)| *p == 1).collect();
@@ -5154,8 +5193,10 @@ h2 { string-set: chapter-title content(text); }
         let mut cells: Vec<_> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.height - 100.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.height.to_f32() - 100.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let page_one_cells: Vec<_> = cells.iter().filter(|(p, _, _)| *p == 1).collect();
@@ -5192,8 +5233,8 @@ h2 { string-set: chapter-title content(text); }
         let mut page_one_cells: Vec<_> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| f.page_index == 1 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.height, f.x, f.y))
+            .filter(|f| f.page_index == 1 && (f.width.to_f32() - 100.0).abs() < 0.5)
+            .map(|f| (f.height.to_f32(), f.x.to_f32(), f.y.to_f32()))
             .collect();
         page_one_cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let unshifted = page_one_cells
@@ -5228,8 +5269,8 @@ h2 { string-set: chapter-title content(text); }
         let mut page_one_cells: Vec<_> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| f.page_index == 1 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.height, f.x, f.y))
+            .filter(|f| f.page_index == 1 && (f.width.to_f32() - 100.0).abs() < 0.5)
+            .map(|f| (f.height.to_f32(), f.x.to_f32(), f.y.to_f32()))
             .collect();
         page_one_cells.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let unshifted = page_one_cells
@@ -5276,8 +5317,10 @@ h2 { string-set: chapter-title content(text); }
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 50.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.width.to_f32() - 100.0).abs() < 0.5 && (f.height.to_f32() - 50.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -5343,8 +5386,10 @@ h2 { string-set: chapter-title content(text); }
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.width - 100.0).abs() < 0.5 && (f.height - 50.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.width.to_f32() - 100.0).abs() < 0.5 && (f.height.to_f32() - 50.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -5466,7 +5511,7 @@ h2 { string-set: chapter-title content(text); }
         let b_on_page1: Vec<&Fragment> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| f.page_index == 1 && (f.height - 100.0).abs() < 0.5)
+            .filter(|f| f.page_index == 1 && (f.height.to_f32() - 100.0).abs() < 0.5)
             .collect();
         assert!(
             !b_on_page1.is_empty(),
@@ -5474,11 +5519,11 @@ h2 { string-set: chapter-title content(text); }
         );
         for f in &b_on_page1 {
             assert!(
-                f.y.abs() < 0.5,
+                f.y.to_f32().abs() < 0.5,
                 "B should land at y=0 on the new page (forced break discards \
                  the inter-child gap), but got y={} (gap leaked through \
                  break-before — see Devin Review on PR #285). frag={f:?}",
-                f.y,
+                f.y.to_f32(),
             );
         }
     }
@@ -5498,7 +5543,7 @@ h2 { string-set: chapter-title content(text); }
         let second_on_page1: Vec<&Fragment> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| f.page_index == 1 && (f.height - 90.0).abs() < 0.5)
+            .filter(|f| f.page_index == 1 && (f.height.to_f32() - 90.0).abs() < 0.5)
             .collect();
         assert_eq!(
             second_on_page1.len(),
@@ -5506,7 +5551,7 @@ h2 { string-set: chapter-title content(text); }
             "expected only the second child on page 1, geom={geom:?}"
         );
         assert!(
-            (second_on_page1[0].y - 10.0).abs() < 0.5,
+            (second_on_page1[0].y.to_f32() - 10.0).abs() < 0.5,
             "body-level break-before should keep the element's own top margin on the new page; geom={geom:?}"
         );
     }
@@ -5522,10 +5567,10 @@ h2 { string-set: chapter-title content(text); }
         let mut geom = PaginationGeometryTable::new();
         geom.entry(1).or_default().fragments.push(Fragment {
             page_index: 2,
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 1.0_f32.px(),
+            height: 1.0_f32.px(),
         });
         assert_eq!(super::implied_page_count(&geom), 3);
     }
@@ -5576,9 +5621,9 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(frags[0].page_index, 0);
         assert_eq!(frags[1].page_index, 1);
         // First fragment: lines 0-1 (height = 150).
-        assert!((frags[0].height - 150.0).abs() < 0.01);
+        assert!((frags[0].height.to_f32() - 150.0).abs() < 0.01);
         // Second fragment: lines 2-3 (height = 150 in para-local).
-        assert!((frags[1].height - 150.0).abs() < 0.01);
+        assert!((frags[1].height.to_f32() - 150.0).abs() < 0.01);
         // cursor_y on page 1 = paragraph_top_in_body (0.0) + 150 = 150.
         assert!((new_cursor - 150.0).abs() < 0.01);
     }
@@ -5601,7 +5646,7 @@ h2 { string-set: chapter-title content(text); }
         let frags = &geom.get(&1).unwrap().fragments;
         assert_eq!(frags.len(), 1);
         assert_eq!(frags[0].page_index, 0);
-        assert!((frags[0].height - 225.0).abs() < 0.01);
+        assert!((frags[0].height.to_f32() - 225.0).abs() < 0.01);
     }
 
     #[test]
@@ -5621,7 +5666,7 @@ h2 { string-set: chapter-title content(text); }
         // The oversized child is the entry whose height ≈ 1000.
         let oversize = table
             .values()
-            .find(|g| (g.fragments[0].height - 1000.0).abs() < 1.0)
+            .find(|g| (g.fragments[0].height.to_f32() - 1000.0).abs() < 1.0)
             .expect("oversized child fragment");
         assert_eq!(oversize.fragments.len(), 1);
         assert_eq!(oversize.fragments[0].page_index, 0);
@@ -5826,7 +5871,7 @@ h2 { string-set: chapter-title content(text); }
         let max_page = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.height - 1800.0).abs() < 0.5)
+            .filter(|f| (f.height.to_f32() - 1800.0).abs() < 0.5)
             .map(|f| f.page_index)
             .max();
         assert!(
@@ -5892,8 +5937,10 @@ h2 { string-set: chapter-title content(text); }
         let mut frags: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.height - 60.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.height.to_f32() - 60.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -5928,8 +5975,10 @@ h2 { string-set: chapter-title content(text); }
         let mut frags: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.height - 60.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.height.to_f32() - 60.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -5982,8 +6031,10 @@ h2 { string-set: chapter-title content(text); }
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.height - 40.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.height.to_f32() - 40.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -6033,8 +6084,10 @@ h2 { string-set: chapter-title content(text); }
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()
             .flat_map(|g| g.fragments.iter())
-            .filter(|f| (f.height - 40.0).abs() < 0.5 && (f.width - 100.0).abs() < 0.5)
-            .map(|f| (f.page_index, f.x, f.y))
+            .filter(|f| {
+                (f.height.to_f32() - 40.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
+            })
+            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
             .collect();
         inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
