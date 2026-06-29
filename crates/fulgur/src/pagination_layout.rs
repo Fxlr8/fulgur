@@ -3810,6 +3810,84 @@ mod tests {
         assert_eq!(h2_pages, vec![0, 1]);
     }
 
+    /// fulgur-2map.5: directly exercise `fragment_block_subtree`'s
+    /// `depth >= MAX_DOM_DEPTH` guard (pagination_layout.rs ~1539-1557).
+    ///
+    /// The guard is the FIRST statement of the function, so calling it
+    /// with `depth = crate::MAX_DOM_DEPTH` trips the bail immediately —
+    /// no deep HTML and no big-stack thread required (the prior
+    /// render_smoke coverage needed a 600-deep `<div>` chain plus a
+    /// 256 MB stack just to recurse far enough to reach this arm). This
+    /// also tracks the constant itself: if `MAX_DOM_DEPTH` ever changes,
+    /// the test still enters the guard at exactly the limit.
+    #[test]
+    fn fragment_block_subtree_at_depth_limit_bails_with_whole_fragment() {
+        let doc = parse(
+            r#"<html><body style="margin:0"><div id="d" style="height:50px"></div></body></html>"#,
+            600.0,
+        );
+        let parent_id = find_by_id(&doc, "d").expect("div#d should exist");
+        // The bail copies this node's laid-out height into the fragment.
+        let node_h = doc
+            .get_node(parent_id)
+            .expect("div node")
+            .final_layout
+            .size
+            .height;
+        assert!(
+            (node_h - 50.0).abs() < 1.0,
+            "div should lay out ~50px tall, got {node_h}"
+        );
+
+        let mut geom = PaginationGeometryTable::new();
+        let (page_out, cursor_out) = fragment_block_subtree(
+            &mut geom,
+            &doc, // &BaseDocument via deref coercion
+            None, // column_styles
+            None, // used_page_names
+            parent_id,
+            600.0,                // parent_w
+            0.0,                  // parent_x_in_body
+            0,                    // page_in
+            0.0,                  // cursor_in
+            800.0,                // page_height_px
+            crate::MAX_DOM_DEPTH, // depth → trips the guard immediately
+        );
+
+        // The bail pushes exactly ONE whole fragment for parent_id at its
+        // entry coordinates, then returns (page_in, cursor_in + height).
+        let entry = geom
+            .get(&parent_id)
+            .expect("bail must emit a geometry entry for parent_id");
+        // Hot-path-bind `.len()` so the assert message doesn't introduce a
+        // failure-only region that codecov marks uncovered (see the P1c
+        // assert-arg artifact note in CLAUDE.md / units migration memory).
+        let n_frags = entry.fragments.len();
+        assert_eq!(
+            n_frags, 1,
+            "bail emits a single whole fragment, got {n_frags}"
+        );
+        let frag = &entry.fragments[0];
+        assert_eq!(frag.page_index, 0, "fragment stays on the entry page");
+        let fx = frag.x.to_f32();
+        assert_eq!(fx, 0.0, "fragment x == parent_x_in_body, got {fx}");
+        let fy = frag.y.to_f32();
+        assert_eq!(fy, 0.0, "fragment y == cursor_in, got {fy}");
+        let fw = frag.width.to_f32();
+        assert_eq!(fw, 600.0, "fragment width == parent_w, got {fw}");
+        let fh = frag.height.to_f32();
+        assert!(
+            (fh - node_h).abs() < 1.0,
+            "fragment height == node layout height: {fh} vs {node_h}"
+        );
+
+        assert_eq!(page_out, 0, "bail returns the entry page unchanged");
+        assert!(
+            (cursor_out - node_h).abs() < 1.0,
+            "cursor advances by the node height: {cursor_out} vs {node_h}"
+        );
+    }
+
     #[test]
     fn three_short_blocks_fit_one_page() {
         // Each block is 200px tall; page is 800px → all three fit on
@@ -4353,10 +4431,10 @@ h2 { string-set: chapter-title content(text); }
         let frag = &g.fragments[0];
         // viewport_h_px=800, height=30 → bottom edge sits at 800 → top at 770.
         // body has zero height (no in-flow content), so body_offset_xy=(0,0).
+        let frag_y = frag.y.to_f32();
         assert!(
-            (frag.y.to_f32() - 770.0).abs() < 1.0,
-            "bottom:0 fixed should resolve to y=770 (viewport_h - height); got {}",
-            frag.y.to_f32()
+            (frag_y - 770.0).abs() < 1.0,
+            "bottom:0 fixed should resolve to y=770 (viewport_h - height); got {frag_y}",
         );
     }
 
@@ -4391,10 +4469,10 @@ h2 { string-set: chapter-title content(text); }
         let frag = entries[0].1.fragments.first().unwrap();
         assert_eq!(frag.page_index, 0, "expected fixed fragment only on page 0");
         // With Taffy-like rounding: round(cb_h - b) - round(h) => round(800.6)-36 = 765.
+        let frag_y = frag.y.to_f32();
         assert!(
-            (frag.y.to_f32() - 765.0).abs() < 0.25,
-            "fractional fixed bottom anchor should resolve to y≈765; got {}",
-            frag.y.to_f32()
+            (frag_y - 765.0).abs() < 0.25,
+            "fractional fixed bottom anchor should resolve to y≈765; got {frag_y}",
         );
     }
 
@@ -4421,10 +4499,10 @@ h2 { string-set: chapter-title content(text); }
             .flat_map(|g| &g.fragments)
             .find(|f| f.page_index == 1 && (f.height.to_f32() - 19.0).abs() < 0.5)
             .expect("absolute bottom:-viewport fragment should land on page 1");
+        let frag_y = frag.y.to_f32();
         assert!(
-            (frag.y.to_f32() - 952.0).abs() < 0.01,
-            "absolute ref fragment should keep the same page-local bottom anchor as fixed; got {}",
-            frag.y.to_f32()
+            (frag_y - 952.0).abs() < 0.01,
+            "absolute ref fragment should keep the same page-local bottom anchor as fixed; got {frag_y}",
         );
     }
 
@@ -4469,11 +4547,12 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(entries.len(), 1, "exactly one fixed entry");
         let frag = entries[0].1.fragments.first().unwrap();
         // top:0 → resolved_y=0 → stored_y = 0 - body_y_px = -body_y_px.
+        let frag_y = frag.y.to_f32();
         assert!(
-            (frag.y.to_f32() - (-body_y_px)).abs() < 0.5,
+            (frag_y - (-body_y_px)).abs() < 0.5,
             "top:0 fixed frag.y must be -body_offset (={}); got {}",
             -body_y_px,
-            frag.y.to_f32()
+            frag_y
         );
     }
 
@@ -4541,23 +4620,21 @@ h2 { string-set: chapter-title content(text); }
         // wrong.
         let f0 = &entries[0].1.fragments[0];
         let f1 = &entries[1].1.fragments[0];
+        let f0x = f0.x.to_f32();
+        let f0y = f0.y.to_f32();
+        let f1x = f1.x.to_f32();
+        let f1y = f1.y.to_f32();
         assert!(
-            (f0.x.to_f32() - f1.x.to_f32()).abs() < 0.5
-                && (f0.y.to_f32() - f1.y.to_f32()).abs() < 0.5,
-            "root and child must share (x, y); got root=({},{}) child=({},{})",
-            f0.x.to_f32(),
-            f0.y.to_f32(),
-            f1.x.to_f32(),
-            f1.y.to_f32(),
+            (f0x - f1x).abs() < 0.5 && (f0y - f1y).abs() < 0.5,
+            "root and child must share (x, y); got root=({f0x},{f0y}) child=({f1x},{f1y})",
         );
 
         // Pin the y coordinate: bottom:0 with height=36 in an 800px
         // viewport places the box top at y=764. body is empty so
         // body_offset_xy=(0,0).
         assert!(
-            (f0.y.to_f32() - 764.0).abs() < 1.0,
-            "bottom:0 fixed (h=36) must resolve to y=764 (viewport_h - h); got {}",
-            f0.y.to_f32(),
+            (f0y - 764.0).abs() < 1.0,
+            "bottom:0 fixed (h=36) must resolve to y=764 (viewport_h - h); got {f0y}",
         );
     }
 
@@ -4599,10 +4676,10 @@ h2 { string-set: chapter-title content(text); }
         // Same math as the fixed case: body has zero height, so
         // body_offset compensation is a no-op and viewport-CB
         // resolution gives y = 800 - 30 = 770.
+        let frag_y = frag.y.to_f32();
         assert!(
-            (frag.y.to_f32() - 770.0).abs() < 1.0,
-            "abs body-direct bottom:0 should land at y=770; got {}",
-            frag.y.to_f32()
+            (frag_y - 770.0).abs() < 1.0,
+            "abs body-direct bottom:0 should land at y=770; got {frag_y}",
         );
     }
 
@@ -5037,10 +5114,10 @@ h2 { string-set: chapter-title content(text); }
         let h2 = candidates
             .first()
             .expect("expected the trailing h2 to land on page 1");
+        let h2_y = h2.y.to_f32();
         assert!(
-            h2.y.to_f32() >= 100.0,
-            "block sibling after split grid must continue after the grid tail; got y={} (pre-fix: y=0 overlaps the tail)",
-            h2.y.to_f32()
+            h2_y >= 100.0,
+            "block sibling after split grid must continue after the grid tail; got y={h2_y} (pre-fix: y=0 overlaps the tail)",
         );
     }
 
@@ -5080,12 +5157,12 @@ h2 { string-set: chapter-title content(text); }
         // keeping every emitted coordinate finite.
         for (id, g) in geom.iter() {
             for f in &g.fragments {
+                let fy = f.y.to_f32();
+                let fh = f.height.to_f32();
                 assert!(
-                    f.y.to_f32().is_finite() && f.height.to_f32().is_finite(),
-                    "node {id}: non-finite fragment y={} height={} leaked through \
+                    fy.is_finite() && fh.is_finite(),
+                    "node {id}: non-finite fragment y={fy} height={fh} leaked through \
                      fragment_block_subtree",
-                    f.y.to_f32(),
-                    f.height.to_f32(),
                 );
             }
         }
@@ -5124,10 +5201,10 @@ h2 { string-set: chapter-title content(text); }
         let h2 = candidates
             .first()
             .expect("expected the trailing h2 to land on page 1");
+        let h2_y = h2.y.to_f32();
         assert!(
-            h2.y.to_f32() >= 100.0,
-            "block sibling after split flex must continue after the flex tail; got y={} (pre-fix: y=0 overlaps the tail)",
-            h2.y.to_f32()
+            h2_y >= 100.0,
+            "block sibling after split flex must continue after the flex tail; got y={h2_y} (pre-fix: y=0 overlaps the tail)",
         );
     }
 
@@ -5518,12 +5595,12 @@ h2 { string-set: chapter-title content(text); }
             "expected B fragment on page 1, geom={geom:?}"
         );
         for f in &b_on_page1 {
+            let fy = f.y.to_f32();
             assert!(
-                f.y.to_f32().abs() < 0.5,
+                fy.abs() < 0.5,
                 "B should land at y=0 on the new page (forced break discards \
-                 the inter-child gap), but got y={} (gap leaked through \
+                 the inter-child gap), but got y={fy} (gap leaked through \
                  break-before — see Devin Review on PR #285). frag={f:?}",
-                f.y.to_f32(),
             );
         }
     }

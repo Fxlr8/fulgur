@@ -4856,3 +4856,114 @@ fn render_batch_failure_does_not_abort_siblings() {
     );
     assert!(results[2].is_err(), "item 2 (no title) should fail");
 }
+
+// --- P1c (fulgur-2map.5) Fragment->units::Px coverage closure ---
+//
+// These five tests drive `fragment_block_subtree` break-after / depth
+// bail-out paths and `draw_under_opacity`'s split-height path through
+// the full `Engine::render` pipeline. Those Fragment construction
+// sites were previously exercised only by VRT goldens (excluded from
+// the codecov measurement), so the `.px()` / `frag.height.in_pt()`
+// lines showed as uncovered patch lines. See CLAUDE.md "Coverage
+// scope".
+
+/// fulgur-2map.5: an opacity-scoped block with block-level
+/// descendants (non-empty `opacity_descendants`) that itself SPLITS
+/// across a page boundary must reach `draw_under_opacity`'s
+/// `is_split && frag.height > Px::ZERO` arm (render.rs ~2065). The
+/// pre-existing split-opacity smoke test wraps an atomic `<svg>`
+/// (shared-node content) which keeps the block a single fragment, so
+/// `is_split` stays false there. Two tall block children guarantee a
+/// real multi-fragment split.
+#[test]
+fn render_v2_smoke_opacity_block_split_uses_per_slice_height_block_children() {
+    let html = r#"<!doctype html><html><body>
+        <div style="opacity:0.5;background:#f0f4ff;border:2px solid #89c">
+          <div style="height:600px;background:#eef">first block child</div>
+          <div style="height:600px;background:#fce">second block child</div>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "expected multi-page split, got {page_count}"
+    );
+}
+
+/// fulgur-2map.5: a nested block parent whose child carries
+/// `break-after: page` (a simple leaf child - no recursion) emits a
+/// parent Fragment via `fragment_block_subtree`'s post-fragment
+/// break-after arm (pagination_layout.rs ~2162). The parent is routed
+/// through `fragment_block_subtree` because it has a forced break
+/// below.
+#[test]
+fn render_v2_smoke_break_after_child_no_recursion_emits_parent_fragment() {
+    let html = r#"<!doctype html><html><body>
+        <div style="background:#eef">
+          <div style="height:80px">before the forced break</div>
+          <div style="break-after:page;height:80px">forces a page break after</div>
+          <div style="height:80px">after the forced break</div>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "break-after:page must paginate, got {page_count}"
+    );
+}
+
+/// fulgur-2map.5: a zero-height child (explicit `height:0`, no
+/// content) carrying `break-after: page` inside a nested block parent
+/// hits `fragment_block_subtree`'s zero-height break-after arm
+/// (pagination_layout.rs ~1835). The explicit `height:0` keeps the
+/// child out of the positive-height path (~2162).
+#[test]
+fn render_v2_smoke_break_after_zero_height_child_emits_parent_fragment() {
+    let html = r#"<!doctype html><html><body>
+        <div style="background:#eef">
+          <div style="height:80px">before</div>
+          <div style="break-after:page;height:0"></div>
+          <div style="height:80px">after</div>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "zero-height break-after must paginate, got {page_count}"
+    );
+}
+
+/// fulgur-2map.5: a child that itself recurses (two tall grandchildren
+/// -> `would_split` true) AND carries `break-after: page` hits
+/// `fragment_block_subtree`'s post-recursion break-after arm
+/// (pagination_layout.rs ~2062).
+#[test]
+fn render_v2_smoke_break_after_recursing_child_emits_parent_fragment() {
+    let html = r#"<!doctype html><html><body>
+        <div style="background:#eef">
+          <div style="height:80px">before</div>
+          <div style="break-after:page;background:#dfe">
+            <div style="height:600px">tall grandchild one</div>
+            <div style="height:600px">tall grandchild two</div>
+          </div>
+          <div style="height:80px">after</div>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let page_count = pdf_str.matches("/Type /Page\n").count();
+    assert!(
+        page_count >= 2,
+        "recursing break-after must paginate, got {page_count}"
+    );
+}
