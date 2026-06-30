@@ -1213,6 +1213,7 @@ impl EngineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::F32Units;
 
     #[test]
     fn collect_pseudo_text_resolves_string_and_attr() {
@@ -1444,10 +1445,10 @@ mod tests {
     fn frag_on_page(page_index: u32) -> crate::pagination_layout::Fragment {
         crate::pagination_layout::Fragment {
             page_index,
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 0.0_f32.px(),
+            height: 0.0_f32.px(),
         }
     }
 

@@ -54,7 +54,7 @@ fn placement(geometry: &PaginationGeometryTable, node_id: usize) -> (f32, f32) {
         .fragments
         .first()
         .unwrap_or_else(|| panic!("expected at least one fragment for node {node_id}"));
-    (frag.x, frag.y)
+    (frag.x.to_f32(), frag.y.to_f32())
 }
 
 #[test]
