@@ -33,14 +33,14 @@ pub(super) fn try_convert(
         let marker = list_marker::resolve_list_marker(node, marker_line_height, ctx.assets)
             .unwrap_or(crate::drawables::ListItemMarker::Text {
                 lines: marker_lines,
-                width: marker_width,
+                width: marker_width.pt(),
             });
 
         out.list_items.insert(
             node_id,
             crate::drawables::ListItemEntry {
                 marker,
-                marker_line_height,
+                marker_line_height: marker_line_height.pt(),
                 opacity,
                 visible,
             },
@@ -95,7 +95,7 @@ pub(super) fn try_convert(
                 node_id,
                 crate::drawables::ListItemEntry {
                     marker,
-                    marker_line_height: line_height,
+                    marker_line_height: line_height.pt(),
                     opacity,
                     visible,
                 },

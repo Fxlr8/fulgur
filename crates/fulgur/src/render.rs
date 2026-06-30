@@ -113,7 +113,7 @@ pub fn render_v2(
             // applied, and only on page 0 (continuation pages are already
             // page-content-area-relative after the fragmenter resets cursor_y).
             let body_y_off = if page_idx == 0 {
-                drawables.body_offset_pt.1
+                drawables.body_offset_pt.1.to_f32()
             } else {
                 0.0
             };
@@ -258,14 +258,14 @@ pub fn render_v2(
                     let content_area_h =
                         page_size.height - resolved_margin.top - resolved_margin.bottom;
                     let body_bg_y = if page_idx == 0 {
-                        resolved_margin.top + drawables.body_offset_pt.1
+                        resolved_margin.top + drawables.body_offset_pt.1.to_f32()
                     } else {
                         resolved_margin.top
                     };
                     paint_root_block_v2(
                         &mut canvas,
                         body_block,
-                        resolved_margin.left + drawables.body_offset_pt.0,
+                        resolved_margin.left + drawables.body_offset_pt.0.to_f32(),
                         body_bg_y,
                         Some(content_area_h),
                     );
@@ -277,7 +277,7 @@ pub fn render_v2(
                 // resets cursor_y=0 per page so fragments are already
                 // page-content-area-relative and the offset must not apply.
                 let body_top_pt = if page_idx == 0 {
-                    resolved_margin.top + drawables.body_offset_pt.1
+                    resolved_margin.top + drawables.body_offset_pt.1.to_f32()
                 } else {
                     resolved_margin.top
                 };
@@ -832,9 +832,9 @@ pub(crate) fn dispatch_inline_box_content(
                 continue;
             };
             let desc_x_pt =
-                margin_left_pt + drawables.body_offset_pt.0 + desc_frag.x.in_pt().to_f32();
+                margin_left_pt + drawables.body_offset_pt.0.to_f32() + desc_frag.x.in_pt().to_f32();
             let desc_y_pt =
-                margin_top_pt + drawables.body_offset_pt.1 + desc_frag.y.in_pt().to_f32();
+                margin_top_pt + drawables.body_offset_pt.1.to_f32() + desc_frag.y.in_pt().to_f32();
             dispatch_fragment(
                 canvas,
                 desc_id,
@@ -1262,8 +1262,8 @@ fn paint_multicol_paragraph_slices(
     }
     draw_with_opacity(canvas, opacity, |canvas| {
         for slice in &slices_entry.slices {
-            let slice_top = slice.origin_pt.1 - consumed;
-            let slice_bottom = slice_top + slice.size_pt.1;
+            let slice_top = slice.origin_pt.1.to_f32() - consumed;
+            let slice_bottom = slice_top + slice.size_pt.1.to_f32();
             if needs_partition {
                 // Multi-fragment container: rebase + visibility filter.
                 // Skip slices that don't intersect this page's visible
@@ -1281,7 +1281,7 @@ fn paint_multicol_paragraph_slices(
                     continue;
                 }
             }
-            let abs_x = container_x_pt + slice.origin_pt.0;
+            let abs_x = container_x_pt + slice.origin_pt.0.to_f32();
             let abs_y = container_y_pt + slice_top;
             crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x.pt(), abs_y.pt(), None);
         }
@@ -2434,7 +2434,8 @@ fn draw_image_inner_paint(
     let Some(image) = decode_image_for_v2(entry) else {
         return;
     };
-    let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+    let Some(size) = krilla::geom::Size::from_wh(entry.width.to_f32(), entry.height.to_f32())
+    else {
         return;
     };
     let transform = krilla::geom::Transform::from_translate(x, y);
@@ -2481,7 +2482,8 @@ fn draw_svg_inner_paint(
     if !entry.visible {
         return;
     }
-    let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+    let Some(size) = krilla::geom::Size::from_wh(entry.width.to_f32(), entry.height.to_f32())
+    else {
         return;
     };
     let transform = krilla::geom::Transform::from_translate(x, y);
@@ -2670,7 +2672,7 @@ fn table_box_size(
     let total_width = entry
         .layout_size
         .map(|s| s.width.to_f32())
-        .unwrap_or(entry.width);
+        .unwrap_or(entry.width.to_f32());
     let total_height = entry
         .layout_size
         .map(|s| s.height.to_f32())
@@ -2679,7 +2681,7 @@ fn table_box_size(
             if from_frag > 0.0 {
                 from_frag
             } else {
-                entry.cached_height
+                entry.cached_height.to_f32()
             }
         });
     (total_width, total_height)
@@ -3072,15 +3074,21 @@ fn draw_list_item_marker(
 
     match &entry.marker {
         ListItemMarker::Text { lines, width } if !lines.is_empty() => {
-            crate::paragraph::draw_shaped_lines(canvas, lines, (x - *width).pt(), y.pt(), None);
+            crate::paragraph::draw_shaped_lines(
+                canvas,
+                lines,
+                (x - width.to_f32()).pt(),
+                y.pt(),
+                None,
+            );
         }
         ListItemMarker::Image {
             marker,
             width,
             height,
         } => {
-            let marker_x = x - *width;
-            let marker_y = y + (entry.marker_line_height - *height) / 2.0;
+            let marker_x = x - width.to_f32();
+            let marker_y = (y.pt() + (entry.marker_line_height - *height) / 2.0).to_f32();
             match marker {
                 ImageMarker::Raster(img) => draw_image_v2(canvas, img, marker_x, marker_y),
                 ImageMarker::Svg(svg) => draw_svg_v2(canvas, svg, marker_x, marker_y),
@@ -4686,8 +4694,8 @@ mod tests {
                 visible: true,
                 id: None,
                 layout_size: None,
-                width: 200.0,
-                cached_height: 100.0,
+                width: 200.0_f32.pt(),
+                cached_height: 100.0_f32.pt(),
                 clip_descendants: vec![41, 42],
             },
         );
@@ -4730,14 +4738,15 @@ mod tests {
         width: f32,
         cached_height: f32,
     ) -> crate::drawables::TableEntry {
+        use crate::units::F32Units;
         crate::drawables::TableEntry {
             style: crate::draw_primitives::BlockStyle::default(),
             opacity: 1.0,
             visible: true,
             id: None,
             layout_size,
-            width,
-            cached_height,
+            width: width.pt(),
+            cached_height: cached_height.pt(),
             clip_descendants: vec![],
         }
     }
@@ -5193,8 +5202,8 @@ mod tests {
                 visible: true,
                 id: None,
                 layout_size: None,
-                width: 100.0,
-                cached_height: 50.0,
+                width: 100.0_f32.pt(),
+                cached_height: 50.0_f32.pt(),
                 clip_descendants: vec![],
             },
         );
@@ -5339,8 +5348,8 @@ mod tests {
         crate::drawables::ImageEntry {
             image_data: Arc::new(data),
             format,
-            width: 10.0,
-            height: 10.0,
+            width: 10.0_f32.pt(),
+            height: 10.0_f32.pt(),
             opacity: 1.0,
             visible: true,
         }

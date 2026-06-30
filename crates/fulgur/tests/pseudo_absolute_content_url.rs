@@ -37,7 +37,9 @@ fn find_image_by_size(
     drawables
         .images
         .iter()
-        .find(|(_, img)| (img.width - want_w).abs() < 0.5 && (img.height - want_h).abs() < 0.5)
+        .find(|(_, img)| {
+            (img.width.to_f32() - want_w).abs() < 0.5 && (img.height.to_f32() - want_h).abs() < 0.5
+        })
         .map(|(id, e)| (*id, e))
 }
 
@@ -222,12 +224,12 @@ fn absolute_pseudo_percentage_size_resolves_against_padding_box_in_pt() {
     let pseudo = drawables
         .images
         .values()
-        .find(|img| img.width > 0.0)
+        .find(|img| img.width.to_f32() > 0.0)
         .expect("at least one non-zero image");
     let want_w = 150.0_f32;
     assert!(
-        (pseudo.width - want_w).abs() < 1.0,
-        "expected pseudo width {:.2} pt (50% of 300pt CB), got {:.2} pt; bug case would be ~200 pt",
+        (pseudo.width.to_f32() - want_w).abs() < 1.0,
+        "expected pseudo width {:.2} pt (50% of 300pt CB), got {:?} pt; bug case would be ~200 pt",
         want_w,
         pseudo.width,
     );

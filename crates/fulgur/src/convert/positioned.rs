@@ -368,7 +368,7 @@ pub(super) fn walk_absolute_pseudo_children(
             // and shifts the image off by its own w/h. Re-apply the
             // inset against the pseudo's effective image size and
             // overwrite the fragmenter's wrong placement.
-            let (img_w_pt, img_h_pt) = (img.width, img.height);
+            let (img_w_pt, img_h_pt) = (img.width.to_f32(), img.height.to_f32());
             out.images.insert(pseudo_id, img);
             if let Some(cb_resolved) = _cb {
                 maybe_apply_abs_pseudo_inset_correction(
@@ -1404,7 +1404,10 @@ mod tests {
         drawables
             .images
             .iter()
-            .find(|(_, img)| (img.width - want_w).abs() < 0.5 && (img.height - want_h).abs() < 0.5)
+            .find(|(_, img)| {
+                (img.width.to_f32() - want_w).abs() < 0.5
+                    && (img.height.to_f32() - want_h).abs() < 0.5
+            })
             .map(|(id, e)| (*id, e))
     }
 

@@ -74,15 +74,15 @@ pub(super) fn resolve_list_marker(
             let entry = crate::drawables::ImageEntry {
                 image_data: Arc::clone(data),
                 format,
-                width,
-                height,
+                width: width.pt(),
+                height: height.pt(),
                 opacity: 1.0,
                 visible: true,
             };
             Some(ListItemMarker::Image {
                 marker: ImageMarker::Raster(entry),
-                width,
-                height,
+                width: width.pt(),
+                height: height.pt(),
             })
         }
         AssetKind::Svg => {
@@ -94,15 +94,15 @@ pub(super) fn resolve_list_marker(
                 crate::draw_primitives::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
             let entry = crate::drawables::SvgEntry {
                 tree: Arc::new(tree),
-                width,
-                height,
+                width: width.pt(),
+                height: height.pt(),
                 opacity: 1.0,
                 visible: true,
             };
             Some(ListItemMarker::Image {
                 marker: ImageMarker::Svg(entry),
-                width,
-                height,
+                width: width.pt(),
+                height: height.pt(),
             })
         }
         AssetKind::Unknown => None,

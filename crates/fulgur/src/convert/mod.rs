@@ -228,12 +228,12 @@ fn find_body_id_in_dom(doc: &HtmlDocument) -> Option<usize> {
 /// fragment at `(body_x, 0)` (body-content-area relative); the html →
 /// body offset that CSS margin collapsing puts onto `body.location` lives
 /// here so `render_v2` can add it to per-fragment draw positions.
-fn extract_body_offset_pt(doc: &HtmlDocument) -> (f32, f32) {
+fn extract_body_offset_pt(doc: &HtmlDocument) -> (crate::units::Pt, crate::units::Pt) {
     use std::ops::Deref;
     let base = doc.deref();
     let root = doc.root_element();
     let Some(root_node) = base.get_node(root.id) else {
-        return (0.0, 0.0);
+        return (crate::units::Pt::ZERO, crate::units::Pt::ZERO);
     };
     for &child_id in &root_node.children {
         let Some(child) = base.get_node(child_id) else {
@@ -243,10 +243,10 @@ fn extract_body_offset_pt(doc: &HtmlDocument) -> (f32, f32) {
             && elem.name.local.as_ref() == "body"
         {
             let (x, y, _, _) = layout_in_pt(&child.final_layout);
-            return (x, y);
+            return (x.pt(), y.pt());
         }
     }
-    (0.0, 0.0)
+    (crate::units::Pt::ZERO, crate::units::Pt::ZERO)
 }
 
 /// Return `true` when the root `<html>` element has `direction: rtl`.
@@ -854,11 +854,16 @@ fn convert_multicol_paragraph_slices(
                 .collect();
                 inline_root::recalculate_paragraph_line_boxes(&mut lines);
 
+                // `group_*_pt`/`col_w_pt` are pt-valued f32 (hoisted above from
+                // `Px::in_pt().to_f32()`); the `col_slice` geometry is `Px`, so
+                // `.in_pt().to_f32()` brings it to the same pt-space f32. We sum
+                // in f32 (identical fold to the pre-migration code) and re-tag
+                // the result with `.pt()` — no scale change, byte-neutral.
                 let origin_pt = (
-                    group_x_pt + col_slice.origin.x.in_pt().to_f32(),
-                    group_y_pt + col_slice.origin.y.in_pt().to_f32(),
+                    (group_x_pt + col_slice.origin.x.in_pt().to_f32()).pt(),
+                    (group_y_pt + col_slice.origin.y.in_pt().to_f32()).pt(),
                 );
-                let size_pt = (col_w_pt, col_slice.size.height.in_pt().to_f32());
+                let size_pt = (col_w_pt.pt(), col_slice.size.height.in_pt().to_f32().pt());
 
                 slices.push(crate::drawables::ParagraphSlice {
                     origin_pt,

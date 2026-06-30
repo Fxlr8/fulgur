@@ -106,8 +106,8 @@ impl std::fmt::Debug for ParagraphEntry {
 pub struct ImageEntry {
     pub image_data: std::sync::Arc<Vec<u8>>,
     pub format: crate::image::ImageFormat,
-    pub width: f32,
-    pub height: f32,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
     pub opacity: f32,
     pub visible: bool,
 }
@@ -116,8 +116,8 @@ pub struct ImageEntry {
 #[derive(Debug, Clone)]
 pub struct SvgEntry {
     pub tree: std::sync::Arc<usvg::Tree>,
-    pub width: f32,
-    pub height: f32,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
     pub opacity: f32,
     pub visible: bool,
 }
@@ -138,8 +138,8 @@ pub struct TableEntry {
     pub visible: bool,
     pub id: Option<std::sync::Arc<String>>,
     pub layout_size: Option<crate::draw_primitives::Size>,
-    pub width: f32,
-    pub cached_height: f32,
+    pub width: crate::units::Pt,
+    pub cached_height: crate::units::Pt,
     /// Strict descendant `node_id`s (cell blocks + their children) when
     /// `style.has_overflow_clip()` is true. Mirrors `BlockEntry::clip_descendants`
     /// so the dispatcher can push the table's clip path once and
@@ -163,15 +163,15 @@ pub enum ListItemMarker {
     /// Text marker with shaped glyph runs extracted from Blitz/Parley.
     Text {
         lines: Vec<crate::paragraph::ShapedLine>,
-        width: f32,
+        width: crate::units::Pt,
     },
     /// Image marker (`list-style-image: url(...)`) — raster or SVG.
     Image {
         marker: ImageMarker,
         /// Display width after clamp (pt).
-        width: f32,
+        width: crate::units::Pt,
         /// Display height after clamp (pt).
-        height: f32,
+        height: crate::units::Pt,
     },
     /// No marker — split trailing fragment or `list-style-type: none`.
     None,
@@ -184,7 +184,7 @@ pub enum ListItemMarker {
 #[derive(Clone)]
 pub struct ListItemEntry {
     pub marker: ListItemMarker,
-    pub marker_line_height: f32,
+    pub marker_line_height: crate::units::Pt,
     pub opacity: f32,
     pub visible: bool,
 }
@@ -255,9 +255,9 @@ pub struct ParagraphSlice {
     /// Slice top-left in PDF pt, relative to the multicol container's
     /// border-box top-left. Render adds the container's body-relative
     /// position to obtain final page coordinates.
-    pub origin_pt: (f32, f32),
+    pub origin_pt: (crate::units::Pt, crate::units::Pt),
     /// Slice size — `col_w × Σ line_height(slice_lines)` in pt.
-    pub size_pt: (f32, f32),
+    pub size_pt: (crate::units::Pt, crate::units::Pt),
     /// Lines of this slice, baseline-rebased so the slice's first line
     /// renders at `y = baseline` from the slice top.
     pub lines: Vec<crate::paragraph::ShapedLine>,
@@ -327,7 +327,7 @@ pub struct Drawables {
     /// downstream slicing logic depends on that — keeping it relative
     /// in geometry but absolute on Drawables avoids touching the
     /// fragmenter contract.
-    pub body_offset_pt: (f32, f32),
+    pub body_offset_pt: (crate::units::Pt, crate::units::Pt),
     /// `true` when the root element (`<html>`) has `direction: rtl`.
     /// CSS Paged Media §5 specifies that when the root element is RTL
     /// the first page is a `:left` page instead of `:right`.
@@ -404,7 +404,7 @@ pub struct Drawables {
 impl Default for Drawables {
     fn default() -> Self {
         Self {
-            body_offset_pt: (0.0, 0.0),
+            body_offset_pt: (crate::units::Pt::ZERO, crate::units::Pt::ZERO),
             root_dir_rtl: false,
             root_id: None,
             body_id: None,
@@ -469,6 +469,7 @@ impl Drawables {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::F32Units;
 
     #[test]
     fn drawables_default_is_empty() {
@@ -513,9 +514,9 @@ mod tests {
         let entry = ListItemEntry {
             marker: ListItemMarker::Text {
                 lines: Vec::new(),
-                width: 0.0,
+                width: 0.0_f32.pt(),
             },
-            marker_line_height: 12.0,
+            marker_line_height: 12.0_f32.pt(),
             opacity: 1.0,
             visible: true,
         };
