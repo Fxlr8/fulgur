@@ -1194,7 +1194,6 @@ fn paint_multicol_paragraph_slices(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    use crate::convert::px_to_pt;
     use crate::draw_primitives::draw_with_opacity;
     let Some(slices_entry) = drawables.paragraph_slices.get(&source_node_id) else {
         return;
@@ -1227,12 +1226,12 @@ fn paint_multicol_paragraph_slices(
     // a slice's effective top in the current fragment frame is
     // `slice.origin_pt.1 - consumed`. `cutoff` is the visible strip's
     // height on this page.
-    let consumed: f32 = px_to_pt(
-        container_geom.fragments[..target_pos]
-            .iter()
-            .map(|f| f.height.to_f32())
-            .sum::<f32>(),
-    );
+    let consumed: f32 = container_geom.fragments[..target_pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<crate::units::Px>()
+        .in_pt()
+        .to_f32();
     let cutoff = target_frag.height.in_pt().to_f32();
 
     let container_x_pt = margin_left_pt + target_frag.x.in_pt().to_f32();

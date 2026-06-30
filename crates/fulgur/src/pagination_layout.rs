@@ -4841,9 +4841,9 @@ h2 { string-set: chapter-title content(text); }
         );
 
         let has_later_text_fragment = geom.values().any(|g| {
-            g.fragments
-                .iter()
-                .any(|f| f.page_index == 1 && f.height.to_f32() > 0.0 && f.height.to_f32() < 100.0)
+            g.fragments.iter().any(|f| {
+                f.page_index == 1 && f.height > crate::units::Px::ZERO && f.height < 100.0_f32.px()
+            })
         });
 
         assert!(

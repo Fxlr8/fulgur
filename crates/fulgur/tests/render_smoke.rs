@@ -14,6 +14,30 @@ use std::path::PathBuf;
 use fulgur::{AssetBundle, Engine};
 use tempfile::tempdir;
 
+/// Count `/Type /Page` objects (excluding the `/Type /Pages` page-tree
+/// root) directly from raw PDF bytes. Robust to whatever delimiter
+/// krilla emits after `/Type /Page` — unlike a fixed `"/Type /Page\n"`
+/// string match, which silently miscounts if the trailing byte ever
+/// changes.
+fn count_pages(pdf: &[u8]) -> usize {
+    let prefix = b"/Type /Page";
+    let mut count = 0;
+    let mut i = 0;
+    while i + prefix.len() < pdf.len() {
+        if &pdf[i..i + prefix.len()] == prefix {
+            // `/Type /Pages` (the tree root) has an alphanumeric next
+            // byte (`s`); a real page object is followed by a delimiter.
+            if !pdf[i + prefix.len()].is_ascii_alphanumeric() {
+                count += 1;
+            }
+            i += prefix.len();
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
 fn check_pdf_snapshot(name: &str, pdf: &[u8]) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
     std::fs::create_dir_all(&dir).unwrap();
@@ -4885,8 +4909,7 @@ fn render_v2_smoke_opacity_block_split_uses_per_slice_height_block_children() {
     </body></html>"#;
     let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(pdf.starts_with(b"%PDF"));
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = count_pages(&pdf);
     assert!(
         page_count >= 2,
         "expected multi-page split, got {page_count}"
@@ -4910,8 +4933,7 @@ fn render_v2_smoke_break_after_child_no_recursion_emits_parent_fragment() {
     </body></html>"#;
     let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(pdf.starts_with(b"%PDF"));
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = count_pages(&pdf);
     assert!(
         page_count >= 2,
         "break-after:page must paginate, got {page_count}"
@@ -4934,8 +4956,7 @@ fn render_v2_smoke_break_after_zero_height_child_emits_parent_fragment() {
     </body></html>"#;
     let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(pdf.starts_with(b"%PDF"));
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = count_pages(&pdf);
     assert!(
         page_count >= 2,
         "zero-height break-after must paginate, got {page_count}"
@@ -4960,8 +4981,7 @@ fn render_v2_smoke_break_after_recursing_child_emits_parent_fragment() {
     </body></html>"#;
     let pdf = Engine::builder().build().render(html).expect("v2 render");
     assert!(pdf.starts_with(b"%PDF"));
-    let pdf_str = String::from_utf8_lossy(&pdf);
-    let page_count = pdf_str.matches("/Type /Page\n").count();
+    let page_count = count_pages(&pdf);
     assert!(
         page_count >= 2,
         "recursing break-after must paginate, got {page_count}"
