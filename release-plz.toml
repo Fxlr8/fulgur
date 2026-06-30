@@ -15,16 +15,19 @@ publish = true
 name = "fulgur-wasm"
 version_group = "core"
 publish = false
+git_only = true
 
 [[package]]
 name = "pyfulgur"
 version_group = "core"
 publish = false
+git_only = true
 
 [[package]]
 name = "fulgur-ruby"
 version_group = "core"
 publish = false
+git_only = true
 
 [[package]]
 name = "fulgur-vrt"
