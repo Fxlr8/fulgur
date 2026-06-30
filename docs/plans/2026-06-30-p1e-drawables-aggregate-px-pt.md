@@ -36,6 +36,7 @@
 **Why first:** smallest consumer surface, unit unambiguously pt (`size_in_pt`).
 
 **Files:**
+
 - Modify: `crates/fulgur/src/drawables.rs` — `TableEntry.width: f32 → Pt`, `cached_height: f32 → Pt` (lines ~141-142).
 - Modify: `crates/fulgur/src/convert/table.rs` — `convert_table`: `let (width, height) = size_in_pt(...)`. `size_in_pt` already returns `Pt`; drop the `.pt()` on `layout_size` (`width: width`, `height: height`) and feed `width`/`cached_height: height` directly. Verify `size_in_pt` return type first; if it returns `(Pt,Pt)` the `.pt()` calls become redundant, if it returns `(f32,f32)` keep `.pt()` on `width`/`cached_height`.
 - Modify: `crates/fulgur/src/render.rs` — `table_box_size` fallback (~2673-2690): `entry.cached_height` now `Pt`; the `frag.height` zero-guard compare and the returned size. Drop `.to_f32()` at the krilla draw boundary.
@@ -64,9 +65,10 @@ git add -A && git commit -m "refactor(table): type TableEntry width/cached_heigh
 **Why together:** structurally parallel, share `convert/replaced.rs` + `convert/list_marker.rs` construction and the render image/svg draw consumers.
 
 **Files:**
+
 - Modify: `crates/fulgur/src/drawables.rs` — `ImageEntry.width/height`, `SvgEntry.width/height` (`f32 → Pt`).
 - Modify: `crates/fulgur/src/convert/replaced.rs`:
-  - `make_image_entry` returns `ImageEntry` with `width: w, height: h` where `(w,h) = resolve_image_dimensions(...)`. `resolve_image_dimensions` returns `(f32,f32)` (intrinsic device-px fallback in `(None,None)`, prod path = pt css dims). KEEP `resolve_image_dimensions` returning `f32` (it mixes a device-px edge), tag at the `ImageEntry` construction: `width: w.pt(), height: h.pt()`. Document that the `(None,None)` branch is test/edge-only.
+  - `make_image_entry` returns `ImageEntry` with `width: w, height: h` where `(w,h) = resolve_image_dimensions(...)`. `resolve_image_dimensions` returns `(f32,f32)` (intrinsic device-px fallback in `(None,None)`, prod path = pt css dims). KEEP `resolve_image_dimensions` returning `f32` (it mixes a device-px branch), tag at the `ImageEntry` construction: `width: w.pt(), height: h.pt()`. Document that the `(None,None)` branch is **production-reachable** via auto-sized pseudo `content: url()` (`resolve_pseudo_size` → `None` for `auto`), NOT test-only — so `.pt()` there preserves a device-px value verbatim (byte-neutral); the device-px-vs-pt provenance is a pre-existing question tracked in `fulgur-t82j`.
   - `convert_svg`: `width: content_w, height: content_h` from `maybe_insert_block_for_replaced` (returns `(f32,f32)` pt) → `.pt()`.
   - `make_image_entry` tests (`test_make_image_entry_*`, ~254-310): assertions on `img.width`/`img.height` → `.to_f32()` on the `Pt` (or compare against `Pt`). Use `{:?}`/bare-arg form for patch coverage.
 - Modify: `crates/fulgur/src/convert/list_marker.rs` — the `ImageEntry`/`SvgEntry` built from `clamp_marker_size` (already `(Pt,Pt)`): `size_raster_marker` returns `(width,height)`; check its type. If `clamp_marker_size` yields `Pt`, feed directly; the inner `ImageEntry { width, height }` now wants `Pt` — align `size_raster_marker`'s return or `.pt()` at use.
@@ -96,6 +98,7 @@ git add -A && git commit -m "refactor(replaced): type ImageEntry/SvgEntry width/
 ## Task 3: ListItemMarker widths + ListItemEntry.marker_line_height → Pt
 
 **Files:**
+
 - Modify: `crates/fulgur/src/drawables.rs`:
   - `ListItemMarker::Text { width: f32 → Pt }`, `ListItemMarker::Image { width: f32 → Pt, height: f32 → Pt }` (~164-175).
   - `ListItemEntry.marker_line_height: f32 → Pt` (~187).
@@ -126,6 +129,7 @@ git add -A && git commit -m "refactor(list): type ListItemMarker/marker_line_hei
 ## Task 4: ParagraphSlice.origin_pt / size_pt → (Pt, Pt) [owner-confirmed in scope]
 
 **Files:**
+
 - Modify: `crates/fulgur/src/drawables.rs` — `ParagraphSlice.origin_pt: (f32,f32) → (Pt,Pt)`, `size_pt: (f32,f32) → (Pt,Pt)` (~258-260). `Debug` impl (~266-273) keeps `.field("origin_pt", &self.origin_pt)` — `(Pt,Pt): Debug`, fine.
 - Modify: `crates/fulgur/src/convert/` multicol slice producer — find where `ParagraphSlice { origin_pt, size_pt }` is built (`grep -rn "ParagraphSlice {" crates/fulgur/src`). Source is `multicol_layout` pt geometry (P1d migrated `ColumnLineSlice` to `Px`; the slice origin/size are pt). Tag with `.pt()` or feed `Pt`.
 - Modify: `crates/fulgur/src/render.rs` — the paragraph-slices dispatcher reads `slice.origin_pt`/`size_pt`, adds the container body-relative position (`Pt`), `.to_f32()` at draw. `grep -rn "origin_pt\|size_pt\|paragraph_slices" crates/fulgur/src/render.rs`.
@@ -149,6 +153,7 @@ git add -A && git commit -m "refactor(multicol): type ParagraphSlice origin/size
 ## Task 5: Drawables.body_offset_pt: (f32,f32) → (Pt,Pt) (highest friction, last)
 
 **Files:**
+
 - Modify: `crates/fulgur/src/drawables.rs` — `body_offset_pt: (f32,f32) → (Pt,Pt)` (~330); `Default` `body_offset_pt: (0.0,0.0) → (Pt::ZERO, Pt::ZERO)` (~407); `is_empty` doc-comment unaffected.
 - Modify: `crates/fulgur/src/convert/mod.rs` — `extract_body_offset_pt(doc) -> (f32,f32)` (~231) → `(Pt,Pt)`; its `body_layout.location.x/y` are pt (verify; `px_to_pt` or already-pt) → `.pt()`/`.px().in_pt()`. Assignment `drawables.body_offset_pt = ...` (~197).
 - Modify: `crates/fulgur/src/render.rs` — ~10 sites (`112-116`, `261`, `268`, `275-280`, `838-839`): each `margin.top + body_offset_pt.1`, `desc_y = margin_top_pt + body_offset_pt.1 + px_to_pt(desc_frag.y)`. `resolved_margin.*` and `margin_*_pt` are `Pt` (verify); `px_to_pt(frag.x/y)` → `.pt()` to keep `Pt + Pt`. Preserve add order.
@@ -176,6 +181,7 @@ git add -A && git commit -m "refactor(drawables): type body_offset_pt with units
 ## Task 6 (optional polish): drop `_pt` suffix on now-typed fields
 
 Only if clean. Mirrors P1b's separate cleanup commit (8424511c after a63f0b18). Rename together for consistency:
+
 - `Drawables.body_offset_pt → body_offset`
 - `ParagraphSlice.origin_pt → origin`, `size_pt → size`
 

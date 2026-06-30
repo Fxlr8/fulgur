@@ -115,10 +115,16 @@ pub(super) fn make_image_entry(
     crate::drawables::ImageEntry {
         image_data: data,
         format,
-        // Nominally PDF pt: production callers (`convert_image`,
-        // `content: url()`) always pass `Some(content_w/content_h)` (pt).
-        // The `(None, None)` fallback in `resolve_image_dimensions` returns
-        // intrinsic decoded *device px* — a test/edge case only.
+        // Nominally PDF pt: the `<img>` path and explicitly-sized
+        // `content: url()` pass `Some(content_w/content_h)` (pt, from
+        // `size_in_pt`). But an AUTO-sized pseudo `content: url()`
+        // (`resolve_pseudo_size` returns `None` for `auto`) reaches the
+        // `(None, None)` arm of `resolve_image_dimensions`, which returns
+        // intrinsic decoded *device px* — that path is production-reachable,
+        // not test-only. Tagging `.pt()` preserves the existing f32
+        // verbatim (byte-neutral); whether that device-px fallback should be
+        // `px_to_pt`-scaled is a pre-existing unit-provenance question
+        // tracked in fulgur-t82j, out of scope for this migration.
         width: w.pt(),
         height: h.pt(),
         opacity,
