@@ -10,6 +10,7 @@ use fulgur::config::{Margin, PageSize};
 use fulgur::draw_primitives::Affine2D;
 use fulgur::drawables::{Drawables, TransformEntry};
 use fulgur::engine::Engine;
+use fulgur::units::F32Units;
 
 fn build_drawables(html: &str) -> Drawables {
     let engine = Engine::builder().build();
@@ -34,7 +35,9 @@ fn entry_from(html: &str) -> TransformEntry {
 fn effective_matrix(entry: &TransformEntry, draw_x: f32, draw_y: f32) -> Affine2D {
     let ox = draw_x + entry.origin.x.to_f32();
     let oy = draw_y + entry.origin.y.to_f32();
-    Affine2D::translation(ox, oy) * entry.matrix * Affine2D::translation(-ox, -oy)
+    Affine2D::translation(ox.pt(), oy.pt())
+        * entry.matrix
+        * Affine2D::translation((-ox).pt(), (-oy).pt())
 }
 
 fn approx(actual: f32, expected: f32, tol: f32, label: &str) {
@@ -67,8 +70,8 @@ fn translate_px() {
     approx(m.b, 0.0, 1e-5, "translate.b");
     approx(m.c, 0.0, 1e-5, "translate.c");
     approx(m.d, 1.0, 1e-5, "translate.d");
-    approx(m.e, 10.0, 1e-5, "translate.e");
-    approx(m.f, 20.0, 1e-5, "translate.f");
+    approx(m.e.to_f32(), 10.0, 1e-5, "translate.e");
+    approx(m.f.to_f32(), 20.0, 1e-5, "translate.f");
 }
 
 #[test]
@@ -78,8 +81,8 @@ fn rotate_90_at_top_left_origin() {
     let m = effective_matrix(&entry, 0.0, 0.0);
     // Apply m to the point (1, 0): a*1 + c*0 + e = a, b*1 + d*0 + f = b.
     // After a +90 deg rotation (1, 0) should land at (0, 1).
-    let x1 = m.a * 1.0 + m.c * 0.0 + m.e;
-    let y1 = m.b * 1.0 + m.d * 0.0 + m.f;
+    let x1 = m.a * 1.0 + m.c * 0.0 + m.e.to_f32();
+    let y1 = m.b * 1.0 + m.d * 0.0 + m.f.to_f32();
     approx(x1, 0.0, 1e-5, "rotate90.x");
     approx(y1, 1.0, 1e-5, "rotate90.y");
 }
@@ -94,8 +97,8 @@ fn rotate_90_at_default_center_origin_fixes_center() {
     // the fixed point of the rotation.
     let cx = 100.0 * 0.75 / 2.0;
     let cy = 100.0 * 0.75 / 2.0;
-    let x = m.a * cx + m.c * cy + m.e;
-    let y = m.b * cx + m.d * cy + m.f;
+    let x = m.a * cx + m.c * cy + m.e.to_f32();
+    let y = m.b * cx + m.d * cy + m.f.to_f32();
     approx(x, cx, 1e-4, "rotate90-center.x");
     approx(y, cy, 1e-4, "rotate90-center.y");
 }
@@ -109,8 +112,8 @@ fn scale_has_correct_diagonal() {
     approx(m.d, 3.0, 1e-5, "scale.d");
     approx(m.b, 0.0, 1e-5, "scale.b");
     approx(m.c, 0.0, 1e-5, "scale.c");
-    approx(m.e, 0.0, 1e-5, "scale.e");
-    approx(m.f, 0.0, 1e-5, "scale.f");
+    approx(m.e.to_f32(), 0.0, 1e-5, "scale.e");
+    approx(m.f.to_f32(), 0.0, 1e-5, "scale.f");
 }
 
 #[test]
@@ -126,8 +129,8 @@ fn matrix_preserved_with_origin_zero() {
             b: 2.0,
             c: 3.0,
             d: 4.0,
-            e: 5.0,
-            f: 6.0,
+            e: 5.0_f32.pt(),
+            f: 6.0_f32.pt(),
         }
     );
 }
@@ -151,8 +154,8 @@ fn composition_right_to_left() {
     let m = effective_matrix(&entry, 0.0, 0.0);
     // CSS transforms apply right-to-left: rotate first, then translate.
     // point (1, 0) -> rotate90 -> (0, 1) -> translate(10, 0) -> (10, 1).
-    let x = m.a * 1.0 + m.c * 0.0 + m.e;
-    let y = m.b * 1.0 + m.d * 0.0 + m.f;
+    let x = m.a * 1.0 + m.c * 0.0 + m.e.to_f32();
+    let y = m.b * 1.0 + m.d * 0.0 + m.f.to_f32();
     approx(x, 10.0, 1e-4, "compose.x");
     approx(y, 1.0, 1e-4, "compose.y");
 }

@@ -836,7 +836,7 @@ pub fn draw_shaped_lines(
                         let off_y = oy.to_f32() - geo_y_pt;
                         let transform = krilla::geom::Transform::from_translate(off_x, off_y);
                         let link_affine =
-                            crate::draw_primitives::Affine2D::translation(off_x, off_y);
+                            crate::draw_primitives::Affine2D::translation(off_x.pt(), off_y.pt());
                         crate::draw_primitives::draw_with_opacity(canvas, ib.opacity, |canvas| {
                             if let Some(lc) = canvas.link_collector.as_deref_mut() {
                                 lc.push_transform(link_affine);

@@ -2901,8 +2901,8 @@ pub(crate) fn compute_transform(
         || !m.b.is_finite()
         || !m.c.is_finite()
         || !m.d.is_finite()
-        || !m.e.is_finite()
-        || !m.f.is_finite()
+        || !m.e.to_f32().is_finite()
+        || !m.f.to_f32().is_finite()
     {
         log::warn!("transform produced non-finite matrix; falling back to identity");
         return None;
@@ -2931,6 +2931,7 @@ fn op_to_matrix(
     w: f32,
     h: f32,
 ) -> Affine2D {
+    use crate::units::F32Units;
     use style::values::computed::Length;
     use style::values::generics::transform::GenericTransformOperation::*;
 
@@ -2940,15 +2941,19 @@ fn op_to_matrix(
             b: m.b,
             c: m.c,
             d: m.d,
-            e: m.e,
-            f: m.f,
+            e: m.e.pt(),
+            f: m.f.pt(),
         },
         Translate(x, y) => Affine2D::translation(
-            x.resolve(Length::new(w)).px(),
-            y.resolve(Length::new(h)).px(),
+            x.resolve(Length::new(w)).px().pt(),
+            y.resolve(Length::new(h)).px().pt(),
         ),
-        TranslateX(x) => Affine2D::translation(x.resolve(Length::new(w)).px(), 0.0),
-        TranslateY(y) => Affine2D::translation(0.0, y.resolve(Length::new(h)).px()),
+        TranslateX(x) => {
+            Affine2D::translation(x.resolve(Length::new(w)).px().pt(), crate::units::Pt::ZERO)
+        }
+        TranslateY(y) => {
+            Affine2D::translation(crate::units::Pt::ZERO, y.resolve(Length::new(h)).px().pt())
+        }
         Scale(sx, sy) => Affine2D::scale(*sx, *sy),
         ScaleX(sx) => Affine2D::scale(*sx, 1.0),
         ScaleY(sy) => Affine2D::scale(1.0, *sy),
@@ -5310,8 +5315,10 @@ mod transform_tests {
             <div style="transform: translate(10px, 20px)">hi</div>
         </body></html>"#;
         let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
-        assert!(approx(m.e, 10.0));
-        assert!(approx(m.f, 20.0));
+        let me = m.e.to_f32();
+        let mf = m.f.to_f32();
+        assert!(approx(me, 10.0));
+        assert!(approx(mf, 20.0));
         assert!(approx(m.a, 1.0));
         assert!(approx(m.d, 1.0));
     }
@@ -5322,8 +5329,10 @@ mod transform_tests {
             <div style="transform: translate(50%, 25%)">hi</div>
         </body></html>"#;
         let (m, _) = compute_for_div(html, 200.0, 80.0).expect("should have transform");
-        assert!(approx(m.e, 100.0), "expected 100 (50% of 200), got {}", m.e);
-        assert!(approx(m.f, 20.0), "expected 20 (25% of 80), got {}", m.f);
+        let me = m.e.to_f32();
+        let mf = m.f.to_f32();
+        assert!(approx(me, 100.0), "expected 100 (50% of 200), got {me}");
+        assert!(approx(mf, 20.0), "expected 20 (25% of 80), got {mf}");
     }
 
     #[test]
@@ -5336,8 +5345,10 @@ mod transform_tests {
         assert!(approx(m.b, 2.0));
         assert!(approx(m.c, 3.0));
         assert!(approx(m.d, 4.0));
-        assert!(approx(m.e, 5.0));
-        assert!(approx(m.f, 6.0));
+        let me = m.e.to_f32();
+        let mf = m.f.to_f32();
+        assert!(approx(me, 5.0));
+        assert!(approx(mf, 6.0));
     }
 
     #[test]
@@ -5384,8 +5395,8 @@ mod transform_tests {
         </body></html>"#;
         let (m, _) = compute_for_div(html, 100.0, 100.0).expect("rotateZ should produce a wrapper");
         // 90° rotation: (1, 0) → (0, 1).
-        let x = m.a * 1.0 + m.c * 0.0 + m.e;
-        let y = m.b * 1.0 + m.d * 0.0 + m.f;
+        let x = m.a * 1.0 + m.c * 0.0 + m.e.to_f32();
+        let y = m.b * 1.0 + m.d * 0.0 + m.f.to_f32();
         assert!(approx(x, 0.0), "x expected 0.0, got {x}");
         assert!(approx(y, 1.0), "y expected 1.0, got {y}");
     }
