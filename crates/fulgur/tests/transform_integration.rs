@@ -32,8 +32,8 @@ fn entry_from(html: &str) -> TransformEntry {
 /// composition: translate the origin into the draw frame, conjugate the
 /// raw matrix by it, so rotation / scale happen around the chosen origin.
 fn effective_matrix(entry: &TransformEntry, draw_x: f32, draw_y: f32) -> Affine2D {
-    let ox = draw_x + entry.origin.x;
-    let oy = draw_y + entry.origin.y;
+    let ox = draw_x + entry.origin.x.to_f32();
+    let oy = draw_y + entry.origin.y.to_f32();
     Affine2D::translation(ox, oy) * entry.matrix * Affine2D::translation(-ox, -oy)
 }
 

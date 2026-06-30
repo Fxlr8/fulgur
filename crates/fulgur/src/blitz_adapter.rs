@@ -2881,6 +2881,7 @@ pub(crate) fn compute_transform(
     border_box_width: f32,
     border_box_height: f32,
 ) -> Option<(Affine2D, Point2)> {
+    use crate::units::F32Units;
     use style::values::computed::Length;
 
     // Fast path: most DOM nodes have no transform. Reading the
@@ -2914,8 +2915,13 @@ pub(crate) fn compute_transform(
     let origin_x = origin
         .horizontal
         .resolve(Length::new(border_box_width))
-        .px();
-    let origin_y = origin.vertical.resolve(Length::new(border_box_height)).px();
+        .px()
+        .pt();
+    let origin_y = origin
+        .vertical
+        .resolve(Length::new(border_box_height))
+        .px()
+        .pt();
 
     Some((m, Point2::new(origin_x, origin_y)))
 }
@@ -5340,15 +5346,15 @@ mod transform_tests {
             <div style="transform: rotate(45deg)">hi</div>
         </body></html>"#;
         let (_, origin) = compute_for_div(html, 100.0, 60.0).expect("should have transform");
+        let ox = origin.x.to_f32();
+        let oy = origin.y.to_f32();
         assert!(
-            approx(origin.x, 50.0),
-            "default origin x should be 50% of 100, got {}",
-            origin.x
+            approx(ox, 50.0),
+            "default origin x should be 50% of 100, got {ox}"
         );
         assert!(
-            approx(origin.y, 30.0),
-            "default origin y should be 50% of 60, got {}",
-            origin.y
+            approx(oy, 30.0),
+            "default origin y should be 50% of 60, got {oy}"
         );
     }
 

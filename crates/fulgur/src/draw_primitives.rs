@@ -222,18 +222,20 @@ impl std::ops::Mul for Affine2D {
     }
 }
 
-/// A 2D point in user-space coordinates (Pt).
+/// A 2D point in user-space coordinates (PDF pt).
 ///
-/// Used for both absolute draw positions and box-local offsets such as
-/// `transform-origin`; the interpretation depends on the call site.
+/// Used only for `transform-origin` (`drawables::TransformEntry.origin`).
+/// The value is the box-local origin already in pt space — `compute_transform`
+/// is fed pt-valued box dims, so no px→pt fold happens. **Do not add
+/// `.in_pt()`**: that would scale an already-pt value by 0.75.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point2 {
-    pub x: Pt,
-    pub y: Pt,
+    pub x: crate::units::Pt,
+    pub y: crate::units::Pt,
 }
 
 impl Point2 {
-    pub const fn new(x: Pt, y: Pt) -> Self {
+    pub const fn new(x: crate::units::Pt, y: crate::units::Pt) -> Self {
         Self { x, y }
     }
 }
