@@ -1,7 +1,5 @@
 # P1e: Migrate Drawables Aggregate Fields to units::Pt — Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task (chosen execution mode).
-
 **Goal:** Retype the remaining raw-`f32` PDF-pt coordinate fields on `Drawables` entry structs to `units::Pt`, byte-neutral (PDF output unchanged), completing the per-field side of epic `fulgur-2map`'s coordinate migration (5th in the P1a–P1d series).
 
 **Architecture:** Type each field as its native stored unit (`units::Pt`); convert only at genuine boundaries (`px_to_pt` producers tag with `.pt()`, FFI drops to `f32` via `.to_f32()`); never reassociate arithmetic — preserve exact `f32` op order at every site so the bytes are identical. One struct/field-group per task, ascending friction, each independently golden-verified and committed.
