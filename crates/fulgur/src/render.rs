@@ -1265,8 +1265,8 @@ fn paint_multicol_paragraph_slices(
     }
     draw_with_opacity(canvas, opacity, |canvas| {
         for slice in &slices_entry.slices {
-            let slice_top = slice.origin_pt.1 - consumed;
-            let slice_bottom = slice_top + slice.size_pt.1;
+            let slice_top = slice.origin_pt.1.to_f32() - consumed;
+            let slice_bottom = slice_top + slice.size_pt.1.to_f32();
             if needs_partition {
                 // Multi-fragment container: rebase + visibility filter.
                 // Skip slices that don't intersect this page's visible
@@ -1284,7 +1284,7 @@ fn paint_multicol_paragraph_slices(
                     continue;
                 }
             }
-            let abs_x = container_x_pt + slice.origin_pt.0;
+            let abs_x = container_x_pt + slice.origin_pt.0.to_f32();
             let abs_y = container_y_pt + slice_top;
             crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x.pt(), abs_y.pt(), None);
         }

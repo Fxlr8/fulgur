@@ -2058,7 +2058,10 @@ fn multicol_inline_root_split_emits_paragraph_slices_case_b() {
     );
     for slice in &entry.slices {
         assert!(!slice.lines.is_empty(), "slice lines must not be empty");
-        assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
+        assert!(
+            slice.size_pt.1 > fulgur::units::Pt::ZERO,
+            "slice height (pt) must be > 0"
+        );
         // First-line baseline must be slice-relative (line-local). For
         // a 16px (12pt) font, ascent is ~10pt — the baseline must be
         // strictly less than the line height (otherwise the slice
@@ -2109,7 +2112,10 @@ fn multicol_inline_root_split_emits_paragraph_slices_case_a() {
     );
     for slice in &entry.slices {
         assert!(!slice.lines.is_empty(), "slice lines must not be empty");
-        assert!(slice.size_pt.1 > 0.0, "slice height (pt) must be > 0");
+        assert!(
+            slice.size_pt.1 > fulgur::units::Pt::ZERO,
+            "slice height (pt) must be > 0"
+        );
         let first = &slice.lines[0];
         assert!(
             first.baseline > fulgur::units::Pt::ZERO && first.baseline <= first.height,

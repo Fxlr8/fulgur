@@ -255,9 +255,9 @@ pub struct ParagraphSlice {
     /// Slice top-left in PDF pt, relative to the multicol container's
     /// border-box top-left. Render adds the container's body-relative
     /// position to obtain final page coordinates.
-    pub origin_pt: (f32, f32),
+    pub origin_pt: (crate::units::Pt, crate::units::Pt),
     /// Slice size — `col_w × Σ line_height(slice_lines)` in pt.
-    pub size_pt: (f32, f32),
+    pub size_pt: (crate::units::Pt, crate::units::Pt),
     /// Lines of this slice, baseline-rebased so the slice's first line
     /// renders at `y = baseline` from the slice top.
     pub lines: Vec<crate::paragraph::ShapedLine>,
