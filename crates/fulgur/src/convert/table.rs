@@ -45,8 +45,8 @@ fn convert_table(
                 width: width.pt(),
                 height: height.pt(),
             }),
-            width,
-            cached_height: height,
+            width: width.pt(),
+            cached_height: height.pt(),
             clip_descendants: Vec::new(),
         },
     );

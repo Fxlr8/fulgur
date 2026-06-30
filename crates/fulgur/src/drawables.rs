@@ -138,8 +138,8 @@ pub struct TableEntry {
     pub visible: bool,
     pub id: Option<std::sync::Arc<String>>,
     pub layout_size: Option<crate::draw_primitives::Size>,
-    pub width: f32,
-    pub cached_height: f32,
+    pub width: crate::units::Pt,
+    pub cached_height: crate::units::Pt,
     /// Strict descendant `node_id`s (cell blocks + their children) when
     /// `style.has_overflow_clip()` is true. Mirrors `BlockEntry::clip_descendants`
     /// so the dispatcher can push the table's clip path once and

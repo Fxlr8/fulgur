@@ -2678,7 +2678,7 @@ fn table_box_size(
     let total_width = entry
         .layout_size
         .map(|s| s.width.to_f32())
-        .unwrap_or(entry.width);
+        .unwrap_or(entry.width.to_f32());
     let total_height = entry
         .layout_size
         .map(|s| s.height.to_f32())
@@ -2687,7 +2687,7 @@ fn table_box_size(
             if from_frag > 0.0 {
                 from_frag
             } else {
-                entry.cached_height
+                entry.cached_height.to_f32()
             }
         });
     (total_width, total_height)
@@ -4696,8 +4696,8 @@ mod tests {
                 visible: true,
                 id: None,
                 layout_size: None,
-                width: 200.0,
-                cached_height: 100.0,
+                width: 200.0_f32.pt(),
+                cached_height: 100.0_f32.pt(),
                 clip_descendants: vec![41, 42],
             },
         );
@@ -4740,14 +4740,15 @@ mod tests {
         width: f32,
         cached_height: f32,
     ) -> crate::drawables::TableEntry {
+        use crate::units::F32Units;
         crate::drawables::TableEntry {
             style: crate::draw_primitives::BlockStyle::default(),
             opacity: 1.0,
             visible: true,
             id: None,
             layout_size,
-            width,
-            cached_height,
+            width: width.pt(),
+            cached_height: cached_height.pt(),
             clip_descendants: vec![],
         }
     }
@@ -5203,8 +5204,8 @@ mod tests {
                 visible: true,
                 id: None,
                 layout_size: None,
-                width: 100.0,
-                cached_height: 50.0,
+                width: 100.0_f32.pt(),
+                cached_height: 50.0_f32.pt(),
                 clip_descendants: vec![],
             },
         );
