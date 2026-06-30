@@ -2442,7 +2442,8 @@ fn draw_image_inner_paint(
     let Some(image) = decode_image_for_v2(entry) else {
         return;
     };
-    let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+    let Some(size) = krilla::geom::Size::from_wh(entry.width.to_f32(), entry.height.to_f32())
+    else {
         return;
     };
     let transform = krilla::geom::Transform::from_translate(x, y);
@@ -2489,7 +2490,8 @@ fn draw_svg_inner_paint(
     if !entry.visible {
         return;
     }
-    let Some(size) = krilla::geom::Size::from_wh(entry.width, entry.height) else {
+    let Some(size) = krilla::geom::Size::from_wh(entry.width.to_f32(), entry.height.to_f32())
+    else {
         return;
     };
     let transform = krilla::geom::Transform::from_translate(x, y);
@@ -5350,8 +5352,8 @@ mod tests {
         crate::drawables::ImageEntry {
             image_data: Arc::new(data),
             format,
-            width: 10.0,
-            height: 10.0,
+            width: 10.0_f32.pt(),
+            height: 10.0_f32.pt(),
             opacity: 1.0,
             visible: true,
         }

@@ -115,8 +115,12 @@ pub(super) fn make_image_entry(
     crate::drawables::ImageEntry {
         image_data: data,
         format,
-        width: w,
-        height: h,
+        // Nominally PDF pt: production callers (`convert_image`,
+        // `content: url()`) always pass `Some(content_w/content_h)` (pt).
+        // The `(None, None)` fallback in `resolve_image_dimensions` returns
+        // intrinsic decoded *device px* — a test/edge case only.
+        width: w.pt(),
+        height: h.pt(),
         opacity,
         visible,
     }
@@ -219,8 +223,8 @@ fn convert_svg(
         node.id,
         crate::drawables::SvgEntry {
             tree,
-            width: content_w,
-            height: content_h,
+            width: content_w.pt(),
+            height: content_h.pt(),
             opacity,
             visible,
         },
@@ -260,8 +264,8 @@ mod tests {
             1.0,
             true,
         );
-        assert_eq!(img.width, 100.0);
-        assert_eq!(img.height, 50.0);
+        assert_eq!(img.width.to_f32(), 100.0);
+        assert_eq!(img.height.to_f32(), 50.0);
         assert_eq!(img.opacity, 1.0);
         assert!(img.visible);
     }
@@ -277,8 +281,8 @@ mod tests {
             1.0,
             true,
         );
-        assert_eq!(img.width, 40.0);
-        assert_eq!(img.height, 40.0);
+        assert_eq!(img.width.to_f32(), 40.0);
+        assert_eq!(img.height.to_f32(), 40.0);
     }
 
     #[test]
@@ -291,8 +295,8 @@ mod tests {
             1.0,
             true,
         );
-        assert_eq!(img.width, 25.0);
-        assert_eq!(img.height, 25.0);
+        assert_eq!(img.width.to_f32(), 25.0);
+        assert_eq!(img.height.to_f32(), 25.0);
     }
 
     #[test]
@@ -305,8 +309,8 @@ mod tests {
             0.5,
             false,
         );
-        assert_eq!(img.width, 1.0);
-        assert_eq!(img.height, 1.0);
+        assert_eq!(img.width.to_f32(), 1.0);
+        assert_eq!(img.height.to_f32(), 1.0);
         assert_eq!(img.opacity, 0.5);
         assert!(!img.visible);
     }

@@ -106,8 +106,8 @@ impl std::fmt::Debug for ParagraphEntry {
 pub struct ImageEntry {
     pub image_data: std::sync::Arc<Vec<u8>>,
     pub format: crate::image::ImageFormat,
-    pub width: f32,
-    pub height: f32,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
     pub opacity: f32,
     pub visible: bool,
 }
@@ -116,8 +116,8 @@ pub struct ImageEntry {
 #[derive(Debug, Clone)]
 pub struct SvgEntry {
     pub tree: std::sync::Arc<usvg::Tree>,
-    pub width: f32,
-    pub height: f32,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
     pub opacity: f32,
     pub visible: bool,
 }
