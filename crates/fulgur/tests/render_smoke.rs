@@ -18,8 +18,9 @@ use tempfile::tempdir;
 /// root) directly from raw PDF bytes. Robust to whatever delimiter
 /// krilla emits after `/Type /Page` — unlike a fixed `"/Type /Page\n"`
 /// string match, which silently miscounts if the trailing byte ever
-/// changes.
-fn count_pages(pdf: &[u8]) -> usize {
+/// changes. Mirrors the `page_count` helper used by the other
+/// pagination integration tests.
+fn page_count(pdf: &[u8]) -> usize {
     let prefix = b"/Type /Page";
     let mut count = 0;
     let mut i = 0;
@@ -36,6 +37,15 @@ fn count_pages(pdf: &[u8]) -> usize {
         }
     }
     count
+}
+
+/// Render `html` through the v2 pipeline and assert it produced a valid
+/// PDF that paginated (`>= 2` pages). `what` labels the failure case.
+fn assert_paginates(html: &str, what: &str) {
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pages = page_count(&pdf);
+    assert!(pages >= 2, "{what}, got {pages}");
 }
 
 fn check_pdf_snapshot(name: &str, pdf: &[u8]) {
@@ -4883,13 +4893,14 @@ fn render_batch_failure_does_not_abort_siblings() {
 
 // --- P1c (fulgur-2map.5) Fragment->units::Px coverage closure ---
 //
-// These five tests drive `fragment_block_subtree` break-after / depth
-// bail-out paths and `draw_under_opacity`'s split-height path through
-// the full `Engine::render` pipeline. Those Fragment construction
-// sites were previously exercised only by VRT goldens (excluded from
-// the codecov measurement), so the `.px()` / `frag.height.in_pt()`
-// lines showed as uncovered patch lines. See CLAUDE.md "Coverage
-// scope".
+// These four tests drive `fragment_block_subtree`'s break-after arms
+// and `draw_under_opacity`'s split-height path through the full
+// `Engine::render` pipeline. Those Fragment construction sites were
+// previously exercised only by VRT goldens (excluded from the codecov
+// measurement), so the `.px()` / `frag.height.in_pt()` lines showed as
+// uncovered patch lines. See CLAUDE.md "Coverage scope". (The
+// `depth >= MAX_DOM_DEPTH` bail-out is covered by an in-crate unit test
+// in `pagination_layout.rs`, which can call the guard directly.)
 
 /// fulgur-2map.5: an opacity-scoped block with block-level
 /// descendants (non-empty `opacity_descendants`) that itself SPLITS
@@ -4907,13 +4918,7 @@ fn render_v2_smoke_opacity_block_split_uses_per_slice_height_block_children() {
           <div style="height:600px;background:#fce">second block child</div>
         </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render(html).expect("v2 render");
-    assert!(pdf.starts_with(b"%PDF"));
-    let page_count = count_pages(&pdf);
-    assert!(
-        page_count >= 2,
-        "expected multi-page split, got {page_count}"
-    );
+    assert_paginates(html, "expected multi-page split");
 }
 
 /// fulgur-2map.5: a nested block parent whose child carries
@@ -4931,13 +4936,7 @@ fn render_v2_smoke_break_after_child_no_recursion_emits_parent_fragment() {
           <div style="height:80px">after the forced break</div>
         </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render(html).expect("v2 render");
-    assert!(pdf.starts_with(b"%PDF"));
-    let page_count = count_pages(&pdf);
-    assert!(
-        page_count >= 2,
-        "break-after:page must paginate, got {page_count}"
-    );
+    assert_paginates(html, "break-after:page must paginate");
 }
 
 /// fulgur-2map.5: a zero-height child (explicit `height:0`, no
@@ -4954,13 +4953,7 @@ fn render_v2_smoke_break_after_zero_height_child_emits_parent_fragment() {
           <div style="height:80px">after</div>
         </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render(html).expect("v2 render");
-    assert!(pdf.starts_with(b"%PDF"));
-    let page_count = count_pages(&pdf);
-    assert!(
-        page_count >= 2,
-        "zero-height break-after must paginate, got {page_count}"
-    );
+    assert_paginates(html, "zero-height break-after must paginate");
 }
 
 /// fulgur-2map.5: a child that itself recurses (two tall grandchildren
@@ -4979,11 +4972,5 @@ fn render_v2_smoke_break_after_recursing_child_emits_parent_fragment() {
           <div style="height:80px">after</div>
         </div>
     </body></html>"#;
-    let pdf = Engine::builder().build().render(html).expect("v2 render");
-    assert!(pdf.starts_with(b"%PDF"));
-    let page_count = count_pages(&pdf);
-    assert!(
-        page_count >= 2,
-        "recursing break-after must paginate, got {page_count}"
-    );
+    assert_paginates(html, "recursing break-after must paginate");
 }
