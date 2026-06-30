@@ -1495,3 +1495,137 @@ mod semantics_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod utility_fn_tests {
+    //! Unit tests for pure utility functions in this module.
+    //! These exercise branches that the integration tests (semantics_tests,
+    //! bookmark_outline_tests) do not reach because they rely on unusual CSS
+    //! keyword variants or specific URL schemes.
+
+    use super::*;
+
+    // --- css_text_align_to_parley_alignment ---
+
+    #[test]
+    fn text_align_all_variants() {
+        use ::style::values::specified::TextAlignKeyword;
+        let cases: &[(TextAlignKeyword, parley::Alignment)] = &[
+            (TextAlignKeyword::Start, parley::Alignment::Start),
+            (TextAlignKeyword::Left, parley::Alignment::Left),
+            (TextAlignKeyword::Right, parley::Alignment::Right),
+            (TextAlignKeyword::Center, parley::Alignment::Center),
+            (TextAlignKeyword::Justify, parley::Alignment::Justify),
+            (TextAlignKeyword::End, parley::Alignment::End),
+            // Moz* aliases map to their logical equivalents.
+            // These keywords can't be produced from normal author CSS in Stylo
+            // (they originate from internal browser UA/quirks paths), so the
+            // only way to test them is through direct enum construction.
+            (TextAlignKeyword::MozCenter, parley::Alignment::Center),
+            (TextAlignKeyword::MozLeft, parley::Alignment::Left),
+            (TextAlignKeyword::MozRight, parley::Alignment::Right),
+        ];
+        for &(keyword, expected) in cases {
+            assert_eq!(
+                css_text_align_to_parley_alignment(keyword),
+                expected,
+                "keyword {keyword:?} should map to {expected:?}"
+            );
+        }
+    }
+
+    // --- extract_asset_name ---
+
+    #[test]
+    fn extract_asset_name_strips_file_scheme() {
+        assert_eq!(extract_asset_name("file:///foo/bar.png"), "foo/bar.png");
+        assert_eq!(extract_asset_name("file:///"), "");
+    }
+
+    #[test]
+    fn extract_asset_name_passthrough_non_file_url() {
+        assert_eq!(extract_asset_name("logo.png"), "logo.png");
+        assert_eq!(
+            extract_asset_name("http://example.com/img.png"),
+            "http://example.com/img.png"
+        );
+    }
+
+    // --- layout_in_pt ---
+
+    #[test]
+    fn layout_in_pt_converts_px_to_pt() {
+        // 1 CSS px = 0.75 PDF pt, so 4 px → 3 pt, 100 px → 75 pt.
+        let layout = taffy::Layout {
+            location: taffy::geometry::Point { x: 4.0, y: 8.0 },
+            size: taffy::geometry::Size {
+                width: 100.0,
+                height: 200.0,
+            },
+            ..taffy::Layout::new()
+        };
+        let (x, y, w, h) = layout_in_pt(&layout);
+        assert!((x - 3.0).abs() < 1e-4, "x={x}");
+        assert!((y - 6.0).abs() < 1e-4, "y={y}");
+        assert!((w - 75.0).abs() < 1e-4, "w={w}");
+        assert!((h - 150.0).abs() < 1e-4, "h={h}");
+    }
+
+    #[test]
+    fn layout_in_pt_zero_layout_stays_zero() {
+        let layout = taffy::Layout::new();
+        let (x, y, w, h) = layout_in_pt(&layout);
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 0.0);
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
+    }
+
+    // --- size_in_pt ---
+
+    #[test]
+    fn size_in_pt_converts_px_to_pt() {
+        // 80 px → 60 pt, 120 px → 90 pt
+        let size = taffy::geometry::Size {
+            width: 80.0,
+            height: 120.0,
+        };
+        let (w, h) = size_in_pt(size);
+        assert!((w - 60.0).abs() < 1e-4, "w={w}");
+        assert!((h - 90.0).abs() < 1e-4, "h={h}");
+    }
+
+    #[test]
+    fn size_in_pt_zero_size_stays_zero() {
+        let size = taffy::geometry::Size {
+            width: 0.0,
+            height: 0.0,
+        };
+        let (w, h) = size_in_pt(size);
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
+    }
+
+    // --- px_to_pt / pt_to_px roundtrip ---
+
+    #[test]
+    fn px_pt_roundtrip() {
+        for &v in &[0.0f32, 1.0, 12.0, 96.0, 595.0] {
+            let roundtripped = pt_to_px(px_to_pt(v));
+            assert!(
+                (roundtripped - v).abs() < 1e-3,
+                "roundtrip failed for {v}: got {roundtripped}"
+            );
+        }
+    }
+
+    #[test]
+    fn px_to_pt_known_values() {
+        // 1 px = 0.75 pt
+        assert!((px_to_pt(1.0) - 0.75).abs() < 1e-6);
+        // 4 px = 3 pt
+        assert!((px_to_pt(4.0) - 3.0).abs() < 1e-6);
+        // 96 px (1 in) = 72 pt
+        assert!((px_to_pt(96.0) - 72.0).abs() < 1e-4);
+    }
+}
