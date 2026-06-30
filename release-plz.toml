@@ -11,6 +11,9 @@ name = "fulgur-cli"
 version_group = "core"
 publish = true
 
+# git_only: without this, release-plz checks crates.io for these publish=false
+# crates, finds nothing, and they silently drop out of the "core" version_group
+# lockstep (only fulgur/fulgur-cli would get bumped). See fulgur-7b3l notes.
 [[package]]
 name = "fulgur-wasm"
 version_group = "core"
@@ -29,6 +32,9 @@ version_group = "core"
 publish = false
 git_only = true
 
+# release = false fully excludes these test/fixture crates (version 0.0.0) from
+# release-plz entirely — different from publish = false above, which still
+# version-tracks the binding crates via the core version_group.
 [[package]]
 name = "fulgur-vrt"
 release = false
