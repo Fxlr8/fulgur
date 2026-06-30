@@ -14,6 +14,40 @@ use std::path::PathBuf;
 use fulgur::{AssetBundle, Engine};
 use tempfile::tempdir;
 
+/// Count `/Type /Page` objects (excluding the `/Type /Pages` page-tree
+/// root) directly from raw PDF bytes. Robust to whatever delimiter
+/// krilla emits after `/Type /Page` — unlike a fixed `"/Type /Page\n"`
+/// string match, which silently miscounts if the trailing byte ever
+/// changes. Mirrors the `page_count` helper used by the other
+/// pagination integration tests.
+fn page_count(pdf: &[u8]) -> usize {
+    let prefix = b"/Type /Page";
+    let mut count = 0;
+    let mut i = 0;
+    while i + prefix.len() < pdf.len() {
+        if &pdf[i..i + prefix.len()] == prefix {
+            // `/Type /Pages` (the tree root) has an alphanumeric next
+            // byte (`s`); a real page object is followed by a delimiter.
+            if !pdf[i + prefix.len()].is_ascii_alphanumeric() {
+                count += 1;
+            }
+            i += prefix.len();
+        } else {
+            i += 1;
+        }
+    }
+    count
+}
+
+/// Render `html` through the v2 pipeline and assert it produced a valid
+/// PDF that paginated (`>= 2` pages). `what` labels the failure case.
+fn assert_paginates(html: &str, what: &str) {
+    let pdf = Engine::builder().build().render(html).expect("v2 render");
+    assert!(pdf.starts_with(b"%PDF"));
+    let pages = page_count(&pdf);
+    assert!(pages >= 2, "{what}, got {pages}");
+}
+
 fn check_pdf_snapshot(name: &str, pdf: &[u8]) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots");
     std::fs::create_dir_all(&dir).unwrap();
@@ -4855,4 +4889,88 @@ fn render_batch_failure_does_not_abort_siblings() {
         results[1]
     );
     assert!(results[2].is_err(), "item 2 (no title) should fail");
+}
+
+// --- P1c (fulgur-2map.5) Fragment->units::Px coverage closure ---
+//
+// These four tests drive `fragment_block_subtree`'s break-after arms
+// and `draw_under_opacity`'s split-height path through the full
+// `Engine::render` pipeline. Those Fragment construction sites were
+// previously exercised only by VRT goldens (excluded from the codecov
+// measurement), so the `.px()` / `frag.height.in_pt()` lines showed as
+// uncovered patch lines. See CLAUDE.md "Coverage scope". (The
+// `depth >= MAX_DOM_DEPTH` bail-out is covered by an in-crate unit test
+// in `pagination_layout.rs`, which can call the guard directly.)
+
+/// fulgur-2map.5: an opacity-scoped block with block-level
+/// descendants (non-empty `opacity_descendants`) that itself SPLITS
+/// across a page boundary must reach `draw_under_opacity`'s
+/// `is_split && frag.height > Px::ZERO` arm (render.rs ~2065). The
+/// pre-existing split-opacity smoke test wraps an atomic `<svg>`
+/// (shared-node content) which keeps the block a single fragment, so
+/// `is_split` stays false there. Two tall block children guarantee a
+/// real multi-fragment split.
+#[test]
+fn render_v2_smoke_opacity_block_split_uses_per_slice_height_block_children() {
+    let html = r#"<!doctype html><html><body>
+        <div style="opacity:0.5;background:#f0f4ff;border:2px solid #89c">
+          <div style="height:600px;background:#eef">first block child</div>
+          <div style="height:600px;background:#fce">second block child</div>
+        </div>
+    </body></html>"#;
+    assert_paginates(html, "expected multi-page split");
+}
+
+/// fulgur-2map.5: a nested block parent whose child carries
+/// `break-after: page` (a simple leaf child - no recursion) emits a
+/// parent Fragment via `fragment_block_subtree`'s post-fragment
+/// break-after arm (pagination_layout.rs ~2162). The parent is routed
+/// through `fragment_block_subtree` because it has a forced break
+/// below.
+#[test]
+fn render_v2_smoke_break_after_child_no_recursion_emits_parent_fragment() {
+    let html = r#"<!doctype html><html><body>
+        <div style="background:#eef">
+          <div style="height:80px">before the forced break</div>
+          <div style="break-after:page;height:80px">forces a page break after</div>
+          <div style="height:80px">after the forced break</div>
+        </div>
+    </body></html>"#;
+    assert_paginates(html, "break-after:page must paginate");
+}
+
+/// fulgur-2map.5: a zero-height child (explicit `height:0`, no
+/// content) carrying `break-after: page` inside a nested block parent
+/// hits `fragment_block_subtree`'s zero-height break-after arm
+/// (pagination_layout.rs ~1835). The explicit `height:0` keeps the
+/// child out of the positive-height path (~2162).
+#[test]
+fn render_v2_smoke_break_after_zero_height_child_emits_parent_fragment() {
+    let html = r#"<!doctype html><html><body>
+        <div style="background:#eef">
+          <div style="height:80px">before</div>
+          <div style="break-after:page;height:0"></div>
+          <div style="height:80px">after</div>
+        </div>
+    </body></html>"#;
+    assert_paginates(html, "zero-height break-after must paginate");
+}
+
+/// fulgur-2map.5: a child that itself recurses (two tall grandchildren
+/// -> `would_split` true) AND carries `break-after: page` hits
+/// `fragment_block_subtree`'s post-recursion break-after arm
+/// (pagination_layout.rs ~2062).
+#[test]
+fn render_v2_smoke_break_after_recursing_child_emits_parent_fragment() {
+    let html = r#"<!doctype html><html><body>
+        <div style="background:#eef">
+          <div style="height:80px">before</div>
+          <div style="break-after:page;background:#dfe">
+            <div style="height:600px">tall grandchild one</div>
+            <div style="height:600px">tall grandchild two</div>
+          </div>
+          <div style="height:80px">after</div>
+        </div>
+    </body></html>"#;
+    assert_paginates(html, "recursing break-after must paginate");
 }

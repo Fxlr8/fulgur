@@ -264,8 +264,8 @@ fn maybe_apply_abs_pseudo_inset_correction(
     else {
         return;
     };
-    let parent_x_px = parent_frag.x;
-    let parent_y_px = parent_frag.y;
+    let parent_x_px = parent_frag.x.to_f32();
+    let parent_y_px = parent_frag.y.to_f32();
 
     let pseudo_w_px = pt_to_px(pseudo_w_pt);
     let pseudo_h_px = pt_to_px(pseudo_h_pt);
@@ -306,10 +306,10 @@ fn maybe_apply_abs_pseudo_inset_correction(
     entry.fragments.clear();
     entry.fragments.push(crate::pagination_layout::Fragment {
         page_index: parent_frag.page_index,
-        x: new_x_px,
-        y: new_y_px,
-        width: pseudo_w_px,
-        height: pseudo_h_px,
+        x: new_x_px.px(),
+        y: new_y_px.px(),
+        width: pseudo_w_px.px(),
+        height: pseudo_h_px.px(),
     });
 }
 
@@ -1414,7 +1414,7 @@ mod tests {
     ) -> (f32, f32) {
         let geom = geometry.get(&node_id).expect("node missing from geometry");
         let frag = geom.fragments.first().expect("node has no fragments");
-        (frag.x, frag.y)
+        (frag.x.to_f32(), frag.y.to_f32())
     }
 
     // maybe_apply_abs_pseudo_inset_correction: `right` + `bottom` set, `left`

@@ -117,8 +117,8 @@ pub fn render_v2(
             } else {
                 0.0
             };
-            let x_pt = resolved_margin.left + crate::convert::px_to_pt(first_frag.x);
-            let y_pt = resolved_margin.top + body_y_off + crate::convert::px_to_pt(first_frag.y);
+            let x_pt = resolved_margin.left + first_frag.x.in_pt().to_f32();
+            let y_pt = resolved_margin.top + body_y_off + first_frag.y.in_pt().to_f32();
             dest_registry.record(id.as_str(), x_pt, y_pt);
         }
     }
@@ -446,8 +446,6 @@ fn draw_v2_page(
     opacity_wrapped_descendants: &std::collections::BTreeSet<usize>,
     page_node_ids: &[usize],
 ) {
-    use crate::convert::px_to_pt;
-
     // Skip sets and per-page dispatch list are built once in
     // `render_v2`. Walking only `page_node_ids` (instead of the full
     // `geometry` map per page) is what fixes the O(P²) regression
@@ -477,7 +475,7 @@ fn draw_v2_page(
             && let Some(anchor) = drawables.bookmark_anchors.get(&node_id)
             && let Some(c) = canvas.bookmark_collector.as_deref_mut()
         {
-            let y_pt = margin_top_pt + px_to_pt(first_frag.y);
+            let y_pt = margin_top_pt + first_frag.y.in_pt().to_f32();
             c.record(anchor.level, anchor.label.clone(), y_pt);
         }
 
@@ -529,8 +527,8 @@ fn draw_v2_page(
             if frag.page_index != page_index {
                 continue;
             }
-            let x_pt = margin_left_pt + px_to_pt(frag.x);
-            let y_pt = margin_top_pt + px_to_pt(frag.y);
+            let x_pt = margin_left_pt + frag.x.in_pt().to_f32();
+            let y_pt = margin_top_pt + frag.y.in_pt().to_f32();
 
             if let Some(tx) = drawables.transforms.get(&node_id) {
                 draw_under_transform(
@@ -749,8 +747,6 @@ pub(crate) fn dispatch_inline_box_content(
     page_index: u32,
     inline_box_subtree_descendants: &std::collections::BTreeMap<usize, Vec<usize>>,
 ) {
-    use crate::convert::px_to_pt;
-
     if let Some(tx) = drawables.transforms.get(&content_id) {
         draw_under_transform(
             canvas,
@@ -835,8 +831,10 @@ pub(crate) fn dispatch_inline_box_content(
             else {
                 continue;
             };
-            let desc_x_pt = margin_left_pt + drawables.body_offset_pt.0 + px_to_pt(desc_frag.x);
-            let desc_y_pt = margin_top_pt + drawables.body_offset_pt.1 + px_to_pt(desc_frag.y);
+            let desc_x_pt =
+                margin_left_pt + drawables.body_offset_pt.0 + desc_frag.x.in_pt().to_f32();
+            let desc_y_pt =
+                margin_top_pt + drawables.body_offset_pt.1 + desc_frag.y.in_pt().to_f32();
             dispatch_fragment(
                 canvas,
                 desc_id,
@@ -1196,7 +1194,6 @@ fn paint_multicol_paragraph_slices(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    use crate::convert::px_to_pt;
     use crate::draw_primitives::draw_with_opacity;
     let Some(slices_entry) = drawables.paragraph_slices.get(&source_node_id) else {
         return;
@@ -1229,16 +1226,16 @@ fn paint_multicol_paragraph_slices(
     // a slice's effective top in the current fragment frame is
     // `slice.origin_pt.1 - consumed`. `cutoff` is the visible strip's
     // height on this page.
-    let consumed: f32 = px_to_pt(
-        container_geom.fragments[..target_pos]
-            .iter()
-            .map(|f| f.height)
-            .sum::<f32>(),
-    );
-    let cutoff = px_to_pt(target_frag.height);
+    let consumed: f32 = container_geom.fragments[..target_pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<crate::units::Px>()
+        .in_pt()
+        .to_f32();
+    let cutoff = target_frag.height.in_pt().to_f32();
 
-    let container_x_pt = margin_left_pt + px_to_pt(target_frag.x);
-    let container_y_pt = margin_top_pt + px_to_pt(target_frag.y);
+    let container_x_pt = margin_left_pt + target_frag.x.in_pt().to_f32();
+    let container_y_pt = margin_top_pt + target_frag.y.in_pt().to_f32();
 
     // Single-fragment containers (the common case) keep the original
     // behaviour: paint every slice at `container_origin + origin_pt`,
@@ -1323,8 +1320,6 @@ fn draw_under_transform(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    use crate::convert::px_to_pt;
-
     // `effective_matrix` mirrors `TransformWrapperPageable::effective_matrix`:
     //   T(x + ox, y + oy) · M · T(-(x + ox), -(y + oy))
     let ox = x_pt + tx.origin.x;
@@ -1432,8 +1427,8 @@ fn draw_under_transform(
             if desc_frag.page_index != page_index {
                 continue;
             }
-            let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
-            let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+            let desc_x = margin_left_pt + desc_frag.x.in_pt().to_f32();
+            let desc_y = margin_top_pt + desc_frag.y.in_pt().to_f32();
             if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
                 draw_under_transform(
                     canvas,
@@ -1630,13 +1625,12 @@ fn draw_under_clip(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    use crate::convert::px_to_pt;
     use crate::draw_primitives::draw_with_opacity;
 
     let total_width = block
         .layout_size
         .map(|s| s.width.to_f32())
-        .unwrap_or_else(|| px_to_pt(frag.width));
+        .unwrap_or_else(|| frag.width.in_pt().to_f32());
     // Mirror `draw_block_inner_paint` / `draw_under_opacity`'s
     // `is_split` height fix. When this `overflow: hidden | clip`
     // block spans multiple pages (one fragment per page slice), use
@@ -1651,13 +1645,13 @@ fn draw_under_clip(
     let total_height = block
         .layout_size
         .map(|s| {
-            if is_split && frag.height > 0.0 {
-                px_to_pt(frag.height)
+            if is_split && frag.height > crate::units::Px::ZERO {
+                frag.height.in_pt().to_f32()
             } else {
                 s.height.to_f32()
             }
         })
-        .unwrap_or_else(|| px_to_pt(frag.height));
+        .unwrap_or_else(|| frag.height.in_pt().to_f32());
 
     let para_for_block = drawables.paragraphs.get(&node_id);
     let img_for_block = drawables.images.get(&node_id);
@@ -1847,8 +1841,8 @@ fn draw_under_clip(
                 if desc_frag.page_index != page_index {
                     continue;
                 }
-                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
-                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                let desc_x = margin_left_pt + desc_frag.x.in_pt().to_f32();
+                let desc_y = margin_top_pt + desc_frag.y.in_pt().to_f32();
                 if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
                     draw_under_transform(
                         canvas,
@@ -1997,7 +1991,6 @@ fn draw_under_opacity(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    use crate::convert::px_to_pt;
     use crate::draw_primitives::draw_with_opacity;
 
     draw_with_opacity(canvas, block.opacity, |canvas| {
@@ -2053,7 +2046,7 @@ fn draw_under_opacity(
             let total_width = block
                 .layout_size
                 .map(|s| s.width.to_f32())
-                .unwrap_or_else(|| px_to_pt(frag.width));
+                .unwrap_or_else(|| frag.width.in_pt().to_f32());
             // Mirror `draw_block_inner_paint`'s `is_split` height fix.
             // When this opacity-scoped block spans multiple pages
             // (one fragment per page slice), use `frag.height` so each
@@ -2067,13 +2060,13 @@ fn draw_under_opacity(
             let total_height = block
                 .layout_size
                 .map(|s| {
-                    if is_split && frag.height > 0.0 {
-                        px_to_pt(frag.height)
+                    if is_split && frag.height > crate::units::Px::ZERO {
+                        frag.height.in_pt().to_f32()
                     } else {
                         s.height.to_f32()
                     }
                 })
-                .unwrap_or_else(|| px_to_pt(frag.height));
+                .unwrap_or_else(|| frag.height.in_pt().to_f32());
             if block.visible {
                 crate::background::draw_box_shadows(
                     canvas,
@@ -2187,8 +2180,8 @@ fn draw_under_opacity(
                 if desc_frag.page_index != page_index {
                     continue;
                 }
-                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
-                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                let desc_x = margin_left_pt + desc_frag.x.in_pt().to_f32();
+                let desc_y = margin_top_pt + desc_frag.y.in_pt().to_f32();
                 if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
                     draw_under_transform(
                         canvas,
@@ -2315,13 +2308,12 @@ fn paint_multicol_rule_for_page(
     let consumed = container_geom.fragments[..target_pos]
         .iter()
         .map(|f| f.height)
-        .sum::<f32>()
-        .px()
+        .sum::<crate::units::Px>()
         .in_pt();
-    let cutoff = target_frag.height.px().in_pt();
+    let cutoff = target_frag.height.in_pt();
 
-    let x_base = margin_left_pt.pt() + target_frag.x.px().in_pt();
-    let y_base = margin_top_pt.pt() + target_frag.y.px().in_pt();
+    let x_base = margin_left_pt.pt() + target_frag.x.in_pt();
+    let y_base = margin_top_pt.pt() + target_frag.y.in_pt();
 
     for group in &entry.groups {
         if group.n < 2 || group.col_heights.len() != group.n as usize {
@@ -2598,7 +2590,7 @@ fn draw_block_inner_paint(
     let total_width = entry
         .layout_size
         .map(|s| s.width.to_f32())
-        .unwrap_or_else(|| crate::convert::px_to_pt(frag.width));
+        .unwrap_or_else(|| frag.width.in_pt().to_f32());
     // For split blocks (one fragment per page), `frag.height` reports
     // the per-page slice height. `entry.layout_size.height` always
     // carries Taffy's full block height, so painting bg / border with
@@ -2620,13 +2612,13 @@ fn draw_block_inner_paint(
     let total_height = entry
         .layout_size
         .map(|s| {
-            if is_split && frag.height > 0.0 {
-                crate::convert::px_to_pt(frag.height)
+            if is_split && frag.height > crate::units::Px::ZERO {
+                frag.height.in_pt().to_f32()
             } else {
                 s.height.to_f32()
             }
         })
-        .unwrap_or_else(|| crate::convert::px_to_pt(frag.height));
+        .unwrap_or_else(|| frag.height.in_pt().to_f32());
 
     if entry.visible {
         crate::background::draw_box_shadows(canvas, &entry.style, x, y, total_width, total_height);
@@ -2683,7 +2675,7 @@ fn table_box_size(
         .layout_size
         .map(|s| s.height.to_f32())
         .unwrap_or_else(|| {
-            let from_frag = crate::convert::px_to_pt(frag.height);
+            let from_frag = frag.height.in_pt().to_f32();
             if from_frag > 0.0 {
                 from_frag
             } else {
@@ -2735,7 +2727,6 @@ fn draw_under_clip_table(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    use crate::convert::px_to_pt;
     use crate::draw_primitives::draw_with_opacity;
 
     let _ = geom;
@@ -2815,8 +2806,8 @@ fn draw_under_clip_table(
                 if desc_frag.page_index != page_index {
                     continue;
                 }
-                let desc_x = margin_left_pt + px_to_pt(desc_frag.x);
-                let desc_y = margin_top_pt + px_to_pt(desc_frag.y);
+                let desc_x = margin_left_pt + desc_frag.x.in_pt().to_f32();
+                let desc_y = margin_top_pt + desc_frag.y.in_pt().to_f32();
                 if let Some(desc_tx) = drawables.transforms.get(&desc_id) {
                     draw_under_transform(
                         canvas,
@@ -3236,12 +3227,11 @@ fn paragraph_lines_for_page(
         return Some(all_lines.to_vec());
     }
 
-    let target_h = fragments[target_pos].height.px().in_pt();
+    let target_h = fragments[target_pos].height.in_pt();
     let consumed: crate::units::Pt = fragments[..target_pos]
         .iter()
         .map(|f| f.height)
-        .sum::<f32>()
-        .px()
+        .sum::<crate::units::Px>()
         .in_pt();
 
     let eps = 0.01_f32.pt();
@@ -4477,10 +4467,10 @@ mod tests {
     fn make_fragment(page_index: u32, height: f32) -> crate::pagination_layout::Fragment {
         crate::pagination_layout::Fragment {
             page_index,
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 100.0_f32.px(),
+            height: height.px(),
         }
     }
 
@@ -4755,10 +4745,10 @@ mod tests {
     fn make_frag_with_height(height: f32) -> crate::pagination_layout::Fragment {
         crate::pagination_layout::Fragment {
             page_index: 0,
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height,
+            x: 0.0_f32.px(),
+            y: 0.0_f32.px(),
+            width: 0.0_f32.px(),
+            height: height.px(),
         }
     }
 

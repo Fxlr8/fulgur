@@ -201,6 +201,7 @@ pub fn page_for_node(geometry: &PaginationGeometryTable, node_id: usize) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::F32Units;
 
     fn make_map() -> AnchorMap {
         let mut m = AnchorMap::new();
@@ -399,17 +400,17 @@ mod tests {
                 fragments: vec![
                     Fragment {
                         page_index: 2,
-                        x: 0.0,
-                        y: 0.0,
-                        width: 0.0,
-                        height: 0.0,
+                        x: 0.0_f32.px(),
+                        y: 0.0_f32.px(),
+                        width: 0.0_f32.px(),
+                        height: 0.0_f32.px(),
                     },
                     Fragment {
                         page_index: 3,
-                        x: 0.0,
-                        y: 0.0,
-                        width: 0.0,
-                        height: 0.0,
+                        x: 0.0_f32.px(),
+                        y: 0.0_f32.px(),
+                        width: 0.0_f32.px(),
+                        height: 0.0_f32.px(),
                     },
                 ],
                 is_repeat: false,

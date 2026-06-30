@@ -135,6 +135,12 @@ impl_unit_arith!(Px);
 impl_unit_arith!(Pt);
 
 impl Px {
+    /// The zero length. Use instead of `0.0_f32.px()` for sign comparisons
+    /// (`x > Px::ZERO`); the private field means `Px(0.0)` is not
+    /// constructible outside this module. (`Px` has no `max`/`min` yet —
+    /// add them, mirroring `Pt`, when a clamp idiom first needs them.)
+    pub const ZERO: Px = Px(0.0);
+
     /// Raw `f32` value. Use only at FFI boundaries.
     #[inline]
     pub const fn to_f32(self) -> f32 {
@@ -249,6 +255,14 @@ mod tests {
                 .fold(Pt(0.0), Pt::max),
             Pt(2.0)
         );
+    }
+
+    #[test]
+    fn px_zero_is_zero() {
+        assert_eq!(Px::ZERO, Px(0.0));
+        assert!(Px(1.0) > Px::ZERO);
+        // boundary: zero is not strictly greater than zero (the `> Px::ZERO` idiom)
+        assert!(Px(0.0) <= Px::ZERO);
     }
 
     #[test]
