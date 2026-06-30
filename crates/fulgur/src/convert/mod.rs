@@ -1565,10 +1565,10 @@ mod utility_fn_tests {
             ..taffy::Layout::new()
         };
         let (x, y, w, h) = layout_in_pt(&layout);
-        assert!((x - 3.0).abs() < 1e-4, "x={x}");
-        assert!((y - 6.0).abs() < 1e-4, "y={y}");
-        assert!((w - 75.0).abs() < 1e-4, "w={w}");
-        assert!((h - 150.0).abs() < 1e-4, "h={h}");
+        assert_eq!(x, 3.0);
+        assert_eq!(y, 6.0);
+        assert_eq!(w, 75.0);
+        assert_eq!(h, 150.0);
     }
 
     #[test]
@@ -1591,8 +1591,8 @@ mod utility_fn_tests {
             height: 120.0,
         };
         let (w, h) = size_in_pt(size);
-        assert!((w - 60.0).abs() < 1e-4, "w={w}");
-        assert!((h - 90.0).abs() < 1e-4, "h={h}");
+        assert_eq!(w, 60.0);
+        assert_eq!(h, 90.0);
     }
 
     #[test]
@@ -1622,10 +1622,10 @@ mod utility_fn_tests {
     #[test]
     fn px_to_pt_known_values() {
         // 1 px = 0.75 pt
-        assert!((px_to_pt(1.0) - 0.75).abs() < 1e-6);
+        assert_eq!(px_to_pt(1.0), 0.75);
         // 4 px = 3 pt
-        assert!((px_to_pt(4.0) - 3.0).abs() < 1e-6);
+        assert_eq!(px_to_pt(4.0), 3.0);
         // 96 px (1 in) = 72 pt
-        assert!((px_to_pt(96.0) - 72.0).abs() < 1e-4);
+        assert_eq!(px_to_pt(96.0), 72.0);
     }
 }
