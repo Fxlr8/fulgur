@@ -1,0 +1,35 @@
+[workspace]
+release = true
+
+[[package]]
+name = "fulgur"
+version_group = "core"
+publish = true
+
+[[package]]
+name = "fulgur-cli"
+version_group = "core"
+publish = true
+
+[[package]]
+name = "fulgur-wasm"
+version_group = "core"
+publish = false
+
+[[package]]
+name = "pyfulgur"
+version_group = "core"
+publish = false
+
+[[package]]
+name = "fulgur-ruby"
+version_group = "core"
+publish = false
+
+[[package]]
+name = "fulgur-vrt"
+release = false
+
+[[package]]
+name = "fulgur-wpt"
+release = false
