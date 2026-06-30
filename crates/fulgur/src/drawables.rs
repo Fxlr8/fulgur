@@ -163,15 +163,15 @@ pub enum ListItemMarker {
     /// Text marker with shaped glyph runs extracted from Blitz/Parley.
     Text {
         lines: Vec<crate::paragraph::ShapedLine>,
-        width: f32,
+        width: crate::units::Pt,
     },
     /// Image marker (`list-style-image: url(...)`) — raster or SVG.
     Image {
         marker: ImageMarker,
         /// Display width after clamp (pt).
-        width: f32,
+        width: crate::units::Pt,
         /// Display height after clamp (pt).
-        height: f32,
+        height: crate::units::Pt,
     },
     /// No marker — split trailing fragment or `list-style-type: none`.
     None,
@@ -184,7 +184,7 @@ pub enum ListItemMarker {
 #[derive(Clone)]
 pub struct ListItemEntry {
     pub marker: ListItemMarker,
-    pub marker_line_height: f32,
+    pub marker_line_height: crate::units::Pt,
     pub opacity: f32,
     pub visible: bool,
 }
@@ -469,6 +469,7 @@ impl Drawables {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::F32Units;
 
     #[test]
     fn drawables_default_is_empty() {
@@ -513,9 +514,9 @@ mod tests {
         let entry = ListItemEntry {
             marker: ListItemMarker::Text {
                 lines: Vec::new(),
-                width: 0.0,
+                width: 0.0_f32.pt(),
             },
-            marker_line_height: 12.0,
+            marker_line_height: 12.0_f32.pt(),
             opacity: 1.0,
             visible: true,
         };

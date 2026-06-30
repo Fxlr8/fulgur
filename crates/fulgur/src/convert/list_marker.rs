@@ -81,8 +81,8 @@ pub(super) fn resolve_list_marker(
             };
             Some(ListItemMarker::Image {
                 marker: ImageMarker::Raster(entry),
-                width,
-                height,
+                width: width.pt(),
+                height: height.pt(),
             })
         }
         AssetKind::Svg => {
@@ -101,8 +101,8 @@ pub(super) fn resolve_list_marker(
             };
             Some(ListItemMarker::Image {
                 marker: ImageMarker::Svg(entry),
-                width,
-                height,
+                width: width.pt(),
+                height: height.pt(),
             })
         }
         AssetKind::Unknown => None,

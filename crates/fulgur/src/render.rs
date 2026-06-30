@@ -3083,15 +3083,21 @@ fn draw_list_item_marker(
 
     match &entry.marker {
         ListItemMarker::Text { lines, width } if !lines.is_empty() => {
-            crate::paragraph::draw_shaped_lines(canvas, lines, (x - *width).pt(), y.pt(), None);
+            crate::paragraph::draw_shaped_lines(
+                canvas,
+                lines,
+                (x - width.to_f32()).pt(),
+                y.pt(),
+                None,
+            );
         }
         ListItemMarker::Image {
             marker,
             width,
             height,
         } => {
-            let marker_x = x - *width;
-            let marker_y = y + (entry.marker_line_height - *height) / 2.0;
+            let marker_x = x - width.to_f32();
+            let marker_y = (y.pt() + (entry.marker_line_height - *height) / 2.0).to_f32();
             match marker {
                 ImageMarker::Raster(img) => draw_image_v2(canvas, img, marker_x, marker_y),
                 ImageMarker::Svg(svg) => draw_svg_v2(canvas, svg, marker_x, marker_y),
