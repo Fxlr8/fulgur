@@ -48,24 +48,43 @@ Helper definitions: `convert.rs:37-63`
 
 ## Exception: `compute_transform` arguments
 
-`blitz_adapter::compute_transform(styles, border_box_width, border_box_height)` takes
-`border_box_width` / `border_box_height` in **CSS px** — do not convert.
-Stylo's `length-percentage` resolution operates in CSS px space.
-The returned `Affine2D.e`/`.f` (translate components) are also in CSS px;
-the call site in `convert.rs` folds them into pt-space later.
+`blitz_adapter::compute_transform(styles, border_box_width, border_box_height)` is the one
+place that runs Stylo length resolution in **pt space, not px**. The parameters are still
+bare `f32`, but the `convert/mod.rs` call site feeds them **pt-valued** dims —
+`size_in_pt(node.final_layout.size)` (see the "PR 8i note" near `convert/mod.rs:605`).
+There is **no later px → pt fold**: the matrix and origin are produced and consumed as pt.
+
+Why feeding pt works: Stylo's `LengthPercentage::resolve` is unit-agnostic — a `Length` is
+just a number. Resolving against the pt-valued basis makes `%` translates and
+`transform-origin` come out correct against a pt basis. Absolute lengths ignore the basis
+and pass through as their numeric value, which the render path then treats as pt.
+
+The returned `Affine2D.e`/`.f` (translate components) and the `Point2` origin are now typed
+`units::Pt` (pt space) and are consumed directly by `render::draw_under_transform`.
+**Do not add `.in_pt()` to them** — they are already pt.
+
+Known consequence (out of scope for the typing migration): an absolute-length
+`translate(Npx)` ends up as `N` **pt**, a latent 4/3 over-shift, because the px value is
+reinterpreted as pt with no conversion. That is a behavior bug tracked separately — the
+`Pt` typing reflects today's reality, it does not change or fix it.
 
 ## Stylo length-percentage resolution
 
-`LengthPercentage::resolve(basis: Length)` — `basis` must be in **CSS px**.
-Passing a pt value produces a 3/4× error.
+For **layout-space** resolves (positioned insets, pseudo offsets, border-radius,
+viewport-relative lengths), `LengthPercentage::resolve(basis: Length)` — `basis` must be in
+**CSS px**. Passing a pt value produces a 3/4× error.
 
 ```rust
 // WRONG: pt basis
-origin.horizontal.resolve(Length::new(border_box_width_pt))
+inset.resolve(Length::new(cb_width_pt)).px()
 
 // CORRECT: px basis (layout values are CSS px)
-origin.horizontal.resolve(Length::new(border_box_width_px))
+inset.resolve(Length::new(cb_width_px)).px()
 ```
+
+The `transform` path is the deliberate exception to this rule: it resolves against a **pt**
+basis and uses the result directly as pt — see *Exception: `compute_transform` arguments*
+above.
 
 ## Krilla / Pageable coordinate system
 
