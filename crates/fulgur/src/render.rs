@@ -113,7 +113,7 @@ pub fn render_v2(
             // applied, and only on page 0 (continuation pages are already
             // page-content-area-relative after the fragmenter resets cursor_y).
             let body_y_off = if page_idx == 0 {
-                drawables.body_offset_pt.1
+                drawables.body_offset_pt.1.to_f32()
             } else {
                 0.0
             };
@@ -258,14 +258,14 @@ pub fn render_v2(
                     let content_area_h =
                         page_size.height - resolved_margin.top - resolved_margin.bottom;
                     let body_bg_y = if page_idx == 0 {
-                        resolved_margin.top + drawables.body_offset_pt.1
+                        resolved_margin.top + drawables.body_offset_pt.1.to_f32()
                     } else {
                         resolved_margin.top
                     };
                     paint_root_block_v2(
                         &mut canvas,
                         body_block,
-                        resolved_margin.left + drawables.body_offset_pt.0,
+                        resolved_margin.left + drawables.body_offset_pt.0.to_f32(),
                         body_bg_y,
                         Some(content_area_h),
                     );
@@ -277,7 +277,7 @@ pub fn render_v2(
                 // resets cursor_y=0 per page so fragments are already
                 // page-content-area-relative and the offset must not apply.
                 let body_top_pt = if page_idx == 0 {
-                    resolved_margin.top + drawables.body_offset_pt.1
+                    resolved_margin.top + drawables.body_offset_pt.1.to_f32()
                 } else {
                     resolved_margin.top
                 };
@@ -835,8 +835,10 @@ pub(crate) fn dispatch_inline_box_content(
             else {
                 continue;
             };
-            let desc_x_pt = margin_left_pt + drawables.body_offset_pt.0 + px_to_pt(desc_frag.x);
-            let desc_y_pt = margin_top_pt + drawables.body_offset_pt.1 + px_to_pt(desc_frag.y);
+            let desc_x_pt =
+                margin_left_pt + drawables.body_offset_pt.0.to_f32() + px_to_pt(desc_frag.x);
+            let desc_y_pt =
+                margin_top_pt + drawables.body_offset_pt.1.to_f32() + px_to_pt(desc_frag.y);
             dispatch_fragment(
                 canvas,
                 desc_id,

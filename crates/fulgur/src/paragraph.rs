@@ -827,10 +827,10 @@ pub fn draw_shaped_lines(
                         // shift the whole subtree to the inline-flow
                         // position `(ox, oy)`.
                         let geo_x_pt = ctx.margin_left_pt
-                            + ctx.drawables.body_offset_pt.0
+                            + ctx.drawables.body_offset_pt.0.to_f32()
                             + crate::convert::px_to_pt(content_frag.x);
                         let geo_y_pt = ctx.margin_top_pt
-                            + ctx.drawables.body_offset_pt.1
+                            + ctx.drawables.body_offset_pt.1.to_f32()
                             + crate::convert::px_to_pt(content_frag.y);
                         let off_x = ox.to_f32() - geo_x_pt;
                         let off_y = oy.to_f32() - geo_y_pt;

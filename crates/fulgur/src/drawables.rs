@@ -327,7 +327,7 @@ pub struct Drawables {
     /// downstream slicing logic depends on that — keeping it relative
     /// in geometry but absolute on Drawables avoids touching the
     /// fragmenter contract.
-    pub body_offset_pt: (f32, f32),
+    pub body_offset_pt: (crate::units::Pt, crate::units::Pt),
     /// `true` when the root element (`<html>`) has `direction: rtl`.
     /// CSS Paged Media §5 specifies that when the root element is RTL
     /// the first page is a `:left` page instead of `:right`.
@@ -404,7 +404,7 @@ pub struct Drawables {
 impl Default for Drawables {
     fn default() -> Self {
         Self {
-            body_offset_pt: (0.0, 0.0),
+            body_offset_pt: (crate::units::Pt::ZERO, crate::units::Pt::ZERO),
             root_dir_rtl: false,
             root_id: None,
             body_id: None,
