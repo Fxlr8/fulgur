@@ -1,0 +1,101 @@
+name: Release-plz
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # release-plz itself pushes to the PR branch via the GitHub API using
+          # the GITHUB_TOKEN env var below, but the aux-file-sync step further
+          # down uses the git CLI directly and needs persisted credentials to
+          # push (see release-plz docs/github/persist-credentials.md).
+          persist-credentials: true
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-fulgur
+          save-if: false
+
+      - name: Run release-plz release-pr
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: ruby/setup-ruby@v1.312.0
+        if: fromJSON(steps.release-plz.outputs.pr).number
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+
+      - name: Sync auxiliary version files onto the release PR branch
+        if: fromJSON(steps.release-plz.outputs.pr).number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          PR_NUMBER=${{ fromJSON(steps.release-plz.outputs.pr).number }}
+          gh pr checkout "$PR_NUMBER"
+
+          VERSION=$(grep '^version = ' crates/fulgur/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || {
+            echo "::error::Failed to extract a valid version from crates/fulgur/Cargo.toml"
+            exit 1
+          }
+
+          # Mirrors the sed steps release-prepare.yml used to run — release-plz
+          # only updates Cargo.toml/Cargo.lock/CHANGELOG.md, it has no hook to
+          # touch these non-Cargo manifests (confirmed in fulgur-7b3l notes).
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/pyfulgur/pyproject.toml
+          grep -Eq "^version = \"$VERSION\"$" crates/pyfulgur/pyproject.toml || {
+            echo "::error::Failed to sync version in crates/pyfulgur/pyproject.toml"
+            exit 1
+          }
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" crates/fulgur-ruby/ext/fulgur/Cargo.toml
+          grep -Eq "^version = \"$VERSION\"$" crates/fulgur-ruby/ext/fulgur/Cargo.toml || {
+            echo "::error::Failed to sync version in crates/fulgur-ruby/ext/fulgur/Cargo.toml"
+            exit 1
+          }
+          sed -i "s/^fulgur = \"[^\"]*\"$/fulgur = \"$VERSION\"/" crates/fulgur-ruby/ext/fulgur/Cargo.toml
+          grep -Eq "^fulgur = \"$VERSION\"$" crates/fulgur-ruby/ext/fulgur/Cargo.toml || {
+            echo "::error::Failed to sync fulgur dependency version in crates/fulgur-ruby/ext/fulgur/Cargo.toml"
+            exit 1
+          }
+          sed -i "s/VERSION = \".*\"/VERSION = \"$VERSION\"/" crates/fulgur-ruby/lib/fulgur/version.rb
+          grep -Eq "^[[:space:]]*VERSION = \"$VERSION\"$" crates/fulgur-ruby/lib/fulgur/version.rb || {
+            echo "::error::Failed to sync version in crates/fulgur-ruby/lib/fulgur/version.rb"
+            exit 1
+          }
+
+          (cd crates/fulgur-ruby && bundle install)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: sync auxiliary version files to $VERSION" || echo "no changes to sync"
+          git push
