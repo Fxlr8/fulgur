@@ -49,6 +49,11 @@ git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_enable = true
 git_release_name = "v{{ version }}"
+# Keep the release-plz.yml `release` job's GH Release as draft until
+# release.yml's build-binaries/release jobs attach platform binaries and
+# flip it to non-draft — preserves the existing release-prepare.yml /
+# release.yml ordering (binaries before the release is publicly visible).
+git_release_draft = true
 
 [[package]]
 name = "fulgur-cli"
