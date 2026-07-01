@@ -476,7 +476,7 @@ fn draw_v2_page(
             && let Some(c) = canvas.bookmark_collector.as_deref_mut()
         {
             let y_pt = margin_top_pt + first_frag.y.in_pt().to_f32();
-            c.record(anchor.level, anchor.label.clone(), y_pt);
+            c.record(anchor.level, anchor.label.clone(), y_pt.pt());
         }
 
         if transformed_descendants.contains(&node_id) {

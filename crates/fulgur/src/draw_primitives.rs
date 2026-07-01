@@ -940,7 +940,7 @@ impl BlockStyle {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BookmarkEntry {
     pub page_idx: usize,
-    pub y_pt: Pt,
+    pub y_pt: crate::units::Pt,
     pub level: u8,
     pub label: String,
 }
@@ -963,7 +963,7 @@ impl BookmarkCollector {
         self.current_page_idx = idx;
     }
 
-    pub fn record(&mut self, level: u8, label: String, y_pt: Pt) {
+    pub fn record(&mut self, level: u8, label: String, y_pt: crate::units::Pt) {
         self.entries.push(BookmarkEntry {
             page_idx: self.current_page_idx,
             y_pt,
@@ -2144,16 +2144,16 @@ mod dp_unit_tests {
     fn bookmark_collector_records_on_correct_page() {
         let mut bc = BookmarkCollector::new();
         bc.set_current_page(2);
-        bc.record(1, "Chapter One".to_string(), 100.0);
+        bc.record(1, "Chapter One".to_string(), 100.0.pt());
         bc.set_current_page(5);
-        bc.record(2, "Section 5.1".to_string(), 42.0);
+        bc.record(2, "Section 5.1".to_string(), 42.0.pt());
 
         let entries = bc.into_entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].page_idx, 2);
         assert_eq!(entries[0].level, 1);
         assert_eq!(entries[0].label, "Chapter One");
-        assert!((entries[0].y_pt - 100.0).abs() < 1e-5);
+        assert!((entries[0].y_pt.to_f32() - 100.0).abs() < 1e-5);
         assert_eq!(entries[1].page_idx, 5);
         assert_eq!(entries[1].level, 2);
         assert_eq!(entries[1].label, "Section 5.1");

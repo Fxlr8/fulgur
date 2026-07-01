@@ -4,7 +4,7 @@ use krilla::destination::XyzDestination;
 use krilla::geom::Point;
 use krilla::outline::{Outline, OutlineNode};
 
-use crate::draw_primitives::{BookmarkEntry, Pt};
+use crate::draw_primitives::BookmarkEntry;
 
 /// Intermediate, testable tree node. Converted to `OutlineNode` by
 /// `to_krilla_node` before being attached to an `Outline`.
@@ -18,7 +18,7 @@ pub(crate) struct TreeNode {
     #[allow(dead_code)]
     pub level: u8,
     pub page_idx: usize,
-    pub y_pt: Pt,
+    pub y_pt: crate::units::Pt,
     pub children: Vec<TreeNode>,
 }
 
@@ -89,7 +89,7 @@ pub fn build_outline(entries: &[BookmarkEntry]) -> Outline {
 }
 
 fn to_krilla_node(node: TreeNode) -> OutlineNode {
-    let dest = XyzDestination::new(node.page_idx, Point::from_xy(0.0, node.y_pt));
+    let dest = XyzDestination::new(node.page_idx, Point::from_xy(0.0, node.y_pt.to_f32()));
     let mut o = OutlineNode::new(node.label, dest);
     for child in node.children {
         o.push_child(to_krilla_node(child));
@@ -100,8 +100,9 @@ fn to_krilla_node(node: TreeNode) -> OutlineNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::F32Units;
 
-    fn entry(page: usize, y: Pt, level: u8, label: &str) -> BookmarkEntry {
+    fn entry(page: usize, y: crate::units::Pt, level: u8, label: &str) -> BookmarkEntry {
         BookmarkEntry {
             page_idx: page,
             y_pt: y,
@@ -130,10 +131,10 @@ mod tests {
     #[test]
     fn simple_hierarchy() {
         let entries = vec![
-            entry(0, 10.0, 1, "Chapter 1"),
-            entry(0, 50.0, 2, "Section 1.1"),
-            entry(1, 10.0, 2, "Section 1.2"),
-            entry(2, 10.0, 1, "Chapter 2"),
+            entry(0, 10.0.pt(), 1, "Chapter 1"),
+            entry(0, 50.0.pt(), 2, "Section 1.1"),
+            entry(1, 10.0.pt(), 2, "Section 1.2"),
+            entry(2, 10.0.pt(), 1, "Chapter 2"),
         ];
         let tree = build_tree(&entries);
         let debug: Vec<_> = tree.iter().map(to_debug).collect();
@@ -171,7 +172,7 @@ mod tests {
 
     #[test]
     fn orphan_h3_becomes_top_level_when_stack_empty() {
-        let entries = vec![entry(0, 10.0, 3, "Stray")];
+        let entries = vec![entry(0, 10.0.pt(), 3, "Stray")];
         let tree = build_tree(&entries);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].label, "Stray");
@@ -181,7 +182,7 @@ mod tests {
 
     #[test]
     fn skipped_level_nests_under_nearest_shallower() {
-        let entries = vec![entry(0, 10.0, 1, "A"), entry(0, 50.0, 3, "A.x")];
+        let entries = vec![entry(0, 10.0.pt(), 1, "A"), entry(0, 50.0.pt(), 3, "A.x")];
         let tree = build_tree(&entries);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].children.len(), 1);
