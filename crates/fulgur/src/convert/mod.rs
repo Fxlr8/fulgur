@@ -604,21 +604,22 @@ fn record_transform(
     };
     // PR 8i note: `compute_transform` is documented to take CSS px (per
     // `.claude/rules/coordinate-system.md` and Stylo's `LengthPercentage`
-    // contract). The render path (`render::draw_under_transform`), however,
-    // treats both the resulting `origin` Point2 and any translate components
-    // baked into the matrix as PDF pt — they are added directly to pt-space
-    // fragment positions. v1 worked around this mismatch by feeding pt-valued
-    // dims to `compute_transform`, making it self-consistent at the cost of
-    // technically violating the Stylo contract (Length is unitless from
-    // Stylo's perspective, so the math still holds — only `%` resolution
-    // would behave differently against a pt basis vs px basis, and
-    // `transform-origin: 50%` round-trips identically through either basis).
+    // contract), but is fed pt-valued box dims below (`width_pt`/`height_pt`),
+    // technically violating that contract. This is intentional and remains
+    // correct for percentage resolution (Length is unitless from Stylo's
+    // perspective, so `%` round-trips identically against a pt basis or a
+    // px basis — `transform-origin: 50%` is unaffected either way).
     //
-    // To keep PR 8i non-regressive, restore v1's pt feed. Plumbing px →
-    // origin → pt conversion through render is a separate cleanup tracked
-    // for a future PR (see `render::draw_under_transform`'s consumer of
-    // `tx.origin`). Re-enabled by `transform_integration::
-    // rotate_90_at_default_center_origin_fixes_center`.
+    // Absolute-length components (`translate(Npx)`, `matrix()` tx/ty,
+    // `transform-origin: Npx ...`) are a different story: `resolve()` ignores
+    // this basis for them and returns the literal CSS px value, so
+    // `compute_transform`/`op_to_matrix` fold px → pt for real
+    // (`resolve_length_component`, fulgur-9vw5) before returning. The px →
+    // origin → pt conversion this note used to defer to render as "a
+    // separate cleanup tracked for a future PR" is therefore already done
+    // by the time `render::draw_under_transform` consumes `tx.origin` and
+    // the matrix — do not fold again there. Re-enabled by
+    // `transform_integration::rotate_90_at_default_center_origin_fixes_center`.
     let (width_pt, height_pt) = size_in_pt(node.final_layout.size);
     let Some((matrix, origin)) =
         crate::blitz_adapter::compute_transform(&styles, width_pt, height_pt)

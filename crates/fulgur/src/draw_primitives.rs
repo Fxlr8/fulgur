@@ -101,9 +101,14 @@ pub struct Affine2D {
     pub b: f32,
     pub c: f32,
     pub d: f32,
-    /// Translate-x. **A value in pt space** — not the result of a px→pt fold,
-    /// but the output of the pt-basis hack treated as pt. **Do not add
-    /// `.in_pt()`**: that would scale an already-pt value by 0.75.
+    /// Translate-x, **already in pt space** by the time it reaches this
+    /// struct. Percentage-based translate resolves self-consistently
+    /// against the pt-basis dims `compute_transform` is fed (unconverted,
+    /// by design — see `convert::record_transform`'s "PR 8i note").
+    /// Absolute-length translate and `matrix()` tx are folded px → pt for
+    /// real inside `compute_transform`/`op_to_matrix` (fulgur-9vw5). Either
+    /// way, this value is final pt — **do not add `.in_pt()`** here: that
+    /// would scale an already-pt value by 0.75.
     pub e: crate::units::Pt,
     /// Translate-y. Same pt-space semantics as [`e`](Self::e).
     pub f: crate::units::Pt,
@@ -238,9 +243,14 @@ impl std::ops::Mul for Affine2D {
 /// A 2D point in user-space coordinates (PDF pt).
 ///
 /// Used only for `transform-origin` (`drawables::TransformEntry.origin`).
-/// The value is the box-local origin already in pt space — `compute_transform`
-/// is fed pt-valued box dims, so no px→pt fold happens. **Do not add
-/// `.in_pt()`**: that would scale an already-pt value by 0.75.
+/// The value is the box-local origin, already in pt space by the time it
+/// reaches this struct. Percentage-based origin (the default `50% 50%`)
+/// resolves self-consistently against the pt-valued box dims
+/// `compute_transform` is fed (unconverted, by design). Absolute-length
+/// origin (`transform-origin: Npx ...`) is folded px → pt for real inside
+/// `compute_transform` (fulgur-9vw5). Either way, this value is final pt —
+/// **do not add `.in_pt()`** here: that would scale an already-pt value by
+/// 0.75.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point2 {
     pub x: crate::units::Pt,
