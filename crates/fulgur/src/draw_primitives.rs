@@ -1581,18 +1581,18 @@ pub(crate) fn draw_block_border(
 /// Returns `(width, height)` in pt. If the intrinsic height is zero, both
 /// return values are zero (avoids division by zero for malformed images).
 pub(crate) fn clamp_marker_size(
-    intrinsic_width: Pt,
-    intrinsic_height: Pt,
-    line_height: Pt,
-) -> (Pt, Pt) {
-    if intrinsic_height <= 0.0 {
-        return (0.0, 0.0);
+    intrinsic_width: crate::units::Pt,
+    intrinsic_height: crate::units::Pt,
+    line_height: crate::units::Pt,
+) -> (crate::units::Pt, crate::units::Pt) {
+    if intrinsic_height <= crate::units::Pt::ZERO {
+        return (crate::units::Pt::ZERO, crate::units::Pt::ZERO);
     }
     if intrinsic_height <= line_height {
         (intrinsic_width, intrinsic_height)
     } else {
-        let scale = line_height / intrinsic_height;
-        (intrinsic_width * scale, line_height)
+        let scale = line_height / intrinsic_height; // Pt / Pt = f32
+        (intrinsic_width * scale, line_height) // Pt * f32 = Pt
     }
 }
 
@@ -1866,31 +1866,31 @@ mod dp_unit_tests {
 
     #[test]
     fn clamp_marker_size_zero_height_returns_zero_zero() {
-        let (w, h) = clamp_marker_size(20.0, 0.0, 12.0);
-        assert_eq!(w, 0.0);
-        assert_eq!(h, 0.0);
+        let (w, h) = clamp_marker_size(20.0.pt(), 0.0.pt(), 12.0.pt());
+        assert_eq!(w, crate::units::Pt::ZERO);
+        assert_eq!(h, crate::units::Pt::ZERO);
     }
 
     #[test]
     fn clamp_marker_size_negative_height_returns_zero_zero() {
-        let (w, h) = clamp_marker_size(20.0, -5.0, 12.0);
-        assert_eq!(w, 0.0);
-        assert_eq!(h, 0.0);
+        let (w, h) = clamp_marker_size(20.0.pt(), (-5.0).pt(), 12.0.pt());
+        assert_eq!(w, crate::units::Pt::ZERO);
+        assert_eq!(h, crate::units::Pt::ZERO);
     }
 
     #[test]
     fn clamp_marker_size_within_line_height_passes_through() {
-        let (w, h) = clamp_marker_size(20.0, 10.0, 12.0);
-        assert_eq!(w, 20.0);
-        assert_eq!(h, 10.0);
+        let (w, h) = clamp_marker_size(20.0.pt(), 10.0.pt(), 12.0.pt());
+        assert_eq!(w.to_f32(), 20.0);
+        assert_eq!(h.to_f32(), 10.0);
     }
 
     #[test]
     fn clamp_marker_size_oversized_scales_down_preserving_aspect() {
         // intrinsic 40×20, line_height 10 → scale = 0.5 → (20, 10).
-        let (w, h) = clamp_marker_size(40.0, 20.0, 10.0);
-        assert!((w - 20.0).abs() < 1e-5);
-        assert!((h - 10.0).abs() < 1e-5);
+        let (w, h) = clamp_marker_size(40.0.pt(), 20.0.pt(), 10.0.pt());
+        assert!((w.to_f32() - 20.0).abs() < 1e-5);
+        assert!((h.to_f32() - 10.0).abs() < 1e-5);
     }
 
     // ── Affine2D math ───────────────────────────────────────
