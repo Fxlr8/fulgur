@@ -70,8 +70,33 @@ fn translate_px() {
     approx(m.b, 0.0, 1e-5, "translate.b");
     approx(m.c, 0.0, 1e-5, "translate.c");
     approx(m.d, 1.0, 1e-5, "translate.d");
-    approx(m.e.to_f32(), 10.0, 1e-5, "translate.e");
-    approx(m.f.to_f32(), 20.0, 1e-5, "translate.f");
+    // 10px * 0.75 = 7.5pt, 20px * 0.75 = 15.0pt (real px->pt fold, not a bare tag).
+    approx(m.e.to_f32(), 7.5, 1e-5, "translate.e");
+    approx(m.f.to_f32(), 15.0, 1e-5, "translate.f");
+}
+
+#[test]
+fn translate_px_absolute_length_folds_to_pt() {
+    // The issue's worked example: translate(20px) must land at 20 * 0.75 =
+    // 15pt, not the buggy unconverted 20pt (a 4/3 over-shift).
+    let html = make_html("transform: translate(20px, 0);");
+    let entry = entry_from(&html);
+    let m = effective_matrix(&entry, 0.0, 0.0);
+    approx(m.e.to_f32(), 15.0, 1e-5, "translate20px.e");
+    approx(m.f.to_f32(), 0.0, 1e-5, "translate20px.f");
+}
+
+#[test]
+fn translate_percentage_unchanged_self_consistent() {
+    // Percentage translate must keep resolving against the pt-basis feed
+    // exactly as before (self-consistent, not a bug): .t is 100x100 CSS px
+    // = 75x75 pt, so translate(50%, 50%) -> (37.5, 37.5) pt, unchanged by
+    // this fix (only the absolute-length path changes).
+    let html = make_html("transform: translate(50%, 50%);");
+    let entry = entry_from(&html);
+    let m = effective_matrix(&entry, 0.0, 0.0);
+    approx(m.e.to_f32(), 37.5, 1e-5, "translate50pct.e");
+    approx(m.f.to_f32(), 37.5, 1e-5, "translate50pct.f");
 }
 
 #[test]
@@ -104,6 +129,19 @@ fn rotate_90_at_default_center_origin_fixes_center() {
 }
 
 #[test]
+fn transform_origin_absolute_length_folds_to_pt() {
+    // Same root-cause bug as translate: an absolute-length transform-origin
+    // must fold px->pt for real (20px -> 15pt, 10px -> 7.5pt), not tag
+    // unconverted. `TransformEntry.origin` is read directly (not through
+    // effective_matrix), so any non-identity op works here to keep
+    // compute_transform from folding to `None`; scale(2) is the simplest.
+    let html = make_html("transform: scale(2); transform-origin: 20px 10px;");
+    let entry = entry_from(&html);
+    approx(entry.origin.x.to_f32(), 15.0, 1e-5, "origin.x");
+    approx(entry.origin.y.to_f32(), 7.5, 1e-5, "origin.y");
+}
+
+#[test]
 fn scale_has_correct_diagonal() {
     let html = make_html("transform: scale(2, 3); transform-origin: 0 0;");
     let entry = entry_from(&html);
@@ -121,7 +159,9 @@ fn matrix_preserved_with_origin_zero() {
     let html = make_html("transform: matrix(1, 2, 3, 4, 5, 6); transform-origin: 0 0;");
     let entry = entry_from(&html);
     // With origin (0, 0) the conjugation collapses to the identity on both
-    // sides, so the stored raw matrix should round-trip verbatim.
+    // sides, so the stored raw matrix should round-trip verbatim. matrix()'s
+    // tx,ty (5, 6) are always absolute CSS px per spec, so they fold to
+    // pt (5*0.75=3.75, 6*0.75=4.5) same as an equivalent translate() would.
     assert_eq!(
         entry.matrix,
         Affine2D {
@@ -129,8 +169,8 @@ fn matrix_preserved_with_origin_zero() {
             b: 2.0,
             c: 3.0,
             d: 4.0,
-            e: 5.0_f32.pt(),
-            f: 6.0_f32.pt(),
+            e: 3.75_f32.pt(),
+            f: 4.5_f32.pt(),
         }
     );
 }
@@ -153,10 +193,10 @@ fn composition_right_to_left() {
     let entry = entry_from(&html);
     let m = effective_matrix(&entry, 0.0, 0.0);
     // CSS transforms apply right-to-left: rotate first, then translate.
-    // point (1, 0) -> rotate90 -> (0, 1) -> translate(10, 0) -> (10, 1).
+    // point (1, 0) -> rotate90 -> (0, 1) -> translate(10px=7.5pt, 0) -> (7.5, 1).
     let x = m.a * 1.0 + m.c * 0.0 + m.e.to_f32();
     let y = m.b * 1.0 + m.d * 0.0 + m.f.to_f32();
-    approx(x, 10.0, 1e-4, "compose.x");
+    approx(x, 7.5, 1e-4, "compose.x");
     approx(y, 1.0, 1e-4, "compose.y");
 }
 
