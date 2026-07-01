@@ -118,7 +118,7 @@ pub struct ColumnStyleProps {
     /// author did not set the property — consumers should treat that as the
     /// initial value (`BreakInside::Auto`). Stored as `Option` for the same
     /// reason as the other fields: a later rule overwrites only the
-    /// properties it declares (see [`merge`](Self::merge)).
+    /// properties it declares (see `merge`).
     pub break_inside: Option<BreakInside>,
     /// `break-after` / `page-break-after` resolved by the sniffer.
     pub break_after: Option<BreakAfter>,
