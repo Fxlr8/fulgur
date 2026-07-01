@@ -36,7 +36,7 @@ pub(crate) const MAX_PAGES: u32 = 100_000;
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;
-pub(crate) mod column_css;
+pub mod column_css;
 pub mod config;
 pub mod convert;
 pub mod draw_primitives;

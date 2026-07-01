@@ -169,12 +169,12 @@ impl ColumnStyleProps {
 /// over `HashMap` so iteration order is deterministic — even though this
 /// table is only consulted during draw setup (never serialised directly),
 /// determinism is a project-wide invariant (see `CLAUDE.md`).
-pub type ColumnStyleTable = BTreeMap<usize, ColumnStyleProps>;
+pub(crate) type ColumnStyleTable = BTreeMap<usize, ColumnStyleProps>;
 
 /// A single parsed stylesheet rule: one or more selectors and the properties
 /// that apply when any of them matches.
 #[derive(Clone, Debug)]
-pub struct StyleRule {
+pub(crate) struct StyleRule {
     pub selectors: Vec<ComplexSelector>,
     pub props: ColumnStyleProps,
 }
@@ -183,7 +183,7 @@ pub struct StyleRule {
 /// selector. `Universal` matches every element; the other variants match
 /// against the corresponding attribute / tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SimpleSelector {
+pub(crate) enum SimpleSelector {
     /// Lowercased tag name (e.g. `div`).
     Type(String),
     /// Class name without the leading `.`.
@@ -198,7 +198,7 @@ pub enum SimpleSelector {
 /// the same element (logical AND). `div.foo#bar` is a compound of three
 /// parts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CompoundSelector {
+pub(crate) struct CompoundSelector {
     pub parts: Vec<SimpleSelector>,
 }
 
@@ -206,7 +206,7 @@ pub struct CompoundSelector {
 /// the rule target. `prev_sibling` (if `Some`) is a compound selector that
 /// must match the element immediately preceding `subject` in the DOM.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ComplexSelector {
+pub(crate) struct ComplexSelector {
     pub subject: CompoundSelector,
     /// Adjacent-sibling context (`E + F` → F is subject, E is prev_sibling).
     pub prev_sibling: Option<CompoundSelector>,
@@ -527,7 +527,7 @@ fn parse_page_value<'i>(input: &mut Parser<'i, '_>) -> Result<PageName, ParseErr
 /// Parse a CSS declaration block (no surrounding braces) into
 /// [`ColumnStyleProps`]. Invalid declarations drop silently; valid ones fill
 /// their field. Last-declaration-wins within a block.
-pub fn parse_declaration_block(css: &str) -> ColumnStyleProps {
+pub(crate) fn parse_declaration_block(css: &str) -> ColumnStyleProps {
     let mut props = ColumnStyleProps::default();
     let mut input = ParserInput::new(css);
     let mut parser = Parser::new(&mut input);
@@ -727,7 +727,7 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
 /// descendant/child/general-sibling combinators) — per Phase A scope
 /// discipline the whole rule is dropped silently so authors do not get a
 /// half-applied result. The adjacent-sibling combinator (`+`) is supported.
-pub fn parse_selector_list(input: &str) -> Vec<ComplexSelector> {
+pub(crate) fn parse_selector_list(input: &str) -> Vec<ComplexSelector> {
     let mut parser_input = ParserInput::new(input);
     let mut parser = Parser::new(&mut parser_input);
 
@@ -847,7 +847,7 @@ fn matches_compound(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
     })
 }
 
-pub fn matches_complex(
+pub(crate) fn matches_complex(
     sel: &ComplexSelector,
     node: &blitz_dom::Node,
     doc: &blitz_html::HtmlDocument,
@@ -891,7 +891,7 @@ pub fn matches_complex(
 /// `parse_block`). Qualified rules whose prelude contains an unsupported
 /// selector are dropped. Empty property blocks are kept out of the result
 /// to save memory.
-pub fn parse_stylesheet(source: &str) -> Vec<StyleRule> {
+pub(crate) fn parse_stylesheet(source: &str) -> Vec<StyleRule> {
     let mut rules = Vec::new();
     let mut input = ParserInput::new(source);
     let mut parser = Parser::new(&mut input);
@@ -975,7 +975,7 @@ impl<'i, 'a> QualifiedRuleParser<'i> for SheetParser<'a> {
 /// order) and then inline `style` attributes (last — they beat the
 /// stylesheet) into each node's entry. Nodes with no matching rule and no
 /// inline declaration are skipped entirely.
-pub fn build_column_style_table(
+pub(crate) fn build_column_style_table(
     doc: &blitz_html::HtmlDocument,
     stylesheet_rules: &[StyleRule],
 ) -> ColumnStyleTable {
