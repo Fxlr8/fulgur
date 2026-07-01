@@ -52,21 +52,30 @@ Helper definitions: `convert.rs:37-63`
 place that runs Stylo length resolution in **pt space, not px**. The parameters are still
 bare `f32`, but the `convert/mod.rs` call site feeds them **pt-valued** dims —
 `size_in_pt(node.final_layout.size)` (see the "PR 8i note" near `convert/mod.rs:605`).
-There is **no later px → pt fold**: the matrix and origin are produced and consumed as pt.
 
-Why feeding pt works: Stylo's `LengthPercentage::resolve` is unit-agnostic — a `Length` is
-just a number. Resolving against the pt-valued basis makes `%` translates and
-`transform-origin` come out correct against a pt basis. Absolute lengths ignore the basis
-and pass through as their numeric value, which the render path then treats as pt.
+Percentage-based results (`%` translates, the default `transform-origin: 50% 50%`) resolve
+self-consistently against this pt-valued basis and are consumed as pt **unconverted, by
+design**: `LengthPercentage::resolve` is unit-agnostic, so `percent * pt_basis` already
+lands in pt. Do not "fix" this path by feeding CSS-px dims instead — that reassociates the
+float arithmetic (`(size*0.75)*p` → `(size*p)*0.75`) and would re-bless unrelated VRT
+goldens with sub-ULP diffs (see the Approach A vs. B rationale in `bd show fulgur-9vw5`'s
+design field).
 
-The returned `Affine2D.e`/`.f` (translate components) and the `Point2` origin are now typed
-`units::Pt` (pt space) and are consumed directly by `render::draw_under_transform`.
-**Do not add `.in_pt()` to them** — they are already pt.
+Absolute-length results (`translate(Npx)`, `matrix()` tx/ty, `transform-origin: Npx ...`)
+are different: `resolve()` ignores the basis for these and returns the literal CSS px
+value, so they get a real px → pt fold (`Px::in_pt()`, ×0.75) inside
+`compute_transform`/`op_to_matrix` — either through the `resolve_length_component` helper
+(translate x/y, transform-origin horizontal/vertical) or directly (`matrix()`'s `e`/`f`,
+which are always absolute `<number>`, never a percentage, so no branch is needed there).
+Fixed in fulgur-9vw5; previously this value was reinterpreted as pt with no conversion, a
+latent 4/3 over-shift. `calc(px + %)` mixed expressions still take the percentage path
+(`has_percentage()` is true for `Calc`), so their absolute component is not folded — a
+documented, known limitation, not a regression.
 
-Known consequence (out of scope for the typing migration): an absolute-length
-`translate(Npx)` ends up as `N` **pt**, a latent 4/3 over-shift, because the px value is
-reinterpreted as pt with no conversion. That is a behavior bug tracked separately — the
-`Pt` typing reflects today's reality, it does not change or fix it.
+The returned `Affine2D.e`/`.f` (translate components) and the `Point2` origin are typed
+`units::Pt` and are already correctly folded by the time they reach
+`render::draw_under_transform`. **Do not add another `.in_pt()` at that consumer** — the
+values arriving there are pt, and converting again would double-convert.
 
 ## Stylo length-percentage resolution
 
