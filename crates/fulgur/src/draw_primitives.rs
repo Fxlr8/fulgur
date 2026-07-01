@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::image::ImageFormat;
+use crate::units::F32Units;
 
 /// Registry of block-level anchor destinations discovered during a pre-pass
 /// walk of the paginated page tree.
@@ -21,7 +22,7 @@ use crate::image::ImageFormat;
 #[derive(Debug, Default)]
 pub struct DestinationRegistry {
     current_page_idx: usize,
-    entries: BTreeMap<String, (usize, Pt, Pt)>,
+    entries: BTreeMap<String, (usize, crate::units::Pt, crate::units::Pt)>,
     /// Stack of transforms applied to coordinates before storing.
     transform_stack: Vec<Affine2D>,
 }
@@ -62,15 +63,17 @@ impl DestinationRegistry {
     }
 
     /// Record an anchor destination. First-write-wins: later duplicates are ignored.
-    pub fn record(&mut self, id: &str, x: Pt, y: Pt) {
-        let (tx, ty) = self.current_transform().transform_point(x, y);
+    pub fn record(&mut self, id: &str, x: crate::units::Pt, y: crate::units::Pt) {
+        let (tx, ty) = self
+            .current_transform()
+            .transform_point(x.to_f32(), y.to_f32());
         self.entries
             .entry(id.to_string())
-            .or_insert((self.current_page_idx, tx, ty));
+            .or_insert((self.current_page_idx, tx.pt(), ty.pt()));
     }
 
     /// Look up a recorded anchor. Returns `(page_idx, x, y)`.
-    pub fn get(&self, id: &str) -> Option<(usize, Pt, Pt)> {
+    pub fn get(&self, id: &str) -> Option<(usize, crate::units::Pt, crate::units::Pt)> {
         self.entries.get(id).copied()
     }
 }
@@ -1606,17 +1609,17 @@ mod dp_unit_tests {
         let mut reg = DestinationRegistry::new();
         reg.set_current_page(3);
         reg.push_transform(Affine2D::translation(10.0_f32.pt(), 20.0_f32.pt()));
-        reg.record("anchor", 5.0, 7.0);
+        reg.record("anchor", 5.0.pt(), 7.0.pt());
         let (page, x, y) = reg.get("anchor").expect("recorded");
         assert_eq!(page, 3);
-        assert!((x - 15.0).abs() < 1e-4);
-        assert!((y - 27.0).abs() < 1e-4);
+        assert!((x.to_f32() - 15.0).abs() < 1e-4);
+        assert!((y.to_f32() - 27.0).abs() < 1e-4);
         reg.pop_transform();
         // After pop, subsequent records use identity.
-        reg.record("anchor2", 1.0, 2.0);
+        reg.record("anchor2", 1.0.pt(), 2.0.pt());
         let (_, x2, y2) = reg.get("anchor2").expect("recorded");
-        assert!((x2 - 1.0).abs() < 1e-4);
-        assert!((y2 - 2.0).abs() < 1e-4);
+        assert!((x2.to_f32() - 1.0).abs() < 1e-4);
+        assert!((y2.to_f32() - 2.0).abs() < 1e-4);
     }
 
     // ── LinkCollector ──────────────────────────────────────
@@ -2263,13 +2266,13 @@ mod dp_unit_tests {
     fn destination_registry_first_write_wins_for_duplicate_ids() {
         let mut reg = DestinationRegistry::new();
         reg.set_current_page(0);
-        reg.record("anchor", 10.0, 20.0);
+        reg.record("anchor", 10.0.pt(), 20.0.pt());
         reg.set_current_page(1);
-        reg.record("anchor", 99.0, 99.0); // duplicate — should be ignored
+        reg.record("anchor", 99.0.pt(), 99.0.pt()); // duplicate — should be ignored
         let (page, x, y) = reg.get("anchor").expect("recorded");
         assert_eq!(page, 0, "first write should win");
-        assert!((x - 10.0).abs() < 1e-5);
-        assert!((y - 20.0).abs() < 1e-5);
+        assert!((x.to_f32() - 10.0).abs() < 1e-5);
+        assert!((y.to_f32() - 20.0).abs() < 1e-5);
     }
 
     // ── compute_overflow_clip_path: y-only clip branch ───────
