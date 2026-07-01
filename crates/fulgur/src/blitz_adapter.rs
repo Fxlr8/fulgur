@@ -2881,9 +2881,6 @@ pub(crate) fn compute_transform(
     border_box_width: f32,
     border_box_height: f32,
 ) -> Option<(Affine2D, Point2)> {
-    use crate::units::F32Units;
-    use style::values::computed::Length;
-
     // Fast path: most DOM nodes have no transform. Reading the
     // `OwnedSlice` through `get_box()` avoids cloning it for the empty
     // case, and lets the non-empty path borrow instead of clone.
@@ -2912,18 +2909,32 @@ pub(crate) fn compute_transform(
     }
 
     let origin = styles.clone_transform_origin();
-    let origin_x = origin
-        .horizontal
-        .resolve(Length::new(border_box_width))
-        .px()
-        .pt();
-    let origin_y = origin
-        .vertical
-        .resolve(Length::new(border_box_height))
-        .px()
-        .pt();
+    let origin_x = resolve_length_component(&origin.horizontal, border_box_width);
+    let origin_y = resolve_length_component(&origin.vertical, border_box_height);
 
     Some((m, Point2::new(origin_x, origin_y)))
+}
+
+/// Resolve a `translate`/`transform-origin` length-percentage component
+/// against `basis_pt` (the pt-basis dims `record_transform` feeds — see
+/// the "PR 8i note" in `convert::record_transform`). Percentages resolve
+/// self-consistently against the pt basis and land in pt units
+/// unconverted; pure absolute lengths are genuine CSS px per Stylo's
+/// `resolve()` contract and need the real px->pt fold. `calc(px + %)`
+/// mixes both inside one `resolve()` call — treated as the percentage
+/// path (documented limitation, not fixed here; see fulgur-9vw5 design).
+fn resolve_length_component(
+    lp: &style::values::computed::LengthPercentage,
+    basis_pt: f32,
+) -> crate::units::Pt {
+    use crate::units::F32Units;
+    use style::values::computed::Length;
+    let resolved = lp.resolve(Length::new(basis_pt)).px();
+    if lp.has_percentage() {
+        resolved.pt()
+    } else {
+        resolved.px().in_pt()
+    }
 }
 
 fn op_to_matrix(
@@ -2932,27 +2943,28 @@ fn op_to_matrix(
     h: f32,
 ) -> Affine2D {
     use crate::units::F32Units;
-    use style::values::computed::Length;
     use style::values::generics::transform::GenericTransformOperation::*;
 
     match op {
+        // matrix()'s tx,ty are always absolute <number> (CSS px-equivalent
+        // per spec, never a percentage), so they always take the real fold.
         Matrix(m) => Affine2D {
             a: m.a,
             b: m.b,
             c: m.c,
             d: m.d,
-            e: m.e.pt(),
-            f: m.f.pt(),
+            e: m.e.px().in_pt(),
+            f: m.f.px().in_pt(),
         },
         Translate(x, y) => Affine2D::translation(
-            x.resolve(Length::new(w)).px().pt(),
-            y.resolve(Length::new(h)).px().pt(),
+            resolve_length_component(x, w),
+            resolve_length_component(y, h),
         ),
         TranslateX(x) => {
-            Affine2D::translation(x.resolve(Length::new(w)).px().pt(), crate::units::Pt::ZERO)
+            Affine2D::translation(resolve_length_component(x, w), crate::units::Pt::ZERO)
         }
         TranslateY(y) => {
-            Affine2D::translation(crate::units::Pt::ZERO, y.resolve(Length::new(h)).px().pt())
+            Affine2D::translation(crate::units::Pt::ZERO, resolve_length_component(y, h))
         }
         Scale(sx, sy) => Affine2D::scale(*sx, *sy),
         ScaleX(sx) => Affine2D::scale(*sx, 1.0),
@@ -5317,8 +5329,10 @@ mod transform_tests {
         let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
         let me = m.e.to_f32();
         let mf = m.f.to_f32();
-        assert!(approx(me, 10.0));
-        assert!(approx(mf, 20.0));
+        // Absolute-length translate folds CSS px -> PDF pt (x0.75):
+        // 10px -> 7.5pt, 20px -> 15pt (fulgur-9vw5).
+        assert!(approx(me, 7.5));
+        assert!(approx(mf, 15.0));
         assert!(approx(m.a, 1.0));
         assert!(approx(m.d, 1.0));
     }
@@ -5331,7 +5345,7 @@ mod transform_tests {
         let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
         let me = m.e.to_f32();
         let mf = m.f.to_f32();
-        assert!(approx(me, 10.0), "translateX e should be 10, got {me}");
+        assert!(approx(me, 7.5), "translateX e should be 7.5, got {me}");
         assert!(approx(mf, 0.0), "translateX f should be 0, got {mf}");
     }
 
@@ -5344,7 +5358,7 @@ mod transform_tests {
         let me = m.e.to_f32();
         let mf = m.f.to_f32();
         assert!(approx(me, 0.0), "translateY e should be 0, got {me}");
-        assert!(approx(mf, 20.0), "translateY f should be 20, got {mf}");
+        assert!(approx(mf, 15.0), "translateY f should be 15, got {mf}");
     }
 
     #[test]
@@ -5371,8 +5385,10 @@ mod transform_tests {
         assert!(approx(m.d, 4.0));
         let me = m.e.to_f32();
         let mf = m.f.to_f32();
-        assert!(approx(me, 5.0));
-        assert!(approx(mf, 6.0));
+        // matrix()'s tx,ty are always absolute CSS px, so they fold to pt
+        // (x0.75): 5px -> 3.75pt, 6px -> 4.5pt (fulgur-9vw5).
+        assert!(approx(me, 3.75));
+        assert!(approx(mf, 4.5));
     }
 
     #[test]
