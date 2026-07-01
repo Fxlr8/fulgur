@@ -41,7 +41,7 @@ jobs:
 
       - name: Run release-plz release-pr
         id: release-plz
-        uses: release-plz/action@v0.5
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7  # v0.5.130
         with:
           command: release-pr
         env:
@@ -99,3 +99,48 @@ jobs:
           git add -A
           git commit -m "chore: sync auxiliary version files to $VERSION" || echo "no changes to sync"
           git push
+
+  release:
+    name: Release-plz release
+    needs: release-pr
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write  # required by rust-lang/crates-io-auth-action (OIDC)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-fulgur
+          save-if: false
+
+      # GITHUB_TOKEN's tag push / GH Release creation would not trigger the
+      # build-binaries/release/publish-npm jobs in release.yml (GITHUB_TOKEN-
+      # authored events don't fire other workflows). Use the same App token
+      # release.yml already uses for this reason.
+      - name: Generate App token for tag/release push
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Authenticate to crates.io
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Run release-plz release
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7  # v0.5.130
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
