@@ -689,4 +689,163 @@ mod tests {
             _ => panic!("expected after Image at end"),
         }
     }
+
+    // ── smoke tests via Engine::render_html (Blitz-dependent paths) ─────────
+    //
+    // These cover branches in `build_pseudo_image_entry`,
+    // `build_block_pseudo_image_entries`, and `resolve_pseudo_size` that
+    // require a live Blitz document.  Pattern mirrors the smoke helpers in
+    // convert/list_item.rs.
+
+    const RED_1X1_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn render(html: &str) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .build()
+            .render(html)
+            .expect("render failed")
+    }
+
+    fn render_with_assets(html: &str, bundle: crate::asset::AssetBundle) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render failed")
+    }
+
+    // build_block_pseudo_image_entries: `if assets.is_none()` early-return.
+    // No bundle is registered; the pseudo url is silently skipped.
+    #[test]
+    fn smoke_block_pseudo_no_asset_bundle_skips_image() {
+        let pdf = render(
+            r#"<!doctype html><html><head><style>
+            div::before { content: url("dot.png"); display: block; width: 20px; height: 20px; }
+            </style></head><body><div>Text</div></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_pseudo_image_entry: `assets.get_image(name)?` returns None when the
+    // image name in CSS is not registered in the bundle.
+    #[test]
+    fn smoke_block_pseudo_image_url_not_in_bundle() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("other.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"div::before { content: url("missing.png"); display: block; width: 20px; height: 20px; }"#,
+        );
+        let pdf = render_with_assets(
+            r#"<!doctype html><html><body><div>Text</div></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_pseudo_image_entry happy path + resolve_pseudo_size LengthPercentage
+    // arm: ::before with `display: block` and explicit pixel dimensions is
+    // registered as a block-pseudo ImageEntry.
+    #[test]
+    fn smoke_block_pseudo_before_image_explicit_size() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"div::before { content: url("dot.png"); display: block; width: 20px; height: 15px; }"#,
+        );
+        let pdf = render_with_assets(
+            r#"<!doctype html><html><body><div>With block before</div></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_pseudo_size `_ => None` arm: ::before with `display: block` but no
+    // explicit width/height → auto/intrinsic dimensions → resolve_pseudo_size
+    // returns None for both axes and image falls back to intrinsic 1×1 pixels.
+    #[test]
+    fn smoke_block_pseudo_before_image_auto_size() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"div::before { content: url("dot.png"); display: block; }"#);
+        let pdf = render_with_assets(
+            r#"<!doctype html><html><body><div>Auto-size pseudo</div></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_block_pseudo_image_entries: the `after` slot.
+    // ::after with `display: block` exercises the second `load(parent.after)` call.
+    #[test]
+    fn smoke_block_pseudo_after_image_explicit_size() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"div::after { content: url("dot.png"); display: block; width: 20px; height: 15px; }"#,
+        );
+        let pdf = render_with_assets(
+            r#"<!doctype html><html><body><div>With block after</div></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_block_pseudo_image_entries: `if is_absolutely_positioned(pseudo)` branch.
+    // An absolutely-positioned ::before with `display: block` hits `is_block_pseudo`
+    // (returns true) and then `is_absolutely_positioned` (returns true) → the block-
+    // pseudo-image slot returns None; the pseudo is instead handled by
+    // walk_absolute_children.
+    #[test]
+    fn smoke_block_pseudo_absolute_position_excluded_from_image_slot() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"div { position: relative; }
+               div::before { content: url("dot.png"); display: block; position: absolute;
+                             width: 20px; height: 20px; top: 0; left: 0; }"#,
+        );
+        let pdf = render_with_assets(
+            r#"<!doctype html><html><body><div>Abs-pos pseudo</div></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // node_has_block_pseudo_image / node_has_absolute_pseudo: exercised via the
+    // inline-root fast-path in inline_root.rs (lines 44-46).
+    // A <p> (inline root) with a block ::before image causes
+    // `node_has_block_pseudo_image` to return true, routing processing through
+    // register_pseudo_content rather than the pure-inline path.
+    #[test]
+    fn smoke_inline_root_with_block_pseudo_image() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"p::before { content: url("dot.png"); display: block; width: 10px; height: 10px; }"#,
+        );
+        let pdf = render_with_assets(
+            r#"<!doctype html><html><body><p>Paragraph with block pseudo</p></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // node_has_absolute_pseudo: a <p> (inline root) with an absolutely-positioned
+    // ::before pseudo causes `node_has_absolute_pseudo` to return true.
+    #[test]
+    fn smoke_inline_root_with_absolute_pseudo() {
+        let pdf = render(
+            r#"<!doctype html><html><head><style>
+            p { position: relative; }
+            p::before { content: "x"; position: absolute; top: 0; left: 0; }
+            </style></head><body><p>Paragraph with abs pseudo</p></body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
