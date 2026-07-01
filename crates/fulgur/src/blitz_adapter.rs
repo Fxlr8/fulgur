@@ -633,7 +633,9 @@ fn walk_for_inline_styles(
 /// bytes (O(nodes + css_bytes)), the second applies the cascade (also
 /// O(nodes + css_bytes)). Keeping them separate mirrors the CSS cascade —
 /// stylesheets are parsed once, then matched against every node.
-pub fn extract_column_style_table(doc: &HtmlDocument) -> crate::column_css::ColumnStyleTable {
+pub(crate) fn extract_column_style_table(
+    doc: &HtmlDocument,
+) -> crate::column_css::ColumnStyleTable {
     // 1. Concatenate every top-level <style> block's text content.
     let mut css = String::new();
     let root_id = doc.root_element().id;

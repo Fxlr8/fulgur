@@ -134,7 +134,7 @@ pub struct ConvertContext<'a> {
     /// [`crate::blitz_adapter::extract_column_style_table`]. `record_multicol_rule`
     /// reads `rule` properties from here when registering multicol containers
     /// in `drawables.multicol_rules`.
-    pub column_styles: crate::column_css::ColumnStyleTable,
+    pub(crate) column_styles: crate::column_css::ColumnStyleTable,
     /// Per-multicol-container geometry recorded by the Taffy multicol hook
     /// (see [`crate::multicol_layout::run_pass`]). `record_multicol_rule`
     /// reads this to register `column-rule` paint specs without re-running
