@@ -1322,10 +1322,12 @@ fn draw_under_transform(
 ) {
     // `effective_matrix` mirrors `TransformWrapperPageable::effective_matrix`:
     //   T(x + ox, y + oy) · M · T(-(x + ox), -(y + oy))
-    let ox = x_pt + tx.origin.x;
-    let oy = y_pt + tx.origin.y;
+    let ox = x_pt + tx.origin.x.to_f32();
+    let oy = y_pt + tx.origin.y.to_f32();
     use crate::draw_primitives::Affine2D;
-    let full = Affine2D::translation(ox, oy) * tx.matrix * Affine2D::translation(-ox, -oy);
+    let full = Affine2D::translation(ox.pt(), oy.pt())
+        * tx.matrix
+        * Affine2D::translation((-ox).pt(), (-oy).pt());
 
     if let Some(lc) = canvas.link_collector.as_deref_mut() {
         lc.push_transform(full);
@@ -4617,8 +4619,11 @@ mod tests {
         d.transforms.insert(
             10,
             crate::drawables::TransformEntry {
-                matrix: crate::draw_primitives::Affine2D::translation(0.0, 0.0),
-                origin: crate::draw_primitives::Point2 { x: 0.0, y: 0.0 },
+                matrix: crate::draw_primitives::Affine2D::translation(0.0_f32.pt(), 0.0_f32.pt()),
+                origin: crate::draw_primitives::Point2::new(
+                    crate::units::Pt::ZERO,
+                    crate::units::Pt::ZERO,
+                ),
                 descendants: vec![11, 12],
             },
         );

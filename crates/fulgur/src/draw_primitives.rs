@@ -101,8 +101,12 @@ pub struct Affine2D {
     pub b: f32,
     pub c: f32,
     pub d: f32,
-    pub e: f32,
-    pub f: f32,
+    /// Translate-x. **A value in pt space** — not the result of a px→pt fold,
+    /// but the output of the pt-basis hack treated as pt. **Do not add
+    /// `.in_pt()`**: that would scale an already-pt value by 0.75.
+    pub e: crate::units::Pt,
+    /// Translate-y. Same pt-space semantics as [`e`](Self::e).
+    pub f: crate::units::Pt,
 }
 
 impl Affine2D {
@@ -111,8 +115,8 @@ impl Affine2D {
         b: 0.0,
         c: 0.0,
         d: 1.0,
-        e: 0.0,
-        f: 0.0,
+        e: crate::units::Pt::ZERO,
+        f: crate::units::Pt::ZERO,
     };
 
     /// ε tolerance for identity detection (absorbs trig float noise).
@@ -123,11 +127,11 @@ impl Affine2D {
             && self.b.abs() < Self::IDENTITY_EPS
             && self.c.abs() < Self::IDENTITY_EPS
             && (self.d - 1.0).abs() < Self::IDENTITY_EPS
-            && self.e.abs() < Self::IDENTITY_EPS
-            && self.f.abs() < Self::IDENTITY_EPS
+            && self.e.to_f32().abs() < Self::IDENTITY_EPS
+            && self.f.to_f32().abs() < Self::IDENTITY_EPS
     }
 
-    pub fn translation(tx: f32, ty: f32) -> Self {
+    pub fn translation(tx: crate::units::Pt, ty: crate::units::Pt) -> Self {
         Self {
             a: 1.0,
             b: 0.0,
@@ -144,8 +148,8 @@ impl Affine2D {
             b: 0.0,
             c: 0.0,
             d: sy,
-            e: 0.0,
-            f: 0.0,
+            e: crate::units::Pt::ZERO,
+            f: crate::units::Pt::ZERO,
         }
     }
 
@@ -156,8 +160,8 @@ impl Affine2D {
             b: s,
             c: -s,
             d: c,
-            e: 0.0,
-            f: 0.0,
+            e: crate::units::Pt::ZERO,
+            f: crate::units::Pt::ZERO,
         }
     }
 
@@ -168,20 +172,27 @@ impl Affine2D {
             b: ay_rad.tan(),
             c: ax_rad.tan(),
             d: 1.0,
-            e: 0.0,
-            f: 0.0,
+            e: crate::units::Pt::ZERO,
+            f: crate::units::Pt::ZERO,
         }
     }
 
     pub fn to_krilla(&self) -> krilla::geom::Transform {
-        krilla::geom::Transform::from_row(self.a, self.b, self.c, self.d, self.e, self.f)
+        krilla::geom::Transform::from_row(
+            self.a,
+            self.b,
+            self.c,
+            self.d,
+            self.e.to_f32(),
+            self.f.to_f32(),
+        )
     }
 
     /// Apply this affine transform to a 2D point.
     pub fn transform_point(&self, x: f32, y: f32) -> (f32, f32) {
         (
-            self.a * x + self.c * y + self.e,
-            self.b * x + self.d * y + self.f,
+            self.a * x + self.c * y + self.e.to_f32(),
+            self.b * x + self.d * y + self.f.to_f32(),
         )
     }
 
@@ -216,24 +227,28 @@ impl std::ops::Mul for Affine2D {
             b: self.b * rhs.a + self.d * rhs.b,
             c: self.a * rhs.c + self.c * rhs.d,
             d: self.b * rhs.c + self.d * rhs.d,
+            // e/f rows: f32*Pt→Pt and Pt+Pt→Pt via units ops; the expression is
+            // left verbatim (no reassociation) to keep the transform byte-neutral.
             e: self.a * rhs.e + self.c * rhs.f + self.e,
             f: self.b * rhs.e + self.d * rhs.f + self.f,
         }
     }
 }
 
-/// A 2D point in user-space coordinates (Pt).
+/// A 2D point in user-space coordinates (PDF pt).
 ///
-/// Used for both absolute draw positions and box-local offsets such as
-/// `transform-origin`; the interpretation depends on the call site.
+/// Used only for `transform-origin` (`drawables::TransformEntry.origin`).
+/// The value is the box-local origin already in pt space — `compute_transform`
+/// is fed pt-valued box dims, so no px→pt fold happens. **Do not add
+/// `.in_pt()`**: that would scale an already-pt value by 0.75.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point2 {
-    pub x: Pt,
-    pub y: Pt,
+    pub x: crate::units::Pt,
+    pub y: crate::units::Pt,
 }
 
 impl Point2 {
-    pub const fn new(x: Pt, y: Pt) -> Self {
+    pub const fn new(x: crate::units::Pt, y: crate::units::Pt) -> Self {
         Self { x, y }
     }
 }
@@ -1590,7 +1605,7 @@ mod dp_unit_tests {
     fn destination_registry_push_pop_transform_affects_record() {
         let mut reg = DestinationRegistry::new();
         reg.set_current_page(3);
-        reg.push_transform(Affine2D::translation(10.0, 20.0));
+        reg.push_transform(Affine2D::translation(10.0_f32.pt(), 20.0_f32.pt()));
         reg.record("anchor", 5.0, 7.0);
         let (page, x, y) = reg.get("anchor").expect("recorded");
         assert_eq!(page, 3);
@@ -1884,7 +1899,7 @@ mod dp_unit_tests {
 
     #[test]
     fn affine2d_translation_is_not_identity() {
-        assert!(!Affine2D::translation(1.0, 0.0).is_identity());
+        assert!(!Affine2D::translation(1.0_f32.pt(), 0.0_f32.pt()).is_identity());
     }
 
     #[test]
@@ -1919,17 +1934,19 @@ mod dp_unit_tests {
 
     #[test]
     fn affine2d_mul_two_translations_add() {
-        let t1 = Affine2D::translation(3.0, 4.0);
-        let t2 = Affine2D::translation(1.0, -2.0);
+        let t1 = Affine2D::translation(3.0_f32.pt(), 4.0_f32.pt());
+        let t2 = Affine2D::translation(1.0_f32.pt(), (-2.0_f32).pt());
         let composed = t1 * t2;
-        assert!((composed.e - 4.0).abs() < 1e-5);
-        assert!((composed.f - 2.0).abs() < 1e-5);
+        let composed_e = composed.e.to_f32();
+        let composed_f = composed.f.to_f32();
+        assert!((composed_e - 4.0).abs() < 1e-5);
+        assert!((composed_f - 2.0).abs() < 1e-5);
     }
 
     #[test]
     fn affine2d_mul_scale_then_translate() {
         let s = Affine2D::scale(2.0, 3.0);
-        let t = Affine2D::translation(10.0, 5.0);
+        let t = Affine2D::translation(10.0_f32.pt(), 5.0_f32.pt());
         // (s * t) * p = s * (t * p): translate first, then scale
         let composed = s * t;
         let (x, y) = composed.transform_point(1.0, 1.0);
@@ -1966,7 +1983,7 @@ mod dp_unit_tests {
             width: 10.0,
             height: 5.0,
         };
-        let t = Affine2D::translation(2.0, 3.0);
+        let t = Affine2D::translation(2.0_f32.pt(), 3.0_f32.pt());
         let q = t.transform_rect(&r);
         for pt in &q.points {
             assert!(pt[0] >= 2.0 - 1e-5 && pt[0] <= 12.0 + 1e-5, "x={}", pt[0]);
