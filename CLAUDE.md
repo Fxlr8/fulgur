@@ -47,7 +47,7 @@ HTML string → Blitz (parse/style/layout) → Drawables / PaginationGeometryTab
 - **engine.rs** — `Engine` builder: configures and executes `render_html()`
 - **blitz_adapter.rs** — Thin adapter isolating Blitz API changes from the rest of the codebase
 - **convert.rs** — Transforms Blitz DOM nodes into `Drawables` and geometry records
-- **draw_primitives.rs** — Primitive geometry, canvas, style, and drawing-helper types (`Pt`, `Size`, `Rect`, `Canvas`, `BlockStyle`, background/gradient types, etc.)
+- **draw_primitives.rs** — Primitive geometry, canvas, style, and drawing-helper types (`Size`, `Rect`, `Canvas`, `BlockStyle`, background/gradient types, etc.)
 - **drawables.rs** — `Drawables` struct: flat per-node draw payloads (`BlockDraw`, `ParagraphDraw`, `ImageDraw`, etc.) used by the v2 render path
 - **paginate.rs** — Page splitting algorithm that walks the `PaginationGeometryTable`
 - **render.rs** — Draws paginated fragments onto Krilla surfaces via `render_v2`

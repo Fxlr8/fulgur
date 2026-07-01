@@ -6,9 +6,9 @@
 //! easy. These newtypes put the unit in the type so the compiler rejects
 //! `Px + Pt`. Both are `#[repr(transparent)]` over `f32`, so they are
 //! zero-cost at runtime; the migration that flips coordinate fields to these
-//! types lands in later phases (tracked in the fulgur-2map epic). Note
-//! `draw_primitives::Pt` is currently a `type Pt = f32` alias that this
-//! migration upgrades to [`Pt`]; until that lands these newtypes are not
+//! types lands in later phases (tracked in the fulgur-2map epic). The legacy
+//! `draw_primitives::Pt = f32` alias this migration upgrades to [`Pt`] has
+//! been removed (P2a, fulgur-2map.8); these newtypes are still not
 //! re-exported at the crate root.
 //!
 //! - Construct with [`F32Units::px`] / [`F32Units::pt`] (e.g. `frag.x.px()`).
