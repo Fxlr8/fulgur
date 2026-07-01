@@ -78,9 +78,6 @@ impl DestinationRegistry {
     }
 }
 
-/// Point unit (1/72 inch)
-pub type Pt = f32;
-
 #[derive(Debug, Clone, Copy)]
 pub struct Size {
     pub width: crate::units::Pt,
