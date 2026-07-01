@@ -113,6 +113,14 @@ pub struct ImageEntry {
 }
 
 /// SVG draw payload for v2. Mirrors the fields `SvgRender` holds.
+///
+/// `tree` is `Arc<usvg::Tree>` — an external-crate type. Consumers that
+/// construct, inspect, or pattern-match on `usvg::Tree` directly (rather
+/// than treating it as opaque) must depend on the exact `usvg` version
+/// series this crate resolves (see the `usvg` entry in this crate's
+/// `Cargo.toml`); a mismatched `usvg` version will not type-unify even if
+/// semver-compatible, since `usvg::Tree` is not part of `usvg`'s own
+/// stability guarantees across our pinned range.
 #[derive(Debug, Clone)]
 pub struct SvgEntry {
     pub tree: std::sync::Arc<usvg::Tree>,
