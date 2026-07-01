@@ -1,10 +1,26 @@
 [workspace]
 release = true
+# semver_check defaults to true for libraries, but fulgur-wasm/pyfulgur/fulgur-ruby
+# are bindings that aren't published to crates.io and have no registry baseline to
+# diff against — leave it off workspace-wide and opt in only where it's meaningful.
+semver_check = false
+# Default tag/release naming is per-package ("{{ package }}-v{{ version }}") once a
+# workspace has more than one publishable crate (fulgur + fulgur-cli here), which
+# would produce multiple tags/releases instead of the single v$VERSION tag the
+# current pipeline and this epic's design rely on. Disable by default, then opt a
+# single package back in below as the canonical release tag/name.
+git_tag_enable = false
+git_release_enable = false
 
 [[package]]
 name = "fulgur"
 version_group = "core"
 publish = true
+semver_check = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
 
 [[package]]
 name = "fulgur-cli"
