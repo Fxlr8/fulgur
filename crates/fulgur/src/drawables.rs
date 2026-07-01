@@ -116,11 +116,12 @@ pub struct ImageEntry {
 ///
 /// `tree` is `Arc<usvg::Tree>` — an external-crate type. Consumers that
 /// construct, inspect, or pattern-match on `usvg::Tree` directly (rather
-/// than treating it as opaque) must depend on the exact `usvg` version
-/// series this crate resolves (see the `usvg` entry in this crate's
-/// `Cargo.toml`); a mismatched `usvg` version will not type-unify even if
-/// semver-compatible, since `usvg::Tree` is not part of `usvg`'s own
-/// stability guarantees across our pinned range.
+/// than treating it as opaque) must depend on the same `usvg` version
+/// range this crate resolves (see the `usvg` entry in this crate's
+/// `Cargo.toml`). Rust type identity is per-resolved-crate-instance: a
+/// `usvg::Tree` from a differently-resolved `usvg` dependency is a
+/// distinct type and will not interoperate with fulgur's, even across a
+/// nominally-minor 0.x bump.
 #[derive(Debug, Clone)]
 pub struct SvgEntry {
     pub tree: std::sync::Arc<usvg::Tree>,
