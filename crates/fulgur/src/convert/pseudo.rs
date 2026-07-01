@@ -692,7 +692,7 @@ mod tests {
 
     // ── smoke tests via Engine::render_html (Blitz-dependent paths) ─────────
     //
-    // These exercises cover branches in `build_pseudo_image_entry`,
+    // These cover branches in `build_pseudo_image_entry`,
     // `build_block_pseudo_image_entries`, and `resolve_pseudo_size` that
     // require a live Blitz document.  Pattern mirrors the smoke helpers in
     // convert/list_item.rs.
