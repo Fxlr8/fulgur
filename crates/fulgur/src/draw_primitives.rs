@@ -202,10 +202,10 @@ impl Affine2D {
     /// transformed individually, preserving the krilla quad-point order:
     /// bottom-left → bottom-right → top-right → top-left.
     pub fn transform_rect(&self, r: &Rect) -> Quad {
-        let x0 = r.x;
-        let y0 = r.y;
-        let x1 = r.x + r.width;
-        let y1 = r.y + r.height;
+        let x0 = r.x.to_f32();
+        let y0 = r.y.to_f32();
+        let x1 = (r.x + r.width).to_f32();
+        let y1 = (r.y + r.height).to_f32();
         let bl = self.transform_point(x0, y1);
         let br = self.transform_point(x1, y1);
         let tr = self.transform_point(x1, y0);
@@ -279,10 +279,10 @@ pub enum BreakInside {
 /// top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
+    pub x: crate::units::Pt,
+    pub y: crate::units::Pt,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
 }
 
 /// Four-point quadrilateral for transformed link areas.
@@ -403,7 +403,7 @@ impl LinkCollector {
         // Skip degenerate rects (non-positive width or height) to match the
         // filtering the old `rect_to_quad` helper performed via
         // `KRect::from_xywh`, which rejects them.
-        if rect.width <= 0.0 || rect.height <= 0.0 {
+        if rect.width <= crate::units::Pt::ZERO || rect.height <= crate::units::Pt::ZERO {
             return;
         }
         let quad = self.current_transform().transform_rect(&rect);
@@ -1638,10 +1638,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
 
@@ -1661,19 +1661,19 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 0.0.pt(),
+                height: 10.0.pt(),
             },
         );
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 0.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 0.0.pt(),
             },
         );
         assert!(collector.occurrences().is_empty());
@@ -1688,10 +1688,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
         collector.pop_transform();
@@ -1958,10 +1958,10 @@ mod dp_unit_tests {
     #[test]
     fn affine2d_transform_rect_identity_is_noop() {
         let r = Rect {
-            x: 2.0,
-            y: 3.0,
-            width: 4.0,
-            height: 5.0,
+            x: 2.0.pt(),
+            y: 3.0.pt(),
+            width: 4.0.pt(),
+            height: 5.0.pt(),
         };
         let q = Affine2D::IDENTITY.transform_rect(&r);
         // bottom-left, bottom-right, top-right, top-left in Y-down coords
@@ -1978,10 +1978,10 @@ mod dp_unit_tests {
     #[test]
     fn affine2d_transform_rect_translation_shifts_all_corners() {
         let r = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 10.0,
-            height: 5.0,
+            x: 0.0.pt(),
+            y: 0.0.pt(),
+            width: 10.0.pt(),
+            height: 5.0.pt(),
         };
         let t = Affine2D::translation(2.0_f32.pt(), 3.0_f32.pt());
         let q = t.transform_rect(&r);
@@ -2192,20 +2192,20 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 5.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 5.0.pt(),
             },
         );
         collector.set_current_page(2);
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 20.0,
-                height: 5.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 20.0.pt(),
+                height: 5.0.pt(),
             },
         );
 
@@ -2236,20 +2236,20 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 5.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 5.0.pt(),
             },
         );
         collector.set_current_page(1);
         collector.push_rect(
             &link,
             Rect {
-                x: 5.0,
-                y: 0.0,
-                width: 10.0,
-                height: 5.0,
+                x: 5.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 5.0.pt(),
             },
         );
 
@@ -2355,10 +2355,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
 
@@ -2373,10 +2373,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 20.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 20.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
 
