@@ -1,0 +1,60 @@
+[workspace]
+release = true
+# semver_check defaults to true for libraries, but fulgur-wasm/pyfulgur/fulgur-ruby
+# are bindings that aren't published to crates.io and have no registry baseline to
+# diff against — leave it off workspace-wide and opt in only where it's meaningful.
+semver_check = false
+# Default tag/release naming is per-package ("{{ package }}-v{{ version }}") once a
+# workspace has more than one publishable crate (fulgur + fulgur-cli here), which
+# would produce multiple tags/releases instead of the single v$VERSION tag the
+# current pipeline and this epic's design rely on. Disable by default, then opt a
+# single package back in below as the canonical release tag/name.
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "fulgur"
+version_group = "core"
+publish = true
+semver_check = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+
+[[package]]
+name = "fulgur-cli"
+version_group = "core"
+publish = true
+
+# git_only: without this, release-plz checks crates.io for these publish=false
+# crates, finds nothing, and they silently drop out of the "core" version_group
+# lockstep (only fulgur/fulgur-cli would get bumped). See fulgur-7b3l notes.
+[[package]]
+name = "fulgur-wasm"
+version_group = "core"
+publish = false
+git_only = true
+
+[[package]]
+name = "pyfulgur"
+version_group = "core"
+publish = false
+git_only = true
+
+[[package]]
+name = "fulgur-ruby"
+version_group = "core"
+publish = false
+git_only = true
+
+# release = false fully excludes these test/fixture crates (version 0.0.0) from
+# release-plz entirely — different from publish = false above, which still
+# version-tracks the binding crates via the core version_group.
+[[package]]
+name = "fulgur-vrt"
+release = false
+
+[[package]]
+name = "fulgur-wpt"
+release = false
