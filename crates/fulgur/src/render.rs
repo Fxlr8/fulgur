@@ -119,7 +119,7 @@ pub fn render_v2(
             };
             let x_pt = resolved_margin.left + first_frag.x.in_pt().to_f32();
             let y_pt = resolved_margin.top + body_y_off + first_frag.y.in_pt().to_f32();
-            dest_registry.record(id.as_str(), x_pt, y_pt);
+            dest_registry.record(id.as_str(), x_pt.pt(), y_pt.pt());
         }
     }
 
@@ -476,7 +476,7 @@ fn draw_v2_page(
             && let Some(c) = canvas.bookmark_collector.as_deref_mut()
         {
             let y_pt = margin_top_pt + first_frag.y.in_pt().to_f32();
-            c.record(anchor.level, anchor.label.clone(), y_pt);
+            c.record(anchor.level, anchor.label.clone(), y_pt.pt());
         }
 
         if transformed_descendants.contains(&node_id) {

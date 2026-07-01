@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::image::ImageFormat;
+use crate::units::F32Units;
 
 /// Registry of block-level anchor destinations discovered during a pre-pass
 /// walk of the paginated page tree.
@@ -21,7 +22,7 @@ use crate::image::ImageFormat;
 #[derive(Debug, Default)]
 pub struct DestinationRegistry {
     current_page_idx: usize,
-    entries: BTreeMap<String, (usize, Pt, Pt)>,
+    entries: BTreeMap<String, (usize, crate::units::Pt, crate::units::Pt)>,
     /// Stack of transforms applied to coordinates before storing.
     transform_stack: Vec<Affine2D>,
 }
@@ -62,21 +63,20 @@ impl DestinationRegistry {
     }
 
     /// Record an anchor destination. First-write-wins: later duplicates are ignored.
-    pub fn record(&mut self, id: &str, x: Pt, y: Pt) {
-        let (tx, ty) = self.current_transform().transform_point(x, y);
+    pub fn record(&mut self, id: &str, x: crate::units::Pt, y: crate::units::Pt) {
+        let (tx, ty) = self
+            .current_transform()
+            .transform_point(x.to_f32(), y.to_f32());
         self.entries
             .entry(id.to_string())
-            .or_insert((self.current_page_idx, tx, ty));
+            .or_insert((self.current_page_idx, tx.pt(), ty.pt()));
     }
 
     /// Look up a recorded anchor. Returns `(page_idx, x, y)`.
-    pub fn get(&self, id: &str) -> Option<(usize, Pt, Pt)> {
+    pub fn get(&self, id: &str) -> Option<(usize, crate::units::Pt, crate::units::Pt)> {
         self.entries.get(id).copied()
     }
 }
-
-/// Point unit (1/72 inch)
-pub type Pt = f32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Size {
@@ -202,10 +202,10 @@ impl Affine2D {
     /// transformed individually, preserving the krilla quad-point order:
     /// bottom-left → bottom-right → top-right → top-left.
     pub fn transform_rect(&self, r: &Rect) -> Quad {
-        let x0 = r.x;
-        let y0 = r.y;
-        let x1 = r.x + r.width;
-        let y1 = r.y + r.height;
+        let x0 = r.x.to_f32();
+        let y0 = r.y.to_f32();
+        let x1 = (r.x + r.width).to_f32();
+        let y1 = (r.y + r.height).to_f32();
         let bl = self.transform_point(x0, y1);
         let br = self.transform_point(x1, y1);
         let tr = self.transform_point(x1, y0);
@@ -279,10 +279,10 @@ pub enum BreakInside {
 /// top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
+    pub x: crate::units::Pt,
+    pub y: crate::units::Pt,
+    pub width: crate::units::Pt,
+    pub height: crate::units::Pt,
 }
 
 /// Four-point quadrilateral for transformed link areas.
@@ -403,7 +403,7 @@ impl LinkCollector {
         // Skip degenerate rects (non-positive width or height) to match the
         // filtering the old `rect_to_quad` helper performed via
         // `KRect::from_xywh`, which rejects them.
-        if rect.width <= 0.0 || rect.height <= 0.0 {
+        if rect.width <= crate::units::Pt::ZERO || rect.height <= crate::units::Pt::ZERO {
             return;
         }
         let quad = self.current_transform().transform_rect(&rect);
@@ -937,7 +937,7 @@ impl BlockStyle {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BookmarkEntry {
     pub page_idx: usize,
-    pub y_pt: Pt,
+    pub y_pt: crate::units::Pt,
     pub level: u8,
     pub label: String,
 }
@@ -960,7 +960,7 @@ impl BookmarkCollector {
         self.current_page_idx = idx;
     }
 
-    pub fn record(&mut self, level: u8, label: String, y_pt: Pt) {
+    pub fn record(&mut self, level: u8, label: String, y_pt: crate::units::Pt) {
         self.entries.push(BookmarkEntry {
             page_idx: self.current_page_idx,
             y_pt,
@@ -1578,18 +1578,18 @@ pub(crate) fn draw_block_border(
 /// Returns `(width, height)` in pt. If the intrinsic height is zero, both
 /// return values are zero (avoids division by zero for malformed images).
 pub(crate) fn clamp_marker_size(
-    intrinsic_width: Pt,
-    intrinsic_height: Pt,
-    line_height: Pt,
-) -> (Pt, Pt) {
-    if intrinsic_height <= 0.0 {
-        return (0.0, 0.0);
+    intrinsic_width: crate::units::Pt,
+    intrinsic_height: crate::units::Pt,
+    line_height: crate::units::Pt,
+) -> (crate::units::Pt, crate::units::Pt) {
+    if intrinsic_height <= crate::units::Pt::ZERO {
+        return (crate::units::Pt::ZERO, crate::units::Pt::ZERO);
     }
     if intrinsic_height <= line_height {
         (intrinsic_width, intrinsic_height)
     } else {
-        let scale = line_height / intrinsic_height;
-        (intrinsic_width * scale, line_height)
+        let scale = line_height / intrinsic_height; // Pt / Pt = f32
+        (intrinsic_width * scale, line_height) // Pt * f32 = Pt
     }
 }
 
@@ -1606,17 +1606,17 @@ mod dp_unit_tests {
         let mut reg = DestinationRegistry::new();
         reg.set_current_page(3);
         reg.push_transform(Affine2D::translation(10.0_f32.pt(), 20.0_f32.pt()));
-        reg.record("anchor", 5.0, 7.0);
+        reg.record("anchor", 5.0.pt(), 7.0.pt());
         let (page, x, y) = reg.get("anchor").expect("recorded");
         assert_eq!(page, 3);
-        assert!((x - 15.0).abs() < 1e-4);
-        assert!((y - 27.0).abs() < 1e-4);
+        assert!((x.to_f32() - 15.0).abs() < 1e-4);
+        assert!((y.to_f32() - 27.0).abs() < 1e-4);
         reg.pop_transform();
         // After pop, subsequent records use identity.
-        reg.record("anchor2", 1.0, 2.0);
+        reg.record("anchor2", 1.0.pt(), 2.0.pt());
         let (_, x2, y2) = reg.get("anchor2").expect("recorded");
-        assert!((x2 - 1.0).abs() < 1e-4);
-        assert!((y2 - 2.0).abs() < 1e-4);
+        assert!((x2.to_f32() - 1.0).abs() < 1e-4);
+        assert!((y2.to_f32() - 2.0).abs() < 1e-4);
     }
 
     // ── LinkCollector ──────────────────────────────────────
@@ -1638,10 +1638,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
 
@@ -1661,19 +1661,19 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 0.0.pt(),
+                height: 10.0.pt(),
             },
         );
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 0.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 0.0.pt(),
             },
         );
         assert!(collector.occurrences().is_empty());
@@ -1688,10 +1688,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
         collector.pop_transform();
@@ -1863,31 +1863,31 @@ mod dp_unit_tests {
 
     #[test]
     fn clamp_marker_size_zero_height_returns_zero_zero() {
-        let (w, h) = clamp_marker_size(20.0, 0.0, 12.0);
-        assert_eq!(w, 0.0);
-        assert_eq!(h, 0.0);
+        let (w, h) = clamp_marker_size(20.0.pt(), 0.0.pt(), 12.0.pt());
+        assert_eq!(w, crate::units::Pt::ZERO);
+        assert_eq!(h, crate::units::Pt::ZERO);
     }
 
     #[test]
     fn clamp_marker_size_negative_height_returns_zero_zero() {
-        let (w, h) = clamp_marker_size(20.0, -5.0, 12.0);
-        assert_eq!(w, 0.0);
-        assert_eq!(h, 0.0);
+        let (w, h) = clamp_marker_size(20.0.pt(), (-5.0).pt(), 12.0.pt());
+        assert_eq!(w, crate::units::Pt::ZERO);
+        assert_eq!(h, crate::units::Pt::ZERO);
     }
 
     #[test]
     fn clamp_marker_size_within_line_height_passes_through() {
-        let (w, h) = clamp_marker_size(20.0, 10.0, 12.0);
-        assert_eq!(w, 20.0);
-        assert_eq!(h, 10.0);
+        let (w, h) = clamp_marker_size(20.0.pt(), 10.0.pt(), 12.0.pt());
+        assert_eq!(w.to_f32(), 20.0);
+        assert_eq!(h.to_f32(), 10.0);
     }
 
     #[test]
     fn clamp_marker_size_oversized_scales_down_preserving_aspect() {
         // intrinsic 40×20, line_height 10 → scale = 0.5 → (20, 10).
-        let (w, h) = clamp_marker_size(40.0, 20.0, 10.0);
-        assert!((w - 20.0).abs() < 1e-5);
-        assert!((h - 10.0).abs() < 1e-5);
+        let (w, h) = clamp_marker_size(40.0.pt(), 20.0.pt(), 10.0.pt());
+        assert!((w.to_f32() - 20.0).abs() < 1e-5);
+        assert!((h.to_f32() - 10.0).abs() < 1e-5);
     }
 
     // ── Affine2D math ───────────────────────────────────────
@@ -1958,10 +1958,10 @@ mod dp_unit_tests {
     #[test]
     fn affine2d_transform_rect_identity_is_noop() {
         let r = Rect {
-            x: 2.0,
-            y: 3.0,
-            width: 4.0,
-            height: 5.0,
+            x: 2.0.pt(),
+            y: 3.0.pt(),
+            width: 4.0.pt(),
+            height: 5.0.pt(),
         };
         let q = Affine2D::IDENTITY.transform_rect(&r);
         // bottom-left, bottom-right, top-right, top-left in Y-down coords
@@ -1978,10 +1978,10 @@ mod dp_unit_tests {
     #[test]
     fn affine2d_transform_rect_translation_shifts_all_corners() {
         let r = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 10.0,
-            height: 5.0,
+            x: 0.0.pt(),
+            y: 0.0.pt(),
+            width: 10.0.pt(),
+            height: 5.0.pt(),
         };
         let t = Affine2D::translation(2.0_f32.pt(), 3.0_f32.pt());
         let q = t.transform_rect(&r);
@@ -2141,16 +2141,16 @@ mod dp_unit_tests {
     fn bookmark_collector_records_on_correct_page() {
         let mut bc = BookmarkCollector::new();
         bc.set_current_page(2);
-        bc.record(1, "Chapter One".to_string(), 100.0);
+        bc.record(1, "Chapter One".to_string(), 100.0.pt());
         bc.set_current_page(5);
-        bc.record(2, "Section 5.1".to_string(), 42.0);
+        bc.record(2, "Section 5.1".to_string(), 42.0.pt());
 
         let entries = bc.into_entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].page_idx, 2);
         assert_eq!(entries[0].level, 1);
         assert_eq!(entries[0].label, "Chapter One");
-        assert!((entries[0].y_pt - 100.0).abs() < 1e-5);
+        assert!((entries[0].y_pt.to_f32() - 100.0).abs() < 1e-5);
         assert_eq!(entries[1].page_idx, 5);
         assert_eq!(entries[1].level, 2);
         assert_eq!(entries[1].label, "Section 5.1");
@@ -2192,20 +2192,20 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 5.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 5.0.pt(),
             },
         );
         collector.set_current_page(2);
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 20.0,
-                height: 5.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 20.0.pt(),
+                height: 5.0.pt(),
             },
         );
 
@@ -2236,20 +2236,20 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 5.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 5.0.pt(),
             },
         );
         collector.set_current_page(1);
         collector.push_rect(
             &link,
             Rect {
-                x: 5.0,
-                y: 0.0,
-                width: 10.0,
-                height: 5.0,
+                x: 5.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 5.0.pt(),
             },
         );
 
@@ -2263,13 +2263,13 @@ mod dp_unit_tests {
     fn destination_registry_first_write_wins_for_duplicate_ids() {
         let mut reg = DestinationRegistry::new();
         reg.set_current_page(0);
-        reg.record("anchor", 10.0, 20.0);
+        reg.record("anchor", 10.0.pt(), 20.0.pt());
         reg.set_current_page(1);
-        reg.record("anchor", 99.0, 99.0); // duplicate — should be ignored
+        reg.record("anchor", 99.0.pt(), 99.0.pt()); // duplicate — should be ignored
         let (page, x, y) = reg.get("anchor").expect("recorded");
         assert_eq!(page, 0, "first write should win");
-        assert!((x - 10.0).abs() < 1e-5);
-        assert!((y - 20.0).abs() < 1e-5);
+        assert!((x.to_f32() - 10.0).abs() < 1e-5);
+        assert!((y.to_f32() - 20.0).abs() < 1e-5);
     }
 
     // ── compute_overflow_clip_path: y-only clip branch ───────
@@ -2355,10 +2355,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 0.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
 
@@ -2373,10 +2373,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 20.0,
-                y: 0.0,
-                width: 10.0,
-                height: 10.0,
+                x: 20.0.pt(),
+                y: 0.0.pt(),
+                width: 10.0.pt(),
+                height: 10.0.pt(),
             },
         );
 

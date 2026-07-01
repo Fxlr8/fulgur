@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use skrifa::MetadataProvider;
 
-use crate::draw_primitives::{Canvas, Pt};
+use crate::draw_primitives::Canvas;
 use crate::image::ImageFormat;
 use crate::units::F32Units;
 
@@ -560,8 +560,8 @@ pub struct InlineBoxRenderCtx<'a> {
     /// Page margin in PDF pt — needed by `draw_under_clip` /
     /// `draw_under_transform` / `draw_under_opacity` to compute
     /// descendant positions during the offset-transform dispatch.
-    pub margin_left_pt: Pt,
-    pub margin_top_pt: Pt,
+    pub margin_left_pt: f32,
+    pub margin_top_pt: f32,
 }
 
 /// Tracks the currently-open per-run tagged region while `draw_shaped_lines`
@@ -728,10 +728,10 @@ pub fn draw_shaped_lines(
                         let run_width: crate::units::Pt =
                             run.glyphs.iter().map(|g| g.x_advance * run.font_size).sum();
                         let rect = crate::draw_primitives::Rect {
-                            x: (x + run.x_offset).to_f32(),
-                            y: line_top_abs.to_f32(),
-                            width: run_width.max(crate::units::Pt::ZERO).to_f32(),
-                            height: line.height.to_f32(),
+                            x: x + run.x_offset,
+                            y: line_top_abs,
+                            width: run_width.max(crate::units::Pt::ZERO),
+                            height: line.height,
                         };
                         if let Some(collector) = canvas.link_collector.as_deref_mut() {
                             collector.push_rect(link_span, rect);
@@ -770,10 +770,10 @@ pub fn draw_shaped_lines(
                     // (x + x_offset, y + computed_y, width, height).
                     if let Some(link_span) = img.link.as_ref() {
                         let rect = crate::draw_primitives::Rect {
-                            x: (x + img.x_offset).to_f32(),
-                            y: (y + img.computed_y).to_f32(),
-                            width: img.width.max(crate::units::Pt::ZERO).to_f32(),
-                            height: img.height.max(crate::units::Pt::ZERO).to_f32(),
+                            x: x + img.x_offset,
+                            y: y + img.computed_y,
+                            width: img.width.max(crate::units::Pt::ZERO),
+                            height: img.height.max(crate::units::Pt::ZERO),
                         };
                         if let Some(collector) = canvas.link_collector.as_deref_mut() {
                             collector.push_rect(link_span, rect);
@@ -867,10 +867,10 @@ pub fn draw_shaped_lines(
                     // hit-areas remain intact even for opacity<1.0 boxes.
                     if let Some(link_span) = ib.link.as_ref() {
                         let rect = crate::draw_primitives::Rect {
-                            x: ox.to_f32(),
-                            y: oy.to_f32(),
-                            width: ib.width.max(crate::units::Pt::ZERO).to_f32(),
-                            height: ib.height.max(crate::units::Pt::ZERO).to_f32(),
+                            x: ox,
+                            y: oy,
+                            width: ib.width.max(crate::units::Pt::ZERO),
+                            height: ib.height.max(crate::units::Pt::ZERO),
                         };
                         if let Some(collector) = canvas.link_collector.as_deref_mut() {
                             collector.push_rect(link_span, rect);

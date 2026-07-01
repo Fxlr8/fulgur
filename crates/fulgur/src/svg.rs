@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use usvg::Tree;
 
-use crate::draw_primitives::{Canvas, Pt};
+use crate::draw_primitives::Canvas;
 
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
@@ -45,10 +45,10 @@ impl SvgRender {
     pub fn draw(
         &self,
         canvas: &mut Canvas<'_, '_>,
-        x: Pt,
-        y: Pt,
-        _avail_width: Pt,
-        _avail_height: Pt,
+        x: crate::units::Pt,
+        y: crate::units::Pt,
+        _avail_width: crate::units::Pt,
+        _avail_height: crate::units::Pt,
     ) {
         use crate::draw_primitives::draw_with_opacity;
         use krilla_svg::{SurfaceExt, SvgSettings};
@@ -60,7 +60,7 @@ impl SvgRender {
             let Some(size) = krilla::geom::Size::from_wh(self.width, self.height) else {
                 return;
             };
-            let transform = krilla::geom::Transform::from_translate(x, y);
+            let transform = krilla::geom::Transform::from_translate(x.to_f32(), y.to_f32());
             canvas.surface.push_transform(&transform);
             // draw_svg returns Option<()>; None means the tree was malformed.
             // We silently skip rather than panic, matching ImageRender's behavior
@@ -75,6 +75,7 @@ impl SvgRender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::F32Units;
 
     // Minimal valid SVG: 100x50 red rectangle
     const MINIMAL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
@@ -102,7 +103,7 @@ mod tests {
                     tag_collector: None,
                     link_run_node_id: None,
                 };
-                svg.draw(&mut canvas, 10.0, 20.0, 400.0, 400.0);
+                svg.draw(&mut canvas, 10.0.pt(), 20.0.pt(), 400.0.pt(), 400.0.pt());
             }
         }
         let _ = doc.finish();

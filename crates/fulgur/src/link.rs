@@ -53,7 +53,8 @@ pub(crate) fn emit_link_annotations(
                 Some((page_idx, x_pt, y_pt)) => {
                     // x and y are in page-local (top-down) coordinates;
                     // krilla flips to PDF bottom-up during serialization.
-                    let dest = XyzDestination::new(page_idx, Point::from_xy(x_pt, y_pt));
+                    let dest =
+                        XyzDestination::new(page_idx, Point::from_xy(x_pt.to_f32(), y_pt.to_f32()));
                     Target::Destination(Destination::Xyz(dest))
                 }
                 None => {
@@ -95,6 +96,7 @@ mod tests {
 
     use crate::draw_primitives::{DestinationRegistry, LinkOccurrence, Quad};
     use crate::paragraph::LinkTarget;
+    use crate::units::F32Units;
 
     use super::emit_link_annotations;
 
@@ -239,7 +241,7 @@ mod tests {
             let mut registry = DestinationRegistry::new();
             // Use page 0 so the destination is valid within this single-page document.
             registry.set_current_page(0);
-            registry.record("section1", 0.0, 120.0);
+            registry.record("section1", 0.0.pt(), 120.0.pt());
             let occ = int_occ("section1", vec![make_quad(10.0, 40.0, 80.0, 12.0)]);
             emit_link_annotations(&mut page, &[occ], &registry, None);
         }
@@ -316,7 +318,7 @@ mod tests {
             let mut page = doc.start_page_with(page_settings());
             let mut registry = DestinationRegistry::new();
             registry.set_current_page(0);
-            registry.record("anchor", 0.0, 300.0);
+            registry.record("anchor", 0.0.pt(), 300.0.pt());
             let occs = vec![
                 ext_occ("https://a.example", vec![make_quad(0.0, 0.0, 60.0, 12.0)]), // emitted
                 int_occ("anchor", vec![make_quad(0.0, 20.0, 60.0, 12.0)]), // emitted (resolved)

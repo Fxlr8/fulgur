@@ -34,14 +34,14 @@ fn size_raster_marker(
     data: &Arc<Vec<u8>>,
     format: crate::image::ImageFormat,
     line_height: f32,
-) -> Option<(f32, f32)> {
+) -> Option<(crate::units::Pt, crate::units::Pt)> {
     let (iw, ih) = ImageRender::decode_dimensions(data, format)?;
-    let intrinsic_w = px_to_pt(iw as f32);
-    let intrinsic_h = px_to_pt(ih as f32);
+    let intrinsic_w = px_to_pt(iw as f32).pt();
+    let intrinsic_h = px_to_pt(ih as f32).pt();
     Some(crate::draw_primitives::clamp_marker_size(
         intrinsic_w,
         intrinsic_h,
-        line_height,
+        line_height.pt(),
     ))
 }
 
@@ -74,35 +74,38 @@ pub(super) fn resolve_list_marker(
             let entry = crate::drawables::ImageEntry {
                 image_data: Arc::clone(data),
                 format,
-                width: width.pt(),
-                height: height.pt(),
+                width,
+                height,
                 opacity: 1.0,
                 visible: true,
             };
             Some(ListItemMarker::Image {
                 marker: ImageMarker::Raster(entry),
-                width: width.pt(),
-                height: height.pt(),
+                width,
+                height,
             })
         }
         AssetKind::Svg => {
             let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
             let size = tree.size();
-            let intrinsic_w = px_to_pt(size.width());
-            let intrinsic_h = px_to_pt(size.height());
-            let (width, height) =
-                crate::draw_primitives::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
+            let intrinsic_w = px_to_pt(size.width()).pt();
+            let intrinsic_h = px_to_pt(size.height()).pt();
+            let (width, height) = crate::draw_primitives::clamp_marker_size(
+                intrinsic_w,
+                intrinsic_h,
+                line_height.pt(),
+            );
             let entry = crate::drawables::SvgEntry {
                 tree: Arc::new(tree),
-                width: width.pt(),
-                height: height.pt(),
+                width,
+                height,
                 opacity: 1.0,
                 visible: true,
             };
             Some(ListItemMarker::Image {
                 marker: ImageMarker::Svg(entry),
-                width: width.pt(),
-                height: height.pt(),
+                width,
+                height,
             })
         }
         AssetKind::Unknown => None,
@@ -137,8 +140,8 @@ pub(super) fn resolve_inside_image_marker(
             Some(InlineImage {
                 data: Arc::clone(data),
                 format,
-                width: width.pt(),
-                height: height.pt(),
+                width,
+                height,
                 x_offset: crate::units::Pt::ZERO,
                 vertical_align: VerticalAlign::Baseline,
                 opacity: 1.0,
@@ -426,6 +429,7 @@ mod tests {
         let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 12.0);
         assert!(result.is_some());
         let (w, h) = result.unwrap();
+        let (w, h) = (w.to_f32(), h.to_f32());
         assert!((w - 0.75).abs() < 1e-4, "expected w≈0.75, got {w}");
         assert!((h - 0.75).abs() < 1e-4, "expected h≈0.75, got {h}");
     }
@@ -444,6 +448,7 @@ mod tests {
         let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 0.5);
         assert!(result.is_some());
         let (w, h) = result.unwrap();
+        let (w, h) = (w.to_f32(), h.to_f32());
         assert!((h - 0.5).abs() < 1e-4, "expected h≈0.5, got {h}");
         assert!((w - 0.5).abs() < 1e-4, "expected w≈0.5, got {w}");
     }
