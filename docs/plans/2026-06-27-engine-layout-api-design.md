@@ -294,7 +294,7 @@ Phase P1c typed `pagination_layout::Fragment`'s coordinate fields to
 Unblocks P1e (`fulgur-2map.7`, `Drawables` aggregate coordinate fields). The
 `type Pt = f32` alias removal remains P2 (`fulgur-2map.8`).
 
-### P2a outcome (fulgur-2map.8) - `type Pt = f32` alias removed
+### P2a outcome (fulgur-2map.8) — `type Pt = f32` alias removed
 
 Phase P2a deleted the legacy `draw_primitives::Pt = f32` alias, byte-neutral
 (examples_determinism + VRT goldens unchanged):
@@ -302,8 +302,8 @@ Phase P2a deleted the legacy `draw_primitives::Pt = f32` alias, byte-neutral
 - `draw_primitives::Rect` (link-activation rect), `DestinationRegistry` (anchor
   resolution), `BookmarkEntry.y_pt`/`BookmarkCollector` (PDF outline), and
   `clamp_marker_size` (list-style-image marker sizing) retyped to `units::Pt`.
-- `InlineBoxRenderCtx`'s margin fields renamed `Pt` -> plain `f32` (no typed neighbor
-  exists there - see the epic's P2b sibling issue for the "genuine f32-f32 boundary, no
+- `InlineBoxRenderCtx`'s margin fields renamed `Pt` → plain `f32` (no typed neighbor
+  exists there — see the epic's P2b sibling issue for the "genuine f32-f32 boundary, no
   transitional gap" reasoning applied consistently).
 - `svg::SvgRender::draw` (confirmed dead code, not reachable from the v2 render path)
   retyped for completeness so the alias's last consumer was gone before deletion.
