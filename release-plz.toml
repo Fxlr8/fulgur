@@ -4,6 +4,12 @@ release = true
 # are bindings that aren't published to crates.io and have no registry baseline to
 # diff against — leave it off workspace-wide and opt in only where it's meaningful.
 semver_check = false
+# ZeroVer policy: never auto-bump patch, only minor. Matching everything here
+# means every triggering commit (conventional or not) resolves to Minor instead
+# of falling through to release-plz's default Patch case (see next_version's
+# is_minor_bump()/is_major_bump()); major stays pinned at 0 since
+# breaking_always_increment_major is left at its false default.
+custom_minor_increment_regex = ".*"
 # Default tag/release naming is per-package ("{{ package }}-v{{ version }}") once a
 # workspace has more than one publishable crate (fulgur + fulgur-cli here), which
 # would produce multiple tags/releases instead of the single v$VERSION tag the
