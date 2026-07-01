@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use skrifa::MetadataProvider;
 
-use crate::draw_primitives::{Canvas, Pt};
+use crate::draw_primitives::Canvas;
 use crate::image::ImageFormat;
 use crate::units::F32Units;
 
@@ -560,8 +560,8 @@ pub struct InlineBoxRenderCtx<'a> {
     /// Page margin in PDF pt — needed by `draw_under_clip` /
     /// `draw_under_transform` / `draw_under_opacity` to compute
     /// descendant positions during the offset-transform dispatch.
-    pub margin_left_pt: Pt,
-    pub margin_top_pt: Pt,
+    pub margin_left_pt: f32,
+    pub margin_top_pt: f32,
 }
 
 /// Tracks the currently-open per-run tagged region while `draw_shaped_lines`
