@@ -5324,6 +5324,30 @@ mod transform_tests {
     }
 
     #[test]
+    fn translate_x_only_sets_e_leaves_f_zero() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: translateX(10px)">hi</div>
+        </body></html>"#;
+        let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
+        let me = m.e.to_f32();
+        let mf = m.f.to_f32();
+        assert!(approx(me, 10.0), "translateX e should be 10, got {me}");
+        assert!(approx(mf, 0.0), "translateX f should be 0, got {mf}");
+    }
+
+    #[test]
+    fn translate_y_only_sets_f_leaves_e_zero() {
+        let html = r#"<!DOCTYPE html><html><body>
+            <div style="transform: translateY(20px)">hi</div>
+        </body></html>"#;
+        let (m, _) = compute_for_div(html, 100.0, 100.0).expect("should have transform");
+        let me = m.e.to_f32();
+        let mf = m.f.to_f32();
+        assert!(approx(me, 0.0), "translateY e should be 0, got {me}");
+        assert!(approx(mf, 20.0), "translateY f should be 20, got {mf}");
+    }
+
+    #[test]
     fn translate_percent_resolves_against_border_box() {
         let html = r#"<!DOCTYPE html><html><body>
             <div style="transform: translate(50%, 25%)">hi</div>
