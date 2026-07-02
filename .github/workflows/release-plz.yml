@@ -10,11 +10,63 @@ on:
   push:
     branches:
       - main
+  # Manual escape hatch if a real release wasn't detected from the push (e.g. the
+  # Release PR was squash-merged with a hand-edited subject). A workflow_dispatch
+  # run still pauses on the `crates-io` environment approval before publishing.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The `release` job below runs on EVERY push to main but only actually
+  # publishes when a Release PR was just merged. Its `crates-io` environment
+  # carries required reviewers (the release-execution approval, ②), and an
+  # environment gate pauses a job the moment it becomes eligible to run — so
+  # without a guard, every ordinary merge to main would sit waiting for a release
+  # approval. This job detects whether the push is a real release; the `release`
+  # job is `if:`-gated on the result, so the approval prompt appears on real
+  # releases alone.
+  check-releases:
+    name: Detect a real release
+    runs-on: ubuntu-latest
+    outputs:
+      has_releases: ${{ steps.check.outputs.has_releases }}
+    steps:
+      - name: Determine whether this push is an actual release
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+          COMMIT_MSGS: ${{ toJSON(github.event.commits.*.message) }}
+        run: |
+          set -euo pipefail
+          emit() { echo "has_releases=$1" >> "$GITHUB_OUTPUT"; echo "has_releases=$1 ($2)"; }
+
+          # Manual escape hatch — still gated by the crates-io env approval.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then emit true "workflow_dispatch"; exit 0; fi
+          if [ "$REF" != "refs/heads/main" ]; then emit false "not main"; exit 0; fi
+
+          # Merge-commit path: the Release PR head branch is `release-plz-<date>`,
+          # which appears in the default "Merge pull request …" commit subject.
+          HEAD_SUBJECT="${HEAD_MSG%%$'\n'*}"
+          if printf '%s\n' "$HEAD_SUBJECT" | grep -qE 'release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+            emit true "release-plz merge commit"; exit 0
+          fi
+
+          # Merge-method-agnostic path: release-plz always creates a
+          # `chore: release vX.Y.Z` commit for a real release. It is in the push
+          # whether the Release PR was merge-committed (as an inner commit) or
+          # squash-merged (as the squash commit itself), so scan EVERY pushed
+          # commit subject — detection then doesn't depend on the merge method.
+          if printf '%s' "$COMMIT_MSGS" | jq -r '.[]? | split("\n")[0]' \
+               | grep -qE '^chore: release([[:space:]]|$)'; then
+            emit true "chore: release commit in push"; exit 0
+          fi
+
+          emit false "no release markers"
+
   release-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
@@ -138,7 +190,11 @@ jobs:
 
   release:
     name: Release-plz release
-    needs: release-pr
+    needs: [release-pr, check-releases]
+    # Only run — and thus only hit the `crates-io` approval gate — on an actual
+    # release. See check-releases above for why (this is what keeps ordinary
+    # merges to main from pausing on a release approval).
+    if: needs.check-releases.outputs.has_releases == 'true'
     runs-on: ubuntu-latest
     # Serialize publishing so a main push that lands while a release is still
     # in flight can't start a second `release-plz release` from a newer SHA and
@@ -147,10 +203,19 @@ jobs:
     concurrency:
       group: release-plz-publish
       cancel-in-progress: false
-    # `environment: release` stamps the OIDC token with an `environment` claim
-    # so it matches the crates.io Trusted Publisher (registered with
-    # Environment = release), scoping the publisher to this workflow + env.
-    environment: release
+    # `environment: crates-io` does double duty:
+    #   1. Release-execution approval gate (②): this environment carries required
+    #      reviewers, so a maintainer must approve before crates.io publish + tag
+    #      creation. Because tag creation cascades to release.yml (GitHub Release
+    #      → npm / PyPI / RubyGems), approving here authorizes the WHOLE release.
+    #      Reviewing the release *contents* (①) is the separate
+    #      `release-pr-approval` status check on the Release PR — see
+    #      docs/RELEASE_SETUP.md.
+    #   2. Stamps the OIDC token with `environment:crates-io` so it matches the
+    #      crates.io Trusted Publisher (register it with Environment = crates-io).
+    # The `release` environment stays reviewer-less; it is used only for npm OIDC
+    # in release.yml's publish-npm job.
+    environment: crates-io
     permissions:
       contents: write
       id-token: write  # required by rust-lang/crates-io-auth-action (OIDC)
