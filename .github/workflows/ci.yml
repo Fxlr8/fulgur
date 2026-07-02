@@ -87,11 +87,17 @@ jobs:
         if: runner.os == 'Linux'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
-          tool-cache: false
+          # `tool-cache` + `large-packages` removal is slow (~1-2 min each), so pay
+          # it only on the coverage cell — it runs `cargo llvm-cov nextest` twice
+          # (instrumented build + profraw) and was flaking on "No space left on
+          # device". Other Linux cells keep them off (no time cost). The coverage
+          # job uses none of the hostedtoolcache (Rust via rustup, cargo-llvm-cov /
+          # nextest via taiki-e into ~/.cargo/bin), so removing tool-cache is safe.
+          tool-cache: ${{ matrix.coverage }}
           android: true
           dotnet: true
           haskell: true
-          large-packages: false
+          large-packages: ${{ matrix.coverage }}
           docker-images: true
           swap-storage: false
       - uses: actions/checkout@v6
