@@ -16,10 +16,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # crates.io publish + tag creation now live in release-plz.yml's `release`
-  # job (gated by the Release PR merge, not an environment approval). This
-  # workflow starts from the pushed `vX.Y.Z` tag, so all it needs up front is
-  # the bare version (tag name minus the leading `v`) as a shared job output.
+  # crates.io publish + tag creation live in release-plz.yml's `release` job,
+  # which only runs after the Release PR merges — and that merge is gated by the
+  # `release-pr-approval` required status check (the single release approval).
+  # This workflow starts from the pushed `vX.Y.Z` tag, so all it needs up front
+  # is the bare version (tag name minus the leading `v`) as a shared job output.
+  # The direct-`v*`-tag-push bypass is closed at the source by the
+  # `RestrictReleaseTag` tag-protection ruleset (creation restricted to the
+  # release App), not by an approval gate in this workflow — see
+  # docs/RELEASE_SETUP.md.
   setup:
     name: Resolve release version
     runs-on: ubuntu-latest
@@ -147,6 +152,16 @@ jobs:
     name: Publish GitHub Release
     needs: [setup, build-binaries]
     runs-on: ubuntu-latest
+    # No `environment:` approval gate here BY DESIGN. The single release approval
+    # is the `release-pr-approval` required status check on the Release PR (see
+    # docs/RELEASE_SETUP.md → "Approval model"). A tag reaches this job only after
+    # that approval, because tag creation lives in release-plz.yml's (post-merge)
+    # `release` job. The one path that skips that — a `v*` tag pushed DIRECTLY —
+    # is blocked at the source by the `RestrictReleaseTag` tag ruleset, NOT by a
+    # gate here (which, with the `release` env carrying no required reviewers, would be
+    # inert anyway). Don't add `environment: release` here to "fix" a finding: it
+    # would imply a gate that isn't there. Publishing this Release fires
+    # `release:published`, which triggers release-python.yml / release-ruby.yml.
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -180,7 +195,7 @@ jobs:
               --repo "$REPO"
           fi
           # Upload binaries and publish (App token → release:published が連鎖発火)
-          # --clobber: approval gate reject 等での re-run 時に同名 asset を上書き
+          # --clobber: workflow re-run 時 (build 失敗リトライ等) に同名 asset を上書き
           gh release upload "v$VERSION" artifacts/* --clobber --repo "$REPO"
           gh release edit "v$VERSION" --draft=false --repo "$REPO"
 
@@ -198,6 +213,15 @@ jobs:
     # / release-ruby already reverse-look-up the merged PR's labels via the GH
     # API on `release:published`; f7o2 will give npm the same treatment.
     runs-on: ubuntu-latest
+    # `environment: release` here is NOT an approval gate (the `release`
+    # environment has no required reviewers — approval is the Release PR gate,
+    # see docs/RELEASE_SETUP.md). It is NOT a no-op either: referencing an
+    # environment sets this job's OIDC subject to `…:environment:release`, and npm
+    # Trusted Publishing can be configured to require that environment (the
+    # optional "Environment name" field on npmjs.com). Keep it in sync with the
+    # npm trusted-publisher registration. npm is safe from rogue tags because this
+    # job runs off the `vX.Y.Z` tag, which only exists after the approved Release
+    # PR merge (+ the `RestrictReleaseTag` ruleset).
     environment: release
     permissions:
       contents: read
