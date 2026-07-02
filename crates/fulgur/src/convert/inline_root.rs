@@ -1393,6 +1393,21 @@ mod tests {
 
     // ── smoke tests for try_convert code paths ────────────────────────────────
 
+    // Minimal 1×1 red PNG — shared by all smoke tests that need an image asset.
+    const RED_1X1_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xC9, 0xFE, 0x92, 0xEF, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn make_engine_with_dot_png() -> crate::engine::Engine {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        crate::engine::Engine::builder().assets(bundle).build()
+    }
+
     #[test]
     fn smoke_try_convert_inline_root_with_overflow_clip() {
         // A <p> with overflow:hidden is an inline root. needs_block_wrapper() is
@@ -1421,6 +1436,136 @@ mod tests {
                 <p style="opacity:0.5;background:#def">Faded paragraph</p>
                 </body></html>"#,
             )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert: before_inline map closure (lines 63-65) +
+    // inject into existing paragraph (lines 82-84).
+    // A <p> with text AND a ::before pseudo-image triggers both:
+    // - build_inline_pseudo_image returns Some → the .map() closure runs
+    // - paragraph_opt is Some (text present) → inject_inline_pseudo_images runs.
+    #[test]
+    fn smoke_before_inline_image_on_paragraph_with_text() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"p::before { content: url("dot.png"); width: 8px; height: 8px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(r#"<!doctype html><html><body><p>Hello world</p></body></html>"#)
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert: after_inline map closure (lines 74-76) +
+    // inject into existing paragraph (lines 82-84).
+    #[test]
+    fn smoke_after_inline_image_on_paragraph_with_text() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"p::after { content: url("dot.png"); width: 8px; height: 8px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(r#"<!doctype html><html><body><p>Hello world</p></body></html>"#)
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert: both before and after inline images, with text present —
+    // exercises both map closures and the combined inject path.
+    #[test]
+    fn smoke_before_and_after_inline_images_on_paragraph_with_text() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"p::before { content: url("dot.png"); width: 6px; height: 6px; }
+               p::after  { content: url("dot.png"); width: 6px; height: 6px; }"#,
+        );
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(r#"<!doctype html><html><body><p>Both sides</p></body></html>"#)
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert: pseudo-only inline root — element with ::before image but no
+    // text content. paragraph_opt is None; before_inline is Some, so the
+    // "synthesize minimal paragraph" branch (lines 162-222) is taken if the
+    // element is flagged as an inline root by Blitz.
+    #[test]
+    fn smoke_pseudo_only_before_image_empty_inline_root() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle
+            .add_css(r#"p.marker::before { content: url("dot.png"); width: 10px; height: 10px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <p class="marker"></p>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert: inside list-style-image on an inline-root <li> (lines 88-107).
+    // The <li> directly contains text (making it an inline root). With
+    // list-style-position: inside and list-style-image: url(bullet.png),
+    // resolve_inside_image_marker returns Some and the shift loop runs.
+    #[test]
+    fn smoke_inside_list_image_marker_on_inline_root_li() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("bullet.png", RED_1X1_PNG.to_vec());
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-position: inside;
+                           list-style-image: url('bullet.png')">
+                    <li>Item with inside image marker</li>
+                    <li>Second item</li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert: inside list-style-image where the <li> also has a ::before
+    // inline pseudo image — both marker shift and before_inline inject run.
+    #[test]
+    fn smoke_inside_list_image_marker_with_before_pseudo_on_inline_root_li() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("bullet.png", RED_1X1_PNG.to_vec());
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"li::before { content: url("dot.png"); width: 6px; height: 6px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-position: inside;
+                           list-style-image: url('bullet.png')">
+                    <li>Marker + before pseudo</li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // inline_box_baseline_from_drawables: the `make_engine_with_dot_png` helper
+    // is used here to ensure the helper compiles and its asset bundle is wired.
+    #[test]
+    fn smoke_make_engine_with_dot_png_helper_compiles() {
+        let pdf = make_engine_with_dot_png()
+            .render(r#"<!doctype html><html><body><p>ok</p></body></html>"#)
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
     }
