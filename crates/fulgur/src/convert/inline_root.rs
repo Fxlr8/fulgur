@@ -1411,7 +1411,7 @@ mod tests {
     fn pdf_has_image(pdf: &[u8]) -> bool {
         pdf.windows(b"/Subtype /Image".len())
             .any(|w| w == b"/Subtype /Image")
-            || pdf
+            | pdf
                 .windows(b"/Subtype/Image".len())
                 .any(|w| w == b"/Subtype/Image")
     }
