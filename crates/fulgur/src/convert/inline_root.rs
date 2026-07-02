@@ -1408,6 +1408,14 @@ mod tests {
         crate::engine::Engine::builder().assets(bundle).build()
     }
 
+    fn pdf_has_image(pdf: &[u8]) -> bool {
+        pdf.windows(b"/Subtype /Image".len())
+            .any(|w| w == b"/Subtype /Image")
+            || pdf
+                .windows(b"/Subtype/Image".len())
+                .any(|w| w == b"/Subtype/Image")
+    }
+
     #[test]
     fn smoke_try_convert_inline_root_with_overflow_clip() {
         // A <p> with overflow:hidden is an inline root. needs_block_wrapper() is
@@ -1456,6 +1464,10 @@ mod tests {
             .render(r#"<!doctype html><html><body><p>Hello world</p></body></html>"#)
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — ::before pseudo-image injection branch may have been skipped"
+        );
     }
 
     // try_convert: after_inline map closure (lines 74-76) +
@@ -1471,6 +1483,10 @@ mod tests {
             .render(r#"<!doctype html><html><body><p>Hello world</p></body></html>"#)
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — ::after pseudo-image injection branch may have been skipped"
+        );
     }
 
     // try_convert: both before and after inline images, with text present —
@@ -1489,6 +1505,10 @@ mod tests {
             .render(r#"<!doctype html><html><body><p>Both sides</p></body></html>"#)
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — ::before/::after combined injection branch may have been skipped"
+        );
     }
 
     // try_convert: pseudo-only inline root — element with ::before image but no
@@ -1511,6 +1531,10 @@ mod tests {
             )
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — pseudo-only paragraph synthesis branch may have been skipped"
+        );
     }
 
     // try_convert: inside list-style-image on an inline-root <li> (lines 88-107).
@@ -1535,6 +1559,10 @@ mod tests {
             )
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — inside list-style-image marker shift branch may have been skipped"
+        );
     }
 
     // try_convert: inside list-style-image where the <li> also has a ::before
@@ -1558,6 +1586,10 @@ mod tests {
             )
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — inside marker + ::before combined injection branch may have been skipped"
+        );
     }
 
     // inline_box_baseline_from_drawables: the `make_engine_with_dot_png` helper
