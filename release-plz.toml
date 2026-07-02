@@ -84,10 +84,18 @@ git_only = true
 # release = false fully excludes these test/fixture crates (version 0.0.0) from
 # release-plz entirely — different from publish = false above, which still
 # version-tracks the binding crates via the core version_group.
+# publish = false is still required alongside release = false: `release-plz
+# release` validates that each package's configured publish flag matches its
+# Cargo.toml (which has publish = false here), and errors before the release =
+# false exclusion is applied otherwise. (release-pr/update skip this check, so
+# the mismatch only surfaced once release-plz.yml first ran `release-plz
+# release`.)
 [[package]]
 name = "fulgur-vrt"
 release = false
+publish = false
 
 [[package]]
 name = "fulgur-wpt"
 release = false
+publish = false
