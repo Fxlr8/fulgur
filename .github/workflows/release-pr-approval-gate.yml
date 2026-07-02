@@ -79,5 +79,9 @@ jobs:
           if [ "${approvals:-0}" -ge 1 ]; then
             set_status success "Approved by a maintainer on the current commit"
           else
-            set_status failure "A maintainer must approve this Release PR (on the current commit) before it can merge"
+            # `pending` (not `failure`): a Release PR awaiting approval is not a
+            # broken build. A required check must be `success` to merge, so
+            # `pending` still blocks the merge — but it shows a neutral "waiting"
+            # indicator instead of a red ✗ that looks like a CI failure.
+            set_status pending "Waiting for a maintainer approval on the current commit"
           fi
