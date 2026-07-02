@@ -243,10 +243,12 @@ any ruleset edit; do not assume from this doc:
    Release + PyPI + RubyGems. Without this ruleset that path is unauthenticated
    for anyone with tag-push (write) access.
 
-> ⚠️ Status as of 2026-07-02: #1 and #2 are active in the `main` branch ruleset;
-> **#3 does not exist yet.** Until the `v*` tag ruleset is created, the direct-
-> tag-push hole is open and the "one approval" model is not actually enforced for
-> that path. This branch's workflow/doc changes do **not** close it on their own.
+> Status as of 2026-07-02: all three controls are live. #1 and #2 are in the
+> `main` branch ruleset; #3 is the `RestrictReleaseTag` tag ruleset (target
+> `refs/tags/v[0-9]*.[0-9]*.[0-9]*`, restrict creations/updates/deletions), whose
+> only bypass actor is the `fulgur-release-bot` App — no admin blanket bypass, so
+> even a maintainer cannot push a `v*` tag directly. Re-verify with
+> `gh api repos/<owner>/<repo>/rulesets` after any settings change.
 
 ### Tag-protection ruleset (control #3 — the direct-tag-push block)
 
