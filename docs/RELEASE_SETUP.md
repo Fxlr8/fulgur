@@ -283,8 +283,9 @@ Environments / Rules) and re-check after edits:
 >
 > **Rollout caveat (crates.io TP):** this workflow stamps the OIDC subject
 > `…:environment:crates-io`, but a crates.io Trusted Publisher registered only for
-> `environment: release` will reject it. Register the `crates-io` crates.io Trusted
-> Publisher (alongside the existing `release` one) **before this change merges**, or
+> `environment: release` will reject it. Register a crates.io Trusted Publisher for
+> the `crates-io` environment (alongside the existing `release` one) **before this
+> change merges**, or
 > the next release fails at crates.io auth; remove the old `release` publisher after
 > a successful release. Re-verify rulesets with `gh api repos/<owner>/<repo>/rulesets`.
 
