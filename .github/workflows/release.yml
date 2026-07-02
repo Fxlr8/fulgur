@@ -1,9 +1,13 @@
 name: Release
 
+# release-plz.yml publishes to crates.io and pushes the `vX.Y.Z` tag (with an
+# App token, so this tag push fires other workflows). This workflow picks up
+# from that tag: build platform binaries, attach them to the draft GH Release
+# release-plz created, flip it to non-draft, and publish npm packages.
 on:
-  pull_request:
-    types: [closed]
-    branches: [main]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -12,106 +16,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  publish:
-    name: Publish to crates.io
-    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
+  # crates.io publish + tag creation now live in release-plz.yml's `release`
+  # job (gated by the Release PR merge, not an environment approval). This
+  # workflow starts from the pushed `vX.Y.Z` tag, so all it needs up front is
+  # the bare version (tag name minus the leading `v`) as a shared job output.
+  setup:
+    name: Resolve release version
     runs-on: ubuntu-latest
-    # tag push / crates.io publish は irreversible なので required_reviewers で gate する。
-    # Environment `release` に reviewers を設定すること (docs/RELEASE_SETUP.md)。
-    environment: release
-    # id-token: write は rust-lang/crates-io-auth-action が OIDC token を
-    # 取得するために必要 (crates.io Trusted Publisher フロー)。contents: write
-    # はトップレベル permissions を job 側で override すると消えるので再指定する。
-    permissions:
-      contents: write
-      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-latest-fulgur
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Configure fast build
-        run: |
-          sudo apt-get update && sudo apt-get install -y mold
-          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
-
-      - name: Extract version from branch name
+      - name: Extract version from tag
         id: version
-        env:
-          BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          VERSION="${BRANCH#release/v}"
+          VERSION="${GITHUB_REF_NAME#v}"
           # Validate semver format
           if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::Invalid version from branch name: $VERSION"
+            echo "::error::Invalid version from tag: $GITHUB_REF_NAME"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing version: $VERSION"
-
-      # tag が指す commit に .github/workflows/*.yml の変更が含まれると、
-      # GITHUB_TOKEN では push が拒否される (workflows permission が無いため)。
-      # release bot App token は `Workflows: Read and write` 権限を持つ
-      # 前提で発行されるので、そちらを使う (docs/RELEASE_SETUP.md 参照)。
-      - name: Generate App token for tag push
-        id: app-token-tag
-        uses: actions/create-github-app-token@v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
-      - name: Tag release
-        env:
-          GH_TOKEN: ${{ steps.app-token-tag.outputs.token }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git tag "v$VERSION" || true
-          git push origin "v$VERSION" --force
-
-      # crates.io Trusted Publishing: rust-lang/crates-io-auth-action が OIDC
-      # claim (repo + workflow + environment) を crates.io に提示して短命 token
-      # を発行する。長期 PAT (CARGO_REGISTRY_TOKEN) を secrets に持たなくてよい。
-      - name: Authenticate to crates.io
-        id: crates-auth
-        uses: rust-lang/crates-io-auth-action@v1
-
-      - name: Publish fulgur (lib)
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-        run: cargo publish -p fulgur
-
-      - name: Publish fulgur-cli (with retry)
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-        run: |
-          for i in 1 2 3 4 5 6 7 8; do
-            echo "Attempt $i: publishing fulgur-cli..."
-            if cargo publish -p fulgur-cli 2>&1; then
-              echo "Published successfully."
-              exit 0
-            fi
-            WAIT=$((15 * i))
-            echo "Failed. Waiting ${WAIT}s for crates.io index..."
-            sleep "$WAIT"
-          done
-          echo "::error::Failed to publish fulgur-cli after 8 attempts"
-          exit 1
+          echo "Releasing version: $VERSION"
 
   build-binaries:
     name: Build ${{ matrix.target }}
-    needs: publish
+    needs: setup
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -149,7 +78,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: "v${{ needs.publish.outputs.version }}"
+          ref: "v${{ needs.setup.outputs.version }}"
+          # Read-only checkout (build binaries / publish npm from artifacts);
+          # no push happens here, so don't leave the token in .git/config.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -179,14 +111,14 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../fulgur-v${{ needs.publish.outputs.version }}-${{ matrix.target }}.tar.gz fulgur
+          tar czf ../../../fulgur-v${{ needs.setup.outputs.version }}-${{ matrix.target }}.tar.gz fulgur
           cd ../../..
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/fulgur.exe" -DestinationPath "fulgur-v${{ needs.publish.outputs.version }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/fulgur.exe" -DestinationPath "fulgur-v${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip"
 
       - name: Stage npm binary (unix)
         if: matrix.archive == 'tar.gz'
@@ -209,11 +141,11 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: fulgur-${{ matrix.target }}
-          path: fulgur-v${{ needs.publish.outputs.version }}-${{ matrix.target }}.*
+          path: fulgur-v${{ needs.setup.outputs.version }}-${{ matrix.target }}.*
 
   release:
     name: Publish GitHub Release
-    needs: [publish, build-binaries]
+    needs: [setup, build-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -237,7 +169,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          VERSION="${{ needs.publish.outputs.version }}"
+          VERSION="${{ needs.setup.outputs.version }}"
           REPO="${{ github.repository }}"
           # Create release if draft doesn't exist (fallback)
           if ! gh release view "v$VERSION" --repo "$REPO" &>/dev/null; then
@@ -254,10 +186,17 @@ jobs:
 
   publish-npm:
     name: Publish npm packages
-    needs: [publish, build-binaries]
-    # GH Release (and CLI binary distribution) is unconditional, but the npm
-    # publish is gated by `release:skip-bindings` to allow core-only releases.
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'release:skip-bindings') }}
+    # Depend on `release` too so npm publishes only after the GitHub Release is
+    # published — a failed gh release upload/edit must not leave npm shipped
+    # while the release is missing its binaries.
+    needs: [setup, build-binaries, release]
+    # KNOWN TEMPORARY REGRESSION (fulgur-n5tw → to be fixed in fulgur-f7o2):
+    # this workflow now triggers on tag push, so `github.event.pull_request`
+    # no longer exists and the previous `release:skip-bindings` label gate
+    # (`!contains(github.event.pull_request.labels.*.name, ...)`) cannot be
+    # evaluated. npm publish is therefore unconditional for now. release-python
+    # / release-ruby already reverse-look-up the merged PR's labels via the GH
+    # API on `release:published`; f7o2 will give npm the same treatment.
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -266,7 +205,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: "v${{ needs.publish.outputs.version }}"
+          ref: "v${{ needs.setup.outputs.version }}"
+          # Read-only checkout (build binaries / publish npm from artifacts);
+          # no push happens here, so don't leave the token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v6.4.0
         with:
@@ -282,7 +224,7 @@ jobs:
 
       - name: Publish platform packages
         env:
-          VERSION: ${{ needs.publish.outputs.version }}
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
           set -e
           declare -A TARGET_TO_DIR=(
@@ -319,7 +261,7 @@ jobs:
 
       - name: Publish meta package
         env:
-          VERSION: ${{ needs.publish.outputs.version }}
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
           cd packages/npm/meta
           node -e "
