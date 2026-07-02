@@ -25,21 +25,43 @@ jobs:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
+      # Create the Release PR (and push the aux-file-sync commit) as the release
+      # App, NOT the default GITHUB_TOKEN. A PR/commit authored via GITHUB_TOKEN
+      # does not fire other workflows, so ci.yml would never run on the Release
+      # PR and every release would need CI kicked off by hand. Requires the App
+      # to have Pull requests + Contents: Read and write.
+      - name: Generate App token for the Release PR
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Scope to what release-pr needs: create/update the Release PR
+          # (pull-requests) and create/advance the PR branch via the API
+          # (contents). Include workflows too: the release branch can be
+          # advanced across a commit that touched .github/workflows/* (e.g. this
+          # very change once it lands on main), and GitHub rejects App ref
+          # updates spanning workflow-file changes without it. The App grants it.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           fetch-depth: 0
-          # release-plz itself pushes to the PR branch via the GitHub API using
-          # the GITHUB_TOKEN env var below, but the aux-file-sync step further
-          # down uses the git CLI directly and needs persisted credentials to
-          # push (see release-plz docs/github/persist-credentials.md).
-          persist-credentials: true
+          # Don't persist a token in git config where later actions could read
+          # it. release-plz pushes the PR branch via the GitHub API (auth'd by
+          # the App token in its env, below); the aux-file-sync step sets the
+          # App token on its remote URL immediately before its own git push,
+          # which also keeps that push App-authored so it triggers CI.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           shared-key: ubuntu-latest-fulgur
           save-if: false
@@ -50,9 +72,9 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - uses: ruby/setup-ruby@v1.312.0
+      - uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455  # v1.312.0
         if: fromJSON(steps.release-plz.outputs.pr).number
         with:
           ruby-version: '3.3'
@@ -61,7 +83,7 @@ jobs:
       - name: Sync auxiliary version files onto the release PR branch
         if: fromJSON(steps.release-plz.outputs.pr).number
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -e
           PR_NUMBER=${{ fromJSON(steps.release-plz.outputs.pr).number }}
@@ -97,12 +119,21 @@ jobs:
             exit 1
           }
 
-          (cd crates/fulgur-ruby && bundle install)
+          # Don't expose the App token to Bundler: `bundle install` runs
+          # arbitrary gem build/install hooks, so drop GH_TOKEN from its env.
+          (cd crates/fulgur-ruby && env -u GH_TOKEN bundle install)
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "chore: sync auxiliary version files to $VERSION" || echo "no changes to sync"
+          # Put the App token on the remote only for the push, and scrub it
+          # immediately after — via a trap so it's removed even if the push
+          # fails — so it isn't left in .git/config for later actions' post-job
+          # hooks (checkout did not persist credentials for the same reason).
+          # The token makes the push App-authored, which triggers CI on the PR.
+          trap 'git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git" || true' EXIT
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push
 
   release:
@@ -125,15 +156,16 @@ jobs:
       id-token: write  # required by rust-lang/crates-io-auth-action (OIDC)
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           shared-key: ubuntu-latest-fulgur
           save-if: false
@@ -146,23 +178,33 @@ jobs:
       # This works because release-plz creates the `vX.Y.Z` tag via the GitHub
       # API (github_client.create_tag) using the token passed below as
       # GITHUB_TOKEN — the App token — so the tag-push event is App-authored and
-      # fires release.yml. The checkout above keeps the DEFAULT GITHUB_TOKEN in
-      # its git credentials, which is fine: this job never `git push`es.
+      # fires release.yml. Checkout does not persist credentials, which is fine:
+      # this job never `git push`es (release-plz uses the API).
       # CAUTION: release-plz only takes the API path when tags are unsigned. If
       # you ever enable tag signing (git config tag.gpgSign true) or add a
       # `git push` step here, release-plz falls back to the git CLI, which would
-      # use the default token and SILENTLY break the release.yml cascade — you
-      # must then also persist the App token into this checkout's credentials.
+      # then need the App token configured on the remote immediately before the
+      # push (else it uses the default token and SILENTLY breaks the cascade).
       - name: Generate App token for tag/release push
         id: app-token
-        uses: actions/create-github-app-token@v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Scope to what `release-plz release` needs: create the tag + GH
+          # Release (contents) and read associated PRs for contributors
+          # (pull-requests). Keep `workflows: write` too — a release tag can
+          # point at a commit that touched .github/workflows/*, and the
+          # documented release-bot setup requires it for that case
+          # (docs/RELEASE_SETUP.md); the App already grants it, so requesting it
+          # here removes the risk of the tag/release API rejecting the SHA.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
 
       - name: Authenticate to crates.io
         id: crates-auth
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
 
       - name: Run release-plz release
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7  # v0.5.130

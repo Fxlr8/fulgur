@@ -238,6 +238,9 @@ workflows permission` で拒否されるためで、App 側に `Workflows: Read 
    - Repository permissions:
      - **Contents: Read and write** (release 作成・編集に必要)
      - **Workflows: Read and write** (tag push 時に workflow ファイル変更を伴う commit を通すために必要)
+     - **Pull requests: Read and write** (`release-plz.yml` の release-pr job が
+       この App token で Release PR を作成/更新するために必要。App 作成の PR/commit
+       にすることで `ci.yml` (pull_request) が Release PR で自動発火する)
    - Where can this GitHub App be installed?: "Only on this account"
 2. 作成後の App 設定画面で:
    - **App ID** を控える (数値)
