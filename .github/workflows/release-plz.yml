@@ -36,11 +36,10 @@ jobs:
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # Least privilege: release-pr creates/updates the PR + pushes the
-          # branch; release creates the tag/GH Release (POST /git/refs,
-          # /releases) and reads associated PRs for contributors. Both are
-          # fully covered by contents+pull-requests write. Tag creation is via
-          # the API, not git push, so no `workflows` permission is needed.
+          # Scope to what release-pr needs: create/update the Release PR
+          # (pull-requests) and create + push the PR branch via the API
+          # (contents). The version-bump commit never touches
+          # .github/workflows/*, so no `workflows` permission is needed here.
           permission-contents: write
           permission-pull-requests: write
 
@@ -185,13 +184,16 @@ jobs:
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # Least privilege: release-pr creates/updates the PR + pushes the
-          # branch; release creates the tag/GH Release (POST /git/refs,
-          # /releases) and reads associated PRs for contributors. Both are
-          # fully covered by contents+pull-requests write. Tag creation is via
-          # the API, not git push, so no `workflows` permission is needed.
+          # Scope to what `release-plz release` needs: create the tag + GH
+          # Release (contents) and read associated PRs for contributors
+          # (pull-requests). Keep `workflows: write` too — a release tag can
+          # point at a commit that touched .github/workflows/*, and the
+          # documented release-bot setup requires it for that case
+          # (docs/RELEASE_SETUP.md); the App already grants it, so requesting it
+          # here removes the risk of the tag/release API rejecting the SHA.
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
 
       - name: Authenticate to crates.io
         id: crates-auth
