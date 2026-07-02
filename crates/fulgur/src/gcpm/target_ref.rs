@@ -171,20 +171,43 @@ fn compute_first_letter(text: &str) -> String {
         })
     }
 
+    // Iterate graphemes lazily and stop right after the first letter plus its
+    // trailing punctuation run, tracking only a byte offset. Materializing the
+    // whole trimmed string (e.g. `graphemes(true).collect::<Vec<&str>>()`) would
+    // allocate one fat pointer per grapheme for attacker-controlled target text,
+    // an OOM/DoS vector even when the returned prefix is a single grapheme
+    // (fulgur-lfgg).
     let trimmed = text.trim_start();
-    let gs: Vec<&str> = trimmed.graphemes(true).collect();
-    let mut i = 0;
-    while i < gs.len() && is_punct(gs[i]) {
-        i += 1;
+    let mut first_letter_end = None;
+    for (idx, g) in trimmed.grapheme_indices(true) {
+        match first_letter_end {
+            // Already past the first letter: absorb the trailing punctuation
+            // run, then stop at the first non-punctuation grapheme.
+            Some(_) => {
+                if is_punct(g) {
+                    first_letter_end = Some(idx + g.len());
+                    continue;
+                }
+                break;
+            }
+            // Still scanning the optional leading punctuation run.
+            None => {
+                if is_punct(g) {
+                    continue;
+                }
+                if is_letter(g) {
+                    first_letter_end = Some(idx + g.len());
+                    continue;
+                }
+                // A non-punctuation, non-letter grapheme before any letter
+                // (e.g. whitespace after leading punctuation) yields "".
+                return String::new();
+            }
+        }
     }
-    if i >= gs.len() || !is_letter(gs[i]) {
-        return String::new();
-    }
-    let mut j = i + 1;
-    while j < gs.len() && is_punct(gs[j]) {
-        j += 1;
-    }
-    gs[..j].concat()
+    first_letter_end
+        .map(|end| trimmed[..end].to_string())
+        .unwrap_or_default()
 }
 
 /// Return the **1-based** page number for a DOM node, derived from
@@ -379,6 +402,16 @@ mod tests {
     #[test]
     fn first_letter_trailing_punct_then_nonletter() {
         assert_eq!(compute_first_letter("「Hello」 world"), "「H");
+    }
+    #[test]
+    fn first_letter_large_tail_stops_early() {
+        // Regression for fulgur-lfgg: the first letter is at the start,
+        // followed by a huge non-punctuation tail. The result must be the
+        // single leading letter, and the implementation must not materialize
+        // the whole string (early-exit offset path).
+        let mut s = String::from("H");
+        s.push_str(&"x".repeat(1_000_000));
+        assert_eq!(compute_first_letter(&s), "H");
     }
 
     #[test]
