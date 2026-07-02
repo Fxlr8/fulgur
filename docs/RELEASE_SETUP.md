@@ -165,55 +165,107 @@ OIDC claim (repo + workflow + environment) で自動照合されるため、`rol
 
 以下の Environment を作成:
 
-- `release` — crates.io / GitHub Release publish を gate する
-- `pypi` — PyPI publish を gate する
+- `release` — crates.io Trusted Publisher の OIDC subject claim スコープ
+- `pypi` — PyPI Trusted Publisher の OIDC subject claim スコープ
 - `testpypi` (dry-run 用)
-- `rubygems` — RubyGems publish を gate する
+- `rubygems` — RubyGems Trusted Publisher の OIDC subject claim スコープ
 
-### Required reviewers (approval gate)
-
-The approval gate is **consolidated to the `release` environment only** as of
-2026-04-26 (PR #213). `pypi` and `rubygems` environments are kept for OIDC
-subject claims but no longer set `Required reviewers`.
-
-Rationale: creating a GitHub Release already implies the `release` env approval
-was granted. Adding further approvals downstream collapses cleanly into a
-single gate. Compressing the previous 3-stage gate into 1 substantially reduces
-per-release friction.
-
-Per-environment configuration (Settings → Environments → `<name>`):
+**These environments are OIDC subject-claim scopes, NOT approval gates.** None of
+them carry `Required reviewers`. The single release approval is a status check on
+the Release PR — see *Approval model* below.
 
 | Environment | Required reviewers | Purpose |
 |-------------|--------------------|---------|
-| `release`   | **Set** (yourself / co-maintainers) | crates.io / GitHub Release / npm publish gate |
+| `release`   | Not set | OIDC subject claim (crates.io Trusted Publisher) |
 | `pypi`      | Not set | OIDC subject claim (PyPI Trusted Publisher) |
 | `rubygems`  | Not set | OIDC subject claim (RubyGems Trusted Publisher) |
 | `testpypi`  | Not set | Dry-run only |
 
-To remove `required_reviewers` from `pypi` / `rubygems` after the fact:
+`environment: release` also appears on `release.yml`'s `publish-npm` job, where
+it is a deliberate no-op (npm provenance authorizes via OIDC `id-token`, which
+does not bind to a GitHub environment). It does not gate anything.
 
-1. GitHub repo → Settings → Environments → `pypi` (or `rubygems`).
-2. Untick "Required reviewers" under "Deployment protection rules".
-3. Click "Save protection rules".
-4. Repeat for the other environment.
+### Approval model
 
-New flow (without `skip_bindings`):
+The release pipeline is tag-triggered and has **exactly one human approval
+gate**: a maintainer approving the release-plz **Release PR**. Everything
+downstream flows from that single approval; no `environment` carries required
+reviewers.
 
-1. PR merge → `release.yml`'s `publish` job pauses on `release` env → approve.
-2. crates.io publish + tag push + GitHub Release publish + npm publish run to
-   completion (App token fires `release:published`).
-3. `release-python.yml` and `release-ruby.yml`'s `publish` jobs run **without
-   any further approval** → PyPI / RubyGems updated.
+Why a status check and not native "required reviews": native branch required-
+reviews apply to *every* PR into `main`, which would block a solo maintainer's
+own feature PRs (no self-approval). Instead a custom `release-pr-approval` commit
+status (reported by `.github/workflows/release-pr-approval-gate.yml`) is used —
+`success` immediately for ordinary PRs, and for `release-plz-*` PRs
+only once a non-author OWNER/MEMBER/COLLABORATOR has an APPROVED review on the
+current head commit. Making that status a **required status check** in the `main`
+ruleset hard-blocks an unapproved Release PR from merging.
 
-With `skip_bindings=true`: step 3's `publish` job is skipped via
-`check-skip-label` (`needs.check-skip-label.outputs.skip != 'true'` gate).
+Release flow (where the one approval happens):
 
-A failed re-run still re-prompts for the `release` env approval.
+1. `release-plz.yml` opens a `release-plz-*` **Release PR**. Merging it is blocked
+   by the `release-pr-approval` required status check until a maintainer approves
+   the current head commit. **← the single approval.**
+2. On merge, `release-plz.yml`'s `release` job publishes to crates.io and creates
+   the `vX.Y.Z` tag (App token, so the tag push fires `release.yml`). No further
+   approval — the merge was already gated.
+3. The tag triggers `release.yml`: build binaries → publish the GitHub Release
+   (`--draft=false`, App token) + npm. Publishing the Release fires
+   `release:published`.
+4. `release-python.yml` / `release-ruby.yml` publish to PyPI / RubyGems on
+   `release:published`, gated transitively by the step-1 approval.
+
+With `skip_bindings=true` (label `release:skip-bindings` on the merged PR):
+step 4's publish job is skipped via `check-skip-label`
+(`needs.check-skip-label.outputs.skip != 'true'` gate).
 
 The OIDC claim scope (repo + workflow + environment) is independent of reviewer
-settings, so removing reviewers from `pypi` / `rubygems` does not weaken
-publish authenticity — `if: github.event_name == 'release'` separately blocks
-publishing from arbitrary refs.
+settings — `if: github.event_name == 'release'` separately blocks publishing from
+arbitrary refs.
+
+### Security depends on THREE GitHub-settings controls (not code)
+
+Because the approval lives at the *merge* and not in a workflow `environment`
+gate, the model is only as strong as these repo settings. They are **not tracked
+in-repo** — verify each is live (Settings → Rules / Rulesets) and re-check after
+any ruleset edit; do not assume from this doc:
+
+1. **`release-pr-approval` is a required status check** in the `main` branch
+   ruleset. Without it, a Release PR can merge unapproved → full publish.
+2. **`main` requires a PR** (no direct pushes) so code can't reach `main` — and
+   thus `release-plz release` (crates.io + tag) — without going through the gated
+   PR. Note: any actor in the ruleset's *bypass list* (e.g. the Repository Admin
+   role) sidesteps both #1 and #2, so keep that list to trusted maintainers only.
+3. **A `v*` tag-protection ruleset** restricting tag *creation* to the release
+   App (below). This is the load-bearing control against the one path the merge
+   gate can't see: a `v*` tag pushed **directly** to the repo, which bypasses
+   `release-plz.yml` entirely and lands straight on `release.yml` → GitHub
+   Release + PyPI + RubyGems. Without this ruleset that path is unauthenticated
+   for anyone with tag-push (write) access.
+
+> ⚠️ Status as of 2026-07-02: #1 and #2 are active in the `main` branch ruleset;
+> **#3 does not exist yet.** Until the `v*` tag ruleset is created, the direct-
+> tag-push hole is open and the "one approval" model is not actually enforced for
+> that path. This branch's workflow/doc changes do **not** close it on their own.
+
+### Tag-protection ruleset (control #3 — the direct-tag-push block)
+
+Restrict who can create `v*` tags so a rogue tag never reaches `release.yml`:
+
+1. GitHub repo → Settings → Rules → Rulesets → **New tag ruleset**.
+2. Target: **Tag** → include by pattern `v[0-9]*.[0-9]*.[0-9]*` (or `v*`).
+3. Rules: enable **Restrict creations** (and **Restrict updates** /
+   **Restrict deletions**).
+4. Bypass list: add **only** the release GitHub App (`fulgur-release-bot`) — the
+   actor that creates tags in `release-plz.yml`'s `release` job. Do **not** add
+   the "Repository admin" role as a blanket bypass, or a human admin could still
+   push a `v*` tag directly.
+5. Enforcement status: **Active**.
+
+With this ruleset a `v*` tag can only be created by the release App, which only
+does so from the post-merge `release-plz release` job — so it can only exist after
+the Release-PR approval. This ruleset is a GitHub Settings change; keep it in sync
+with the App name if the release bot is ever renamed.
 
 ## GitHub App (release publisher)
 
