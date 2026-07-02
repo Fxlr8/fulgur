@@ -126,6 +126,17 @@ jobs:
       # build-binaries/release/publish-npm jobs in release.yml (GITHUB_TOKEN-
       # authored events don't fire other workflows). Use the same App token
       # release.yml already uses for this reason.
+      #
+      # This works because release-plz creates the `vX.Y.Z` tag via the GitHub
+      # API (github_client.create_tag) using the token passed below as
+      # GITHUB_TOKEN — the App token — so the tag-push event is App-authored and
+      # fires release.yml. The checkout above keeps the DEFAULT GITHUB_TOKEN in
+      # its git credentials, which is fine: this job never `git push`es.
+      # CAUTION: release-plz only takes the API path when tags are unsigned. If
+      # you ever enable tag signing (git config tag.gpgSign true) or add a
+      # `git push` step here, release-plz falls back to the git CLI, which would
+      # use the default token and SILENTLY break the release.yml cascade — you
+      # must then also persist the App token into this checkout's credentials.
       - name: Generate App token for tag/release push
         id: app-token
         uses: actions/create-github-app-token@v3.2.0
