@@ -37,11 +37,14 @@ jobs:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           # Scope to what release-pr needs: create/update the Release PR
-          # (pull-requests) and create + push the PR branch via the API
-          # (contents). The version-bump commit never touches
-          # .github/workflows/*, so no `workflows` permission is needed here.
+          # (pull-requests) and create/advance the PR branch via the API
+          # (contents). Include workflows too: the release branch can be
+          # advanced across a commit that touched .github/workflows/* (e.g. this
+          # very change once it lands on main), and GitHub rejects App ref
+          # updates spanning workflow-file changes without it. The App grants it.
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
 
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -116,16 +119,20 @@ jobs:
             exit 1
           }
 
-          (cd crates/fulgur-ruby && bundle install)
+          # Don't expose the App token to Bundler: `bundle install` runs
+          # arbitrary gem build/install hooks, so drop GH_TOKEN from its env.
+          (cd crates/fulgur-ruby && env -u GH_TOKEN bundle install)
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "chore: sync auxiliary version files to $VERSION" || echo "no changes to sync"
-          # Checkout did not persist credentials; set the App token on the
-          # remote only now, right before the push. This keeps the token out of
-          # git config for earlier steps and makes the push App-authored (so it
-          # triggers CI on the Release PR).
+          # Put the App token on the remote only for the push, and scrub it
+          # immediately after — via a trap so it's removed even if the push
+          # fails — so it isn't left in .git/config for later actions' post-job
+          # hooks (checkout did not persist credentials for the same reason).
+          # The token makes the push App-authored, which triggers CI on the PR.
+          trap 'git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git" || true' EXIT
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push
 
