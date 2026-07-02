@@ -79,6 +79,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: "v${{ needs.setup.outputs.version }}"
+          # Read-only checkout (build binaries / publish npm from artifacts);
+          # no push happens here, so don't leave the token in .git/config.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -183,7 +186,10 @@ jobs:
 
   publish-npm:
     name: Publish npm packages
-    needs: [setup, build-binaries]
+    # Depend on `release` too so npm publishes only after the GitHub Release is
+    # published — a failed gh release upload/edit must not leave npm shipped
+    # while the release is missing its binaries.
+    needs: [setup, build-binaries, release]
     # KNOWN TEMPORARY REGRESSION (fulgur-n5tw → to be fixed in fulgur-f7o2):
     # this workflow now triggers on tag push, so `github.event.pull_request`
     # no longer exists and the previous `release:skip-bindings` label gate
@@ -200,6 +206,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: "v${{ needs.setup.outputs.version }}"
+          # Read-only checkout (build binaries / publish npm from artifacts);
+          # no push happens here, so don't leave the token in .git/config.
+          persist-credentials: false
 
       - uses: actions/setup-node@v6.4.0
         with:

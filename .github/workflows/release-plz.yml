@@ -1,8 +1,10 @@
 name: Release-plz
 
+# Least privilege: keep the top-level default read-only and grant write only to
+# the jobs that need it (release-pr creates/updates the Release PR; release has
+# its own permissions block below).
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 on:
   push:
@@ -16,6 +18,9 @@ jobs:
   release-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the Release PR branch + aux-file-sync commit
+      pull-requests: write    # create/update the Release PR
     concurrency:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
@@ -104,6 +109,13 @@ jobs:
     name: Release-plz release
     needs: release-pr
     runs-on: ubuntu-latest
+    # Serialize publishing so a main push that lands while a release is still
+    # in flight can't start a second `release-plz release` from a newer SHA and
+    # race the first for the same version. Queued runs are harmless: release-plz
+    # skips a version already published to crates.io.
+    concurrency:
+      group: release-plz-publish
+      cancel-in-progress: false
     # `environment: release` stamps the OIDC token with an `environment` claim
     # so it matches the crates.io Trusted Publisher (registered with
     # Environment = release), scoping the publisher to this workflow + env.
