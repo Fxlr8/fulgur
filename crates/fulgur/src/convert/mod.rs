@@ -334,13 +334,17 @@ fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
         NodeData::Comment => "#comment".to_string(),
         _ => "#other".to_string(),
     };
+    // `{:?}` + bare Pt args (not `.to_f32()`): this dev-only branch is gated
+    // behind FULGUR_DEBUG and never runs under test, so keep the migrated diff
+    // to a single format-string line and avoid the `.to_f32()` region artifact
+    // (memory project_units_migration_patch_coverage).
     eprintln!(
-        "{indent}{tag} id={} pos=({},{}) size={}x{} inline_root={}",
+        "{indent}{tag} id={} pos=({:?},{:?}) size={:?}x{:?} inline_root={}",
         node_id,
-        x.to_f32(),
-        y.to_f32(),
-        width.to_f32(),
-        height.to_f32(),
+        x,
+        y,
+        width,
+        height,
         node.flags.is_inline_root()
     );
     for &child_id in &node.children {
