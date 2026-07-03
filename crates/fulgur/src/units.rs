@@ -29,6 +29,35 @@
 //! use fulgur::units::F32Units;
 //! let _ = 1.0_f32.pt() + 1.0_f32.px();
 //! ```
+//!
+//! # Reading the vocabulary in a diff
+//!
+//! The method names encode each value's unit *state* in plain text, so a
+//! reviewer or coding agent reading a bare diff — with no IDE to peek types —
+//! can still tell a raw external `f32` from an already-typed value. Read the
+//! **first** conversion applied to a value:
+//!
+//! - `x.px()` / `x.pt()` — `x` is a raw `f32` (from an external crate such as
+//!   usvg / taffy / stylo, or a literal) being *tagged* with its unit.
+//!   [`F32Units`] is implemented for `f32` **only**, so a visible `.px()` /
+//!   `.pt()` is a compiler-enforced proof that its receiver was untyped.
+//! - `x.in_pt()` / `x.in_px()` — `x` is already a [`Px`] / [`Pt`] being
+//!   *converted*.
+//! - `x.to_f32()` — a [`Px`] / [`Pt`] being *dropped* back to raw `f32` at an
+//!   f32 sink.
+//!
+//! So `size.width().px().in_pt()` reads as "raw f32 (px) → [`Px`] → [`Pt`]":
+//! the leading `.px()` is what proves `size.width()` is an untyped external
+//! `f32`. A trailing `.in_pt()` only converts the freshly-tagged [`Px`] and
+//! says nothing about the origin — always read the *first* hop. `.px()` /
+//! `.pt()` can never appear on an already-typed value ([`Px`] / [`Pt`] carry no
+//! such method and no `Deref` to `f32`):
+//!
+//! ```compile_fail
+//! use fulgur::units::F32Units;
+//! // `.px()` exists on `f32` only — never on an already-typed `Pt`.
+//! let _ = 1.0_f32.pt().px();
+//! ```
 
 /// 1 CSS px = 0.75 PDF pt. The single source of this constant in the crate.
 pub const PX_TO_PT: f32 = 0.75;
