@@ -1092,6 +1092,44 @@ impl<'a> PaginationLayoutTree<'a> {
     }
 }
 
+/// fulgur-ezst: true if `parent_id`'s subtree renders any box (a descendant
+/// with non-zero size). Mirrors `record_subtree_descendants`' walk — the
+/// `layout_children` preference and the zero-size-container recursion (so a
+/// `<tbody>`/`<tr>`/anonymous wrapper still counts its cells as content) —
+/// but short-circuits on the first rendered descendant. Used to classify a
+/// pathologically tall block as "childless" (collapsible). Conservative: a
+/// subtree deeper than `MAX_DOM_DEPTH` reads as no content, matching
+/// `record_subtree_descendants` (which also stops recording there, so such
+/// content renders blank regardless). Keep this walk in sync with
+/// `record_subtree_descendants`.
+fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usize) -> bool {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return false;
+    }
+    let Some(parent) = doc.get_node(parent_id) else {
+        return false;
+    };
+    let layout_children_borrow = parent.layout_children.borrow();
+    let walk_children: &[usize] = layout_children_borrow
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .unwrap_or(&parent.children);
+    for &child_id in walk_children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        let layout = child.final_layout;
+        if layout.size.height <= 0.0 && layout.size.width <= 0.0 {
+            if subtree_has_rendered_content(doc, child_id, depth + 1) {
+                return true;
+            }
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 /// fulgur-s67g Phase 2.5: recursively record fragments for every
 /// visible descendant of a body-direct child, attaching them to the
 /// same `page_index` as the ancestor.
