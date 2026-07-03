@@ -39,10 +39,13 @@ fn render_with_size(size: &str) -> Vec<u8> {
 fn media_box(pdf: &[u8]) -> String {
     let text = String::from_utf8_lossy(pdf);
     let idx = text.find("/MediaBox").expect("no MediaBox");
-    let tail = &text[idx..idx + 60.min(text.len() - idx)];
-    let start = tail.find('[').unwrap();
-    let end = tail.find(']').unwrap();
-    tail[start + 1..end].trim().to_string()
+    // `/MediaBox` is immediately followed by `[ ... ]`; search the remainder
+    // for the bracket pair rather than slicing a fixed-size window (which
+    // could split a multi-byte U+FFFD replacement char at its boundary).
+    let rest = &text[idx..];
+    let start = rest.find('[').expect("no '[' after MediaBox");
+    let end = rest.find(']').expect("no ']' after MediaBox");
+    rest[start + 1..end].trim().to_string()
 }
 
 #[test]
@@ -62,10 +65,10 @@ fn custom_mm_size_sets_media_box() {
     if !bin.exists() {
         return;
     }
-    // A4: 210mm x 297mm = 595.28 x 841.89 pt
-    let pdf = render_with_size("210x297mm");
+    // 100mm x 200mm = 283.46 x 566.93 pt (distinct from the A4 fallback)
+    let pdf = render_with_size("100x200mm");
     let mb = media_box(&pdf);
-    assert!(mb.starts_with("0 0 595.2"), "got {mb}");
+    assert!(mb.starts_with("0 0 283.4"), "got {mb}");
 }
 
 #[test]

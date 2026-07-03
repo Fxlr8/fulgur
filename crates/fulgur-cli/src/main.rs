@@ -279,6 +279,7 @@ enum TemplateCommands {
 }
 
 fn parse_page_size(s: &str) -> PageSize {
+    let s = s.trim();
     match s.to_uppercase().as_str() {
         "A4" => PageSize::A4,
         "A3" => PageSize::A3,
@@ -297,9 +298,11 @@ fn parse_page_size(s: &str) -> PageSize {
     }
 }
 
-/// Known absolute CSS length units accepted for `--size`, longest checked
-/// per position. All are two ASCII bytes, which is what lets the scanner
-/// disambiguate the `px` unit from the `x` separator.
+/// Known absolute CSS length units accepted for `--size`. All are two ASCII
+/// bytes and none is a prefix of another, so match order does not matter.
+/// The disambiguation that matters is *positional*: the scanner matches a
+/// unit before it tests for a separator, so the `x` in `px` is consumed as
+/// part of the unit rather than mistaken for the `x` separator.
 const PAGE_UNITS: [&str; 5] = ["mm", "cm", "in", "pt", "px"];
 
 /// Convert an absolute length value + unit to PDF points.
@@ -318,7 +321,9 @@ fn unit_to_pt(value: f32, unit: &str) -> Option<f32> {
     Some(value * factor)
 }
 
-/// Consume a leading `[0-9.]+` run and parse it as a positive f32.
+/// Consume a leading `[0-9.]+` run and parse it as a non-negative f32.
+/// (A leading `-` is not consumed, so the value is never negative; the
+/// positive-value guard lives at the `parse_custom_size` call site.)
 fn take_number(rest: &str) -> Option<(f32, &str)> {
     let end = rest
         .find(|c: char| !(c.is_ascii_digit() || c == '.'))
@@ -802,17 +807,17 @@ mod tests {
 
     #[test]
     fn custom_mm_trailing_unit_applies_to_both() {
-        // 210mm = 595.28pt, 297mm = 841.89pt (A4)
-        let s = parse_page_size("210x297mm");
-        assert!(approx(s.width, 210.0 * 72.0 / 25.4));
-        assert!(approx(s.height, 297.0 * 72.0 / 25.4));
+        // 100mm = 283.46pt, 200mm = 566.93pt (distinct from the A4 fallback)
+        let s = parse_page_size("100x200mm");
+        assert!(approx(s.width, 100.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 200.0 * 72.0 / 25.4));
     }
 
     #[test]
     fn custom_leading_unit_applies_to_both() {
-        let s = parse_page_size("210mmx297");
-        assert!(approx(s.width, 210.0 * 72.0 / 25.4));
-        assert!(approx(s.height, 297.0 * 72.0 / 25.4));
+        let s = parse_page_size("100mmx200");
+        assert!(approx(s.width, 100.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 200.0 * 72.0 / 25.4));
     }
 
     #[test]
@@ -825,9 +830,9 @@ mod tests {
 
     #[test]
     fn custom_whitespace_separator() {
-        let s = parse_page_size("210mm 297mm");
-        assert!(approx(s.width, 210.0 * 72.0 / 25.4));
-        assert!(approx(s.height, 297.0 * 72.0 / 25.4));
+        let s = parse_page_size("100mm 200mm");
+        assert!(approx(s.width, 100.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 200.0 * 72.0 / 25.4));
     }
 
     #[test]
