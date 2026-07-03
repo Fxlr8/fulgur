@@ -47,6 +47,11 @@ fn selector_matches(selector: &str, page_num: usize, first_page_is_left: bool) -
 /// ```text
 /// CLI override (config.overrides) > CSS @page selector match > CSS @page default > Config defaults
 /// ```
+///
+/// When `config.overrides.page_size` is set (i.e. `--size` / `builder.page_size`),
+/// the CLI fully owns page geometry **including orientation**: CSS `@page`
+/// orientation is intentionally ignored, and landscape is taken solely from
+/// `config.landscape` (request it with `--landscape` / `builder.landscape(true)`).
 pub fn resolve_page_settings(
     rules: &[PageSettingsRule],
     page_num: usize,
@@ -85,13 +90,11 @@ pub fn resolve_page_settings(
 
     // --- Resolve page size and landscape ---
     let (size, landscape) = if config.overrides.page_size {
-        // CLI override for size — also respect CLI landscape override separately.
-        let ls = if config.overrides.landscape {
-            config.landscape
-        } else {
-            resolve_landscape_from_css(css_size, config.landscape)
-        };
-        (config.page_size, ls)
+        // CLI `--size` owns geometry, including orientation: CSS `@page`
+        // orientation is ignored so `--size` is authoritative on both axes.
+        // Landscape comes solely from `config.landscape` (default portrait;
+        // set via `--landscape` / `builder.landscape(true)`).
+        (config.page_size, config.landscape)
     } else {
         match css_size {
             Some(PageSizeDecl::Keyword(name)) => {
@@ -146,15 +149,6 @@ pub fn resolve_page_settings(
     };
 
     (size, margin, landscape)
-}
-
-/// Extract landscape flag from a CSS size declaration.
-fn resolve_landscape_from_css(css_size: Option<&PageSizeDecl>, fallback: bool) -> bool {
-    match css_size {
-        Some(PageSizeDecl::KeywordWithOrientation(_, is_landscape)) => *is_landscape,
-        Some(PageSizeDecl::Custom(_, _)) => false,
-        _ => fallback,
-    }
 }
 
 #[cfg(test)]
@@ -249,6 +243,39 @@ mod tests {
         }];
         let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
         assert!(landscape);
+    }
+
+    #[test]
+    fn test_cli_override_ignores_css_landscape() {
+        // `--size` (overrides.page_size) is authoritative on the orientation
+        // axis too: a CSS `@page { size: <keyword> landscape }` must not rotate
+        // the CLI-specified size. Without `--landscape`, config.landscape is
+        // false, so the result stays portrait. (fulgur-u4k5)
+        let config = Config::builder().page_size(PageSize::A4).build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), true)),
+            margin: PartialMargin::default(),
+        }];
+        let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(!landscape, "CLI --size must ignore CSS @page landscape");
+    }
+
+    #[test]
+    fn test_cli_override_with_landscape_flag_is_landscape() {
+        // `--size A4 --landscape` still yields landscape: orientation comes
+        // solely from config.landscape in the override path. (fulgur-u4k5)
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .landscape(true)
+            .build();
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), false)),
+            margin: PartialMargin::default(),
+        }];
+        let (_, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(landscape, "--landscape must force landscape under --size");
     }
 
     #[test]
