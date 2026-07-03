@@ -29,29 +29,6 @@ Key points:
 - **No API stability guarantees until `1.0`.** Each minor on the `0.x` line is
   free to introduce breaking changes.
 
-## Skip bindings (core-only release)
-
-To ship a core-only release (crates.io + GitHub Release + CLI binary) and
-suppress PyPI / RubyGems publish, add the `release:skip-bindings` label to the
-release-plz **Release PR** before merging it.
-
-What happens:
-
-- `release-python.yml` and `release-ruby.yml` run a `check-skip-label` job that
-  resolves tag → commit → associated PR labels and skips the `publish` job when
-  the `release:skip-bindings` label is present → PyPI / RubyGems are not updated.
-- crates.io publish, GitHub Release publish, and CLI binary uploads are
-  unconditional — the CLI binary is treated as a core release artifact.
-- **npm is currently NOT skipped by this label.** The tag-triggered `release.yml`
-  can no longer read the Release PR's labels (`github.event.pull_request` is
-  absent on a tag push), so `publish-npm` runs unconditionally for now (tracked
-  in fulgur-f7o2, which will give npm the same reverse-lookup as PyPI / RubyGems).
-
-If you later need to publish bindings against an already-tagged core release,
-trigger `release-python.yml` / `release-ruby.yml` via `workflow_dispatch`. That
-escape hatch is intentionally left in place but not yet documented as a first-
-class flow.
-
 ## PR-based changelog (`release-notes:*` labels)
 
 CHANGELOG and GitHub Release notes are generated **from merged PRs**, not from
@@ -246,10 +223,6 @@ Release flow:
 4. `release-python.yml` / `release-ruby.yml` publish to PyPI / RubyGems on
    `release:published`.
 
-With `skip_bindings=true` (label `release:skip-bindings` on the merged PR):
-step 4's publish job is skipped via `check-skip-label`
-(`needs.check-skip-label.outputs.skip != 'true'` gate).
-
 The OIDC claim scope (repo + workflow + environment) is independent of reviewer
 settings — `if: github.event_name == 'release'` separately blocks publishing from
 arbitrary refs.
@@ -371,22 +344,11 @@ Actions タブで `release-python.yml` / `release-ruby.yml` が自動的に `rel
 5. The tag fires `release.yml`: build binaries → publish the GitHub Release →
    publish npm. Publishing the GitHub Release fires `release:published`. No further
    approval — ② already authorized the release.
-6. `release-python.yml` / `release-ruby.yml` run on `release:published`;
-   `check-skip-label` sees no skip label → PyPI / RubyGems publish.
+6. `release-python.yml` / `release-ruby.yml` run on `release:published` and
+   publish to PyPI / RubyGems.
 
 Two approvals per release: ① the Release PR, then ② the `crates-io` deployment
 (see [Approval model](#approval-model)).
-
-### Core-only release (skip bindings)
-
-Add the `release:skip-bindings` label to the release-plz Release PR before
-merging it (there is no `workflow_dispatch` input for this anymore).
-
-- crates.io / GitHub Release / CLI binary still ship.
-- `release-python.yml` / `release-ruby.yml` still run build + smoke tests but
-  `check-skip-label` skips their `publish` job → PyPI / RubyGems are not updated.
-- npm is currently **not** skipped by the label (see *Skip bindings* above;
-  tracked in fulgur-f7o2).
 
 ### Previewing release notes
 
