@@ -279,10 +279,107 @@ fn parse_page_size(s: &str) -> PageSize {
         "A4" => PageSize::A4,
         "A3" => PageSize::A3,
         "LETTER" => PageSize::LETTER,
-        _ => {
-            eprintln!("Unknown page size '{}', defaulting to A4", s);
+        _ => parse_custom_size(s).unwrap_or_else(|| {
+            eprintln!(
+                "Unknown page size '{}', defaulting to A4. \
+                 Use a keyword (A4, Letter, A3) or custom WxH with units \
+                 (e.g. 210x297mm, 2352.6ptx3481.39pt; units mm/cm/in/pt/px, \
+                 'x' or space separator), or set the size via CSS \
+                 @page {{ size }} and omit --size.",
+                s
+            );
             PageSize::A4
+        }),
+    }
+}
+
+/// Known absolute CSS length units accepted for `--size`, longest checked
+/// per position. All are two ASCII bytes, which is what lets the scanner
+/// disambiguate the `px` unit from the `x` separator.
+const PAGE_UNITS: [&str; 5] = ["mm", "cm", "in", "pt", "px"];
+
+/// Convert an absolute length value + unit to PDF points.
+/// Mirrors `fulgur::gcpm::parser::css_unit_to_pt` (private there; the
+/// five-line table is duplicated locally rather than widening fulgur's
+/// public API).
+fn unit_to_pt(value: f32, unit: &str) -> Option<f32> {
+    let factor = match () {
+        _ if unit.eq_ignore_ascii_case("mm") => 72.0 / 25.4,
+        _ if unit.eq_ignore_ascii_case("cm") => 72.0 / 2.54,
+        _ if unit.eq_ignore_ascii_case("in") => 72.0,
+        _ if unit.eq_ignore_ascii_case("pt") => 1.0,
+        _ if unit.eq_ignore_ascii_case("px") => 72.0 / 96.0,
+        _ => return None,
+    };
+    Some(value * factor)
+}
+
+/// Consume a leading `[0-9.]+` run and parse it as a positive f32.
+fn take_number(rest: &str) -> Option<(f32, &str)> {
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    let (num, tail) = rest.split_at(end);
+    let v: f32 = num.parse().ok()?;
+    Some((v, tail))
+}
+
+/// Greedily consume a known page unit at the start of `rest`.
+/// Returns `(Some(unit), tail)` or `(None, rest)` when none matches.
+fn take_unit(rest: &str) -> (Option<&str>, &str) {
+    for u in PAGE_UNITS {
+        if let Some(head) = rest.get(..u.len()) {
+            if head.eq_ignore_ascii_case(u) {
+                return (Some(head), &rest[u.len()..]);
+            }
         }
+    }
+    (None, rest)
+}
+
+/// Parse `WxH` custom page dimensions, e.g. `210x297mm` or `2352.6ptx3481.39pt`.
+/// Separator is a single `x`/`X` or a run of whitespace. A unit on one side
+/// applies to both; both sides unitless is rejected (unit required).
+fn parse_custom_size(s: &str) -> Option<PageSize> {
+    let s = s.trim();
+
+    let (wv, rest) = take_number(s)?;
+    let (wunit, rest) = take_unit(rest);
+
+    // Separator: exactly one 'x'/'X', or a run of whitespace.
+    let rest = if let Some(after) = rest.strip_prefix(['x', 'X']) {
+        after
+    } else {
+        let trimmed = rest.trim_start();
+        if trimmed.len() == rest.len() {
+            return None; // no separator
+        }
+        trimmed
+    };
+
+    let (hv, rest) = take_number(rest)?;
+    let (hunit, rest) = take_unit(rest);
+    if !rest.trim().is_empty() {
+        return None; // trailing garbage
+    }
+
+    // A unit on one side applies to both; both missing is invalid.
+    let (wu, hu) = match (wunit, hunit) {
+        (Some(a), Some(b)) => (a, b),
+        (Some(a), None) => (a, a),
+        (None, Some(b)) => (b, b),
+        (None, None) => return None,
+    };
+
+    let width = unit_to_pt(wv, wu)?;
+    let height = unit_to_pt(hv, hu)?;
+    if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+        Some(PageSize { width, height })
+    } else {
+        None
     }
 }
 
@@ -671,5 +768,92 @@ fn main() {
         Commands::External(args) => {
             plugin::dispatch(args);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn keyword_still_works() {
+        assert!(approx(parse_page_size("A4").width, PageSize::A4.width));
+        assert!(approx(
+            parse_page_size("letter").height,
+            PageSize::LETTER.height
+        ));
+        assert!(approx(parse_page_size("A3").width, PageSize::A3.width));
+    }
+
+    #[test]
+    fn custom_pt_both_units() {
+        let s = parse_page_size("2352.6ptx3481.39pt");
+        assert!(approx(s.width, 2352.6));
+        assert!(approx(s.height, 3481.39));
+    }
+
+    #[test]
+    fn custom_mm_trailing_unit_applies_to_both() {
+        // 210mm = 595.28pt, 297mm = 841.89pt (A4)
+        let s = parse_page_size("210x297mm");
+        assert!(approx(s.width, 210.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 297.0 * 72.0 / 25.4));
+    }
+
+    #[test]
+    fn custom_leading_unit_applies_to_both() {
+        let s = parse_page_size("210mmx297");
+        assert!(approx(s.width, 210.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 297.0 * 72.0 / 25.4));
+    }
+
+    #[test]
+    fn custom_px_separator_ambiguity() {
+        // px は x を含む。素朴な split では壊れるケース。800px=600pt, 1200px=900pt
+        let s = parse_page_size("800pxx1200px");
+        assert!(approx(s.width, 600.0));
+        assert!(approx(s.height, 900.0));
+    }
+
+    #[test]
+    fn custom_whitespace_separator() {
+        let s = parse_page_size("210mm 297mm");
+        assert!(approx(s.width, 210.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 297.0 * 72.0 / 25.4));
+    }
+
+    #[test]
+    fn custom_mixed_units() {
+        // 100mm x 2in = 283.46pt x 144pt
+        let s = parse_page_size("100mmx2in");
+        assert!(approx(s.width, 100.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 144.0));
+    }
+
+    #[test]
+    fn unitless_falls_back_to_a4() {
+        // 単位必須: 両側単位なしは不正 → A4
+        assert!(approx(
+            parse_page_size("800x1200").width,
+            PageSize::A4.width
+        ));
+    }
+
+    #[test]
+    fn garbage_falls_back_to_a4() {
+        assert!(approx(parse_page_size("banana").width, PageSize::A4.width));
+        assert!(approx(parse_page_size("100mm").width, PageSize::A4.width)); // 単一値
+        assert!(approx(
+            parse_page_size("100foox200bar").width,
+            PageSize::A4.width
+        )); // 未知単位
+        assert!(approx(
+            parse_page_size("0ptx100pt").width,
+            PageSize::A4.width
+        )); // 非正値
     }
 }
