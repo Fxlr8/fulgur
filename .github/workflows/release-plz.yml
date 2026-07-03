@@ -183,10 +183,54 @@ jobs:
           # arbitrary gem build/install hooks, so drop GH_TOKEN from its env.
           (cd crates/fulgur-ruby && env -u GH_TOKEN bundle install)
 
+          # PR-based changelog: render notes from the PRs merged since the last
+          # release (classified by release-notes:* labels per .github/release.yml)
+          # and prepend a dated section to the root CHANGELOG.md. release-plz's own
+          # per-crate changelog is disabled (changelog_update=false in
+          # release-plz.toml), so this is the single changelog source. Doing it in
+          # this release-pr job — not a post-publish push to main — keeps the
+          # changelog inside the Release PR's tagged commit and avoids a main push
+          # that would retrigger release-plz (release-pr has no if-gate). See
+          # fulgur-b0nb.
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="v$VERSION" \
+            --jq .body > RELEASE_NOTES.md
+          DATE=$(date -u +%Y-%m-%d)
+          # Drop the API's "## What's Changed" preamble so the label categories
+          # nest cleanly under "## [VERSION] - DATE" as H3.
+          sed -i "/^## What's Changed$/d" RELEASE_NOTES.md
+          # Capture origin/main's committed CHANGELOG up front via a plain
+          # assignment so `set -e` aborts the job if the ref can't be read. A
+          # piped `git show ... | awk` would instead mask a git-show failure (awk
+          # gets empty stdin, prints nothing, exits 0) and silently truncate the
+          # whole changelog to just the new section. Don't fix that with a global
+          # `set -o pipefail` — the version-extract `grep | head | sed` above would
+          # SIGPIPE-abort the release under it.
+          OLD_CHANGELOG=$(git show origin/main:CHANGELOG.md)
+          {
+            echo "# Changelog"
+            echo
+            echo "All notable changes to this project will be documented in this file."
+            echo
+            echo "## [$VERSION] - $DATE"
+            echo
+            cat RELEASE_NOTES.md
+            echo
+            # Base the history on origin/main's committed CHANGELOG (captured
+            # above), NOT the PR branch's working copy. release-pr has no if-gate
+            # and re-runs on every push to main, so the `gh pr checkout` working
+            # copy may already carry this release's prepended section from an
+            # earlier run. Reading origin/main keeps re-runs idempotent (no stacked
+            # duplicate "## [VERSION]" sections) and drops the old top-of-file header.
+            printf '%s\n' "$OLD_CHANGELOG" | awk '/^## \[/{found=1} found'
+          } > CHANGELOG.tmp
+          mv CHANGELOG.tmp CHANGELOG.md
+          rm -f RELEASE_NOTES.md
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "chore: sync auxiliary version files to $VERSION" || echo "no changes to sync"
+          git commit -m "chore: sync aux version files + changelog for $VERSION" || echo "no changes to sync"
           # Put the App token on the remote only for the push, and scrub it
           # immediately after — via a trap so it's removed even if the push
           # fails — so it isn't left in .git/config for later actions' post-job

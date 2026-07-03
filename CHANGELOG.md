@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.0] - 2026-07-03
+
+<!-- Release notes generated using configuration in .github/release.yml at v0.22.0 -->
+
+### Bug Fixes
+* fix(gcpm): bound target-text first-letter allocation to matched prefix by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/544
+### Documentation
+* docs(release): document single-gate approval model and flag missing v* tag ruleset by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/546
+### Other Changes
+* chore: release v0.21.0 by @github-actions[bot] in https://github.com/fulgur-rs/fulgur/pull/537
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.21.0...v0.22.0
+
+## [0.21.0] - 2026-07-02
+
+<!-- Release notes generated using configuration in .github/release.yml at v0.21.0 -->
+
+### Bug Fixes
+* fix(column_css): make module pub, keep parser internals pub(crate) (P3a) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/532
+* fix: remove invalid no_increment_regex from release-plz.toml by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/534
+* fix(release-plz): set publish=false on fulgur-vrt/fulgur-wpt to match Cargo.toml by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/539
+### Other Changes
+* release-plz: add base workspace config (fulgur-7b3l) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/528
+* P2a: Remove type Pt=f32 alias (incl. Rect) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/530
+* Fix 4/3 over-translation for absolute-length CSS transform translate/matrix/origin by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/531
+* release-plz: force minor-only bumps via custom_minor_increment_regex by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/533
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.20.0...v0.21.0
+
 ## [0.20.0] - 2026-06-28
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->

@@ -40,6 +40,15 @@ custom_minor_increment_regex = ".*"
 git_tag_enable = false
 git_release_enable = false
 
+# Changelog is PR-based, not commit-based. The root CHANGELOG.md and each GitHub
+# Release body are rendered from merged PRs (classified by release-notes:* labels
+# in .github/release.yml) — the root file is prepended in release-plz.yml's
+# release-pr aux-sync step, the Release body is set in release.yml's release job.
+# Disable release-plz's own commit-based per-crate changelog generation entirely
+# so the two don't compete and no crates/*/CHANGELOG.md is (re)created.
+# See fulgur-b0nb.
+changelog_update = false
+
 [[package]]
 name = "fulgur"
 version_group = "core"

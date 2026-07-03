@@ -275,8 +275,12 @@ default caret behaviour) until you are ready to absorb a breaking change.
 
 ## Release
 
-See [docs/RELEASE_SETUP.md](docs/RELEASE_SETUP.md) for PyPI / RubyGems
-Trusted Publisher setup and release steps.
+Releases are automated with [release-plz](https://release-plz.dev): a push to
+`main` opens a Release PR (minor version bump + a PR-based changelog rendered
+from `release-notes:*` labels). Approving and merging it publishes to crates.io,
+creates the `vX.Y.Z` tag, and cascades to the platform binaries, npm, PyPI and
+RubyGems. See [docs/RELEASE_SETUP.md](docs/RELEASE_SETUP.md) for the full flow
+and PyPI / RubyGems Trusted Publisher setup.
 
 ## Determinism and fonts
 
