@@ -162,12 +162,15 @@ enum Commands {
         /// Page size: keyword (A4, Letter, A3) or custom WxH with units
         /// (units mm/cm/in/pt/px; 'x' or space separator),
         /// e.g. 210x297mm or 2352.6ptx3481.39pt.
-        /// Takes priority over CSS @page { size }. Omit --size to let
-        /// CSS @page { size } take effect (falls back to A4 if neither set).
+        /// Takes priority over CSS @page { size }, including orientation:
+        /// with --size, CSS @page landscape/portrait is ignored and the page
+        /// keeps the orientation implied by the size itself (its own W×H, or a
+        /// keyword's portrait default) unless --landscape swaps it. Omit --size
+        /// to let CSS @page { size } take effect (falls back to A4 if neither set).
         #[arg(short, long)]
         size: Option<String>,
 
-        /// Landscape orientation
+        /// Landscape orientation (also forces landscape over CSS @page)
         #[arg(short, long)]
         landscape: bool,
 
