@@ -4105,6 +4105,47 @@ mod tests {
         );
     }
 
+    /// fulgur-ezst: pins the no-reflow / no-free-page-reduction mechanism of
+    /// the childless collapse. The collapse skips only the per-page fragment
+    /// pushes — it deliberately leaves the slice loop's `page_index` counter
+    /// advancing all the way to `MAX_PAGES` — so a following in-flow sibling
+    /// lands on the SAME deep page it would occupy without the collapse (the
+    /// document is not silently shortened, and siblings do not reflow up to
+    /// page 0). If someone "optimizes" the loop to break early once the
+    /// collapse is decided, the `<p>` would jump to page ~0/1 and this test
+    /// fails. Asserts: the tall div contributes exactly one fragment
+    /// (collapse fired) while the `<p>` sibling's fragment stays at
+    /// `page_index >= MAX_PAGES`.
+    #[test]
+    fn childless_collapse_does_not_reflow_following_sibling() {
+        use std::ops::DerefMut;
+        let html = r#"<html><body><div id="tall" style="height: 99999999px"></div><p id="after">after</p></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let tall_id = find_by_id(doc.deref_mut(), "tall").expect("div#tall");
+        let after_id = find_by_id(doc.deref_mut(), "after").expect("p#after");
+        let tall_frags = table
+            .get(&tall_id)
+            .expect("div#tall must appear in geometry")
+            .fragments
+            .len();
+        assert_eq!(
+            tall_frags, 1,
+            "collapsed childless div must contribute exactly one fragment, got {tall_frags}",
+        );
+        let after_page = table
+            .get(&after_id)
+            .expect("p#after must appear in geometry")
+            .fragments[0]
+            .page_index;
+        assert!(
+            after_page >= crate::MAX_PAGES,
+            "following sibling must stay on its deep page (>= MAX_PAGES {}); got {after_page} \
+             — an early loop break would reflow it near page 0",
+            crate::MAX_PAGES,
+        );
+    }
+
     /// fulgur-2m6w: a non-finite Taffy height (`+inf` / `NaN`) is treated
     /// as zero so it can never reach the slicing loop (where `+inf` would
     /// make `remaining -= last_slice_h` loop forever) nor poison the

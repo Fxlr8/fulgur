@@ -4692,7 +4692,9 @@ fn pathological_tall_block_render_is_bounded() {
 /// fulgur-ezst: a childless block tall enough to exceed the page cap must
 /// collapse end-to-end — a real `render` yields a tiny, single-page
 /// PDF rather than a ~10k-page one. Byte size cleanly separates the two: a
-/// collapsed render is a few KB; the uncollapsed cap render would be MBs.
+/// collapsed render is a few KB (measured ~1.5 KB); the uncollapsed cap
+/// render would be MBs. The `< 500_000` threshold sits far below the
+/// uncollapsed size yet well above the collapsed one.
 #[test]
 fn childless_cap_exceeding_block_collapses_end_to_end() {
     let html = r#"<!doctype html><html><body><div style="height:99999999px"></div></body></html>"#;
