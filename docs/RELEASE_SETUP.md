@@ -47,9 +47,12 @@ Labelling responsibility sits with the **PR author and reviewer**. CI does not
 enforce a `release-notes:*` label — unlabelled PRs fall through to "Other
 Changes".
 
-release-plz generates `CHANGELOG.md` (updated in the Release PR) and the draft
-GitHub Release from the commit history, per `release-plz.toml`. git-cliff has
-been removed.
+release-plz's own commit-based changelog is **disabled** (`changelog_update = false`
+in `release-plz.toml`), so these PR-based notes are the single source. `release-plz.yml`'s
+release-pr job renders them with `gh api ... generate-notes` and prepends a dated
+section to the root `CHANGELOG.md` inside the Release PR; `release.yml`'s release job
+sets the same notes as the GitHub Release body. Per-crate `crates/*/CHANGELOG.md`
+files and git-cliff have been removed.
 
 ## 初回公開時の注意
 
