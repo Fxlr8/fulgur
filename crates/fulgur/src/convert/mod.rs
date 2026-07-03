@@ -20,7 +20,7 @@ use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, LinkSpan, LinkTarget, ShapedGlyph, ShapedGlyphRun,
     ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,
 };
-use crate::units::F32Units;
+use crate::units::{F32Units, Pt};
 use blitz_html::HtmlDocument;
 use skrifa::MetadataProvider;
 use std::collections::HashMap;
@@ -70,19 +70,19 @@ pub(crate) fn pt_to_px(v: f32) -> f32 {
 
 /// Convert a Taffy `Layout` (CSS px) to PDF pt as `(x, y, width, height)`.
 #[inline]
-fn layout_in_pt(layout: &taffy::Layout) -> (f32, f32, f32, f32) {
+fn layout_in_pt(layout: &taffy::Layout) -> (Pt, Pt, Pt, Pt) {
     (
-        px_to_pt(layout.location.x),
-        px_to_pt(layout.location.y),
-        px_to_pt(layout.size.width),
-        px_to_pt(layout.size.height),
+        layout.location.x.px().in_pt(),
+        layout.location.y.px().in_pt(),
+        layout.size.width.px().in_pt(),
+        layout.size.height.px().in_pt(),
     )
 }
 
 /// Convert a Taffy `Size<f32>` (CSS px) to PDF pt as `(width, height)`.
 #[inline]
-fn size_in_pt(size: taffy::Size<f32>) -> (f32, f32) {
-    (px_to_pt(size.width), px_to_pt(size.height))
+fn size_in_pt(size: taffy::Size<f32>) -> (Pt, Pt) {
+    (size.width.px().in_pt(), size.height.px().in_pt())
 }
 
 /// Default CSS line-height multiplier when the actual computed value is
@@ -243,7 +243,7 @@ fn extract_body_offset_pt(doc: &HtmlDocument) -> (crate::units::Pt, crate::units
             && elem.name.local.as_ref() == "body"
         {
             let (x, y, _, _) = layout_in_pt(&child.final_layout);
-            return (x.pt(), y.pt());
+            return (x, y);
         }
     }
     (crate::units::Pt::ZERO, crate::units::Pt::ZERO)
@@ -334,8 +334,13 @@ fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
         NodeData::Comment => "#comment".to_string(),
         _ => "#other".to_string(),
     };
+    // `Pt` has no `Display` by design (a length must not silently format as a
+    // bare number), so this dev-only dump formats the typed values with `{:?}`
+    // rather than `.to_f32()`. Bonus: since the branch is FULGUR_DEBUG-gated and
+    // never runs under test, `{:?}` keeps the migrated diff to one format-string
+    // line instead of four uncovered `.to_f32()` arg lines in the patch.
     eprintln!(
-        "{indent}{tag} id={} pos=({},{}) size={}x{} inline_root={}",
+        "{indent}{tag} id={} pos=({:?},{:?}) size={:?}x{:?} inline_root={}",
         node_id,
         x,
         y,
@@ -399,7 +404,7 @@ fn node_has_transform(doc: &BaseDocument, node_id: usize) -> bool {
         .and_then(|node| {
             let styles = node.primary_styles()?;
             let (w, h) = size_in_pt(node.final_layout.size);
-            crate::blitz_adapter::compute_transform(&styles, w, h)
+            crate::blitz_adapter::compute_transform(&styles, w.to_f32(), h.to_f32())
         })
         .is_some()
 }
@@ -622,7 +627,7 @@ fn record_transform(
     // `transform_integration::rotate_90_at_default_center_origin_fixes_center`.
     let (width_pt, height_pt) = size_in_pt(node.final_layout.size);
     let Some((matrix, origin)) =
-        crate::blitz_adapter::compute_transform(&styles, width_pt, height_pt)
+        crate::blitz_adapter::compute_transform(&styles, width_pt.to_f32(), height_pt.to_f32())
     else {
         return;
     };
@@ -1042,8 +1047,8 @@ fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
     ContentBox {
         origin_x: left_inset,
         origin_y: top_inset,
-        width: (border_w - left_inset - right_inset).max(0.0),
-        height: (border_h - top_inset - bottom_inset).max(0.0),
+        width: (border_w.to_f32() - left_inset - right_inset).max(0.0),
+        height: (border_h.to_f32() - top_inset - bottom_inset).max(0.0),
     }
 }
 
@@ -1571,20 +1576,20 @@ mod utility_fn_tests {
             ..taffy::Layout::new()
         };
         let (x, y, w, h) = layout_in_pt(&layout);
-        assert_eq!(x, 3.0);
-        assert_eq!(y, 6.0);
-        assert_eq!(w, 75.0);
-        assert_eq!(h, 150.0);
+        assert_eq!(x, 3.0_f32.pt());
+        assert_eq!(y, 6.0_f32.pt());
+        assert_eq!(w, 75.0_f32.pt());
+        assert_eq!(h, 150.0_f32.pt());
     }
 
     #[test]
     fn layout_in_pt_zero_layout_stays_zero() {
         let layout = taffy::Layout::new();
         let (x, y, w, h) = layout_in_pt(&layout);
-        assert_eq!(x, 0.0);
-        assert_eq!(y, 0.0);
-        assert_eq!(w, 0.0);
-        assert_eq!(h, 0.0);
+        assert_eq!(x, 0.0_f32.pt());
+        assert_eq!(y, 0.0_f32.pt());
+        assert_eq!(w, 0.0_f32.pt());
+        assert_eq!(h, 0.0_f32.pt());
     }
 
     // --- size_in_pt ---
@@ -1597,8 +1602,8 @@ mod utility_fn_tests {
             height: 120.0,
         };
         let (w, h) = size_in_pt(size);
-        assert_eq!(w, 60.0);
-        assert_eq!(h, 90.0);
+        assert_eq!(w, 60.0_f32.pt());
+        assert_eq!(h, 90.0_f32.pt());
     }
 
     #[test]
@@ -1608,8 +1613,8 @@ mod utility_fn_tests {
             height: 0.0,
         };
         let (w, h) = size_in_pt(size);
-        assert_eq!(w, 0.0);
-        assert_eq!(h, 0.0);
+        assert_eq!(w, 0.0_f32.pt());
+        assert_eq!(h, 0.0_f32.pt());
     }
 
     // --- px_to_pt / pt_to_px roundtrip ---

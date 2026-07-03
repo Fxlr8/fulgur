@@ -55,8 +55,8 @@ fn maybe_insert_block_for_replaced(
         let (left_inset, top_inset) = style.content_inset();
         let right_inset = style.border_widths[1].to_f32() + style.padding[1].to_f32();
         let bottom_inset = style.border_widths[2].to_f32() + style.padding[2].to_f32();
-        let content_width = (width - left_inset - right_inset).max(0.0);
-        let content_height = (height - top_inset - bottom_inset).max(0.0);
+        let content_width = (width.to_f32() - left_inset - right_inset).max(0.0);
+        let content_height = (height.to_f32() - top_inset - bottom_inset).max(0.0);
         out.block_styles.insert(
             node.id,
             crate::drawables::BlockEntry {
@@ -64,10 +64,7 @@ fn maybe_insert_block_for_replaced(
                 opacity,
                 visible,
                 id: extract_block_id(node),
-                layout_size: Some(Size {
-                    width: width.pt(),
-                    height: height.pt(),
-                }),
+                layout_size: Some(Size { width, height }),
                 clip_descendants: Vec::new(),
                 opacity_descendants: Vec::new(),
             },
@@ -77,7 +74,7 @@ fn maybe_insert_block_for_replaced(
         // otherwise the border would also be faded.
         (content_width, content_height, 1.0, visible)
     } else {
-        (width, height, opacity, visible)
+        (width.to_f32(), height.to_f32(), opacity, visible)
     }
 }
 
@@ -509,6 +506,7 @@ mod tests {
         let img_id = find_tag(&doc, "img");
         let node = doc.get_node(img_id).unwrap();
         let (layout_w, layout_h) = size_in_pt(node.final_layout.size);
+        let (layout_w, layout_h) = (layout_w.to_f32(), layout_h.to_f32());
         let mut out = Drawables::new();
         let (content_w, content_h, _opacity, _visible) =
             maybe_insert_block_for_replaced(node, None, &mut out);

@@ -82,8 +82,8 @@ pub(super) fn convert(
 fn insert_block_entry(
     node: &Node,
     style: BlockStyle,
-    width: f32,
-    height: f32,
+    width: crate::units::Pt,
+    height: crate::units::Pt,
     out: &mut crate::drawables::Drawables,
 ) {
     let (opacity, visible) = extract_opacity_visible(node);
@@ -94,10 +94,7 @@ fn insert_block_entry(
             opacity,
             visible,
             id: extract_block_id(node),
-            layout_size: Some(Size {
-                width: width.pt(),
-                height: height.pt(),
-            }),
+            layout_size: Some(Size { width, height }),
             clip_descendants: Vec::new(),
             opacity_descendants: Vec::new(),
         },

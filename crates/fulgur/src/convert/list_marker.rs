@@ -36,8 +36,8 @@ fn size_raster_marker(
     line_height: f32,
 ) -> Option<(crate::units::Pt, crate::units::Pt)> {
     let (iw, ih) = ImageRender::decode_dimensions(data, format)?;
-    let intrinsic_w = px_to_pt(iw as f32).pt();
-    let intrinsic_h = px_to_pt(ih as f32).pt();
+    let intrinsic_w = (iw as f32).px().in_pt();
+    let intrinsic_h = (ih as f32).px().in_pt();
     Some(crate::draw_primitives::clamp_marker_size(
         intrinsic_w,
         intrinsic_h,
@@ -88,8 +88,8 @@ pub(super) fn resolve_list_marker(
         AssetKind::Svg => {
             let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
             let size = tree.size();
-            let intrinsic_w = px_to_pt(size.width()).pt();
-            let intrinsic_h = px_to_pt(size.height()).pt();
+            let intrinsic_w = size.width().px().in_pt();
+            let intrinsic_h = size.height().px().in_pt();
             let (width, height) = crate::draw_primitives::clamp_marker_size(
                 intrinsic_w,
                 intrinsic_h,
