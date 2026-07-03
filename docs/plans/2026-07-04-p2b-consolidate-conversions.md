@@ -232,3 +232,46 @@ tree dump. No new PROD branch is introduced, so no new render_smoke test is requ
 (P3b) is unblocked.
 
 **Step 4 — markdownlint** this file: `npx markdownlint-cli2 'docs/plans/2026-07-04-p2b-consolidate-conversions.md'`.
+
+---
+
+## Outcome (2026-07-04)
+
+Byte-neutral throughout: `examples_determinism` (11), VRT `run_fulgur_vrt`, and lib (1568)
+all green on the clean base and after every batch; `crates/fulgur-vrt/goldens/` never
+changed. `FULGUR_VRT_UPDATE=1` never used. `cargo build` / `cargo clippy -p fulgur
+--all-targets -D warnings` / `cargo fmt --check` clean; full `cargo test -p fulgur`
+(lib + integration) green.
+
+**Task 1 (centerpiece) — landed.** `size_in_pt` / `layout_in_pt` now return `units::Pt`
+tuples. `.pt()` re-tags dropped at every Pt sink: `block.rs` (via `insert_block_entry`
+params retyped to `Pt`), `inline_root.rs` (×2 `Size`), `list_item.rs` (×4 `Size`),
+`table.rs` (`layout_size` + `width` + `cached_height`), `mod.rs:245` (body offset). Leading
+`.to_f32()` added at the genuine `f32` boundaries: `compute_transform` args
+(`mod.rs:401,623`, the documented pt-valued-`f32` exception), `compute_content_box`
+subtraction (`mod.rs:1041`, mixes with `f32` insets), `replaced.rs` content-dim math + the
+`else`-arm return (`(f32,f32,f32,bool)` signature kept, since content dims derive from
+still-`f32` `Margin`), and the `debug_print_tree` `Display` args (`mod.rs:329`). Test asserts
+compare via `.to_f32()`. Net −26 source lines across 6 files. Operand order preserved
+everywhere (no reassociation).
+
+**Task 2 (secondary `px_to_pt`) — 4 sites.** `list_marker.rs` `size_raster_marker` (×2) and
+the SVG intrinsic-size path (×2): `px_to_pt(v).pt()` → `v.px().in_pt()`. All other `px_to_pt`
+in the enumerated files were audited and **left**: their sinks are genuine `f32` (`BoxShadow`
+fields are `f32`; `build_pseudo_image_entry` / `resolve_pseudo_size` / `shape_marker_with_skrifa`
+take/return `f32`; `line_height_pt` / `line_width` are `f32` accumulators; table `cw`/`ch`
+are `f32` zero-compares) with no `Pt`/`Px` neighbor to bridge.
+
+**Task 3 (secondary `pt_to_px`) — 0 sites.** All in-scope candidates audited and left:
+`positioned.rs:89-91` (`bl_pt` etc. are `border_widths[i].to_f32()`, feeding an `f32`-returning
+`cb_padding_box`), `positioned.rs:270-271` (`pseudo_w_pt`/`pseudo_h_pt` are `f32` params),
+`pseudo.rs:258` (`parent_width` is an `f32` param). None border an already-`Pt` value on the
+argument side, so `.in_px()` would only add `.pt()`-tag churn or cascade into a whole-function
+`Px` migration — out of scope for a call-site consolidation.
+
+**Deferred:** `render.rs` (7 `pt_to_px`, 10 `px_to_pt`) — not in the design's enumerated
+scope; left for a separate reviewable pass if a typed-boundary audit there turns up genuine
+wins. `engine.rs` (public-API `f32` viewport boundary) and `background.rs` (un-migrated `f32`
+gradient math) remain out of scope as designed.
+
+**Unblocks:** `fulgur-2map.10` (P3b: public `Engine::layout()` + `LayoutOutput`).
