@@ -217,6 +217,27 @@ pub struct ContentCounterMapping {
     pub content: Vec<ContentItem>,
 }
 
+/// Maps a simple CSS selector + pseudo-element to a *static* pseudo-element
+/// content string that has already been flattened at parse time.
+///
+/// blitz-dom 0.2.4 renders only `items[0]` of a multi-item pseudo `content`
+/// list, so `p::before { content: "[" "x" "]" }` would show just `[`. Rather
+/// than route such static lists through the per-node [`ContentCounterMapping`]
+/// / `CounterPass` machinery — which emits one generated rule per *matching
+/// node* and lets a hostile document amplify a small input into an OOM —
+/// fulgur concatenates the strings once here and injects a single selector-
+/// level rule (`<selector><pseudo> { content: "<flattened>" }`). The rule
+/// carries the same specificity as the author rule and is injected after it,
+/// so it wins by source order. See `crate::gcpm::parser` (routing) and
+/// `crate::blitz_adapter::build_static_content_css` (injection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticContentMapping {
+    pub parsed: ParsedSelector,
+    pub pseudo: PseudoElement,
+    /// The concatenation of every `String` item, already unescaped.
+    pub text: String,
+}
+
 /// Leader type for `content: leader()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaderStyle {
@@ -401,6 +422,11 @@ pub struct GcpmContext {
     pub counter_mappings: Vec<CounterMapping>,
     /// Mappings from CSS selectors + pseudo-elements to content items with counter().
     pub content_counter_mappings: Vec<ContentCounterMapping>,
+    /// Mappings from CSS selectors + pseudo-elements to flattened *static*
+    /// pseudo content (multi-item string lists that need no per-element
+    /// resolution). Injected as one selector-level rule each — see
+    /// [`StaticContentMapping`].
+    pub static_content_mappings: Vec<StaticContentMapping>,
     /// Mappings from CSS selectors to `bookmark-level` / `bookmark-label` declarations.
     pub bookmark_mappings: Vec<BookmarkMapping>,
     /// The CSS with GCPM constructs stripped, suitable for normal rendering.
@@ -443,6 +469,8 @@ impl GcpmContext {
         self.counter_mappings.extend(other.counter_mappings);
         self.content_counter_mappings
             .extend(other.content_counter_mappings);
+        self.static_content_mappings
+            .extend(other.static_content_mappings);
         self.bookmark_mappings.extend(other.bookmark_mappings);
         if !other.cleaned_css.is_empty() {
             if !self.cleaned_css.is_empty() {
@@ -479,6 +507,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
@@ -502,6 +531,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
@@ -520,6 +550,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
@@ -538,6 +569,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: "body { color: red; }".to_string(),
         };
@@ -556,6 +588,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: "p { margin: 0; }".to_string(),
         };
@@ -576,6 +609,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
         };
@@ -586,6 +620,7 @@ mod tests {
             page_settings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: "body { color: blue; }".to_string(),
         };

@@ -3845,6 +3845,78 @@ fn pseudo_multi_item_content_renders_all_items() {
     );
 }
 
+/// Static multi-item pseudo content is injected once at the *selector*
+/// level, not once per matching node — that per-node expansion is the
+/// availability bug this hardening removed (a hostile document could turn a
+/// small `p::after { content: "…20KB…" "x" }` plus many `<p>` into O(nodes ×
+/// literal_len) generated CSS). This proves the single injected `p::after`
+/// rule still reaches every matching element: all three paragraphs render
+/// the full flattened `Q1Q2`.
+#[test]
+fn pseudo_multi_item_static_content_covers_all_matching_nodes() {
+    let html = r##"<!doctype html><html><head><style>
+      body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; }
+      p::after { content: "Q1" "Q2"; }
+    </style></head><body>
+      <p>a</p><p>b</p><p>c</p>
+    </body></html>"##;
+    let pdf = tagged_render_with_noto(html);
+    assert!(!pdf.is_empty());
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    // One `p::after` rule, three matching `<p>` → three contiguous `Q1Q2`.
+    let count = text.matches("Q1Q2").count();
+    assert!(
+        count >= 3,
+        "one selector-level `p::after` rule must reach all three \
+         paragraphs (expected >= 3 contiguous `Q1Q2`, got {count}). \
+         Text: {text:?}"
+    );
+}
+
+/// Multi-item static pseudo content declared in **AssetBundle / `<link>`
+/// CSS** (not inline `<style>`) — the finding's primary attack surface via
+/// `render_html(combined_css)`. Here the original declaration *does* live in
+/// `cleaned_css` (which is injected as a `<style>`); the fix deliberately
+/// does NOT strip it and instead relies on the later selector-level injection
+/// winning by source order. This asserts the full `[x]` renders, proving the
+/// bundle path works identically to the inline path.
+#[test]
+fn pseudo_multi_item_static_content_via_bundle_css() {
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets
+        .add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans: {e}"));
+    // The GCPM content rule is in bundle CSS, not inline `<style>`.
+    assets.add_css(
+        "body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; } \
+         p::after { content: \"[\" \"x\" \"]\"; }",
+    );
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .assets(assets)
+        .build()
+        .render("<!doctype html><html><body><p>Body text</p></body></html>")
+        .expect("bundle render");
+    assert!(!pdf.is_empty());
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert!(
+        text.contains("[x]"),
+        "multi-item static content declared in bundle CSS must render all \
+         items (`[x]`), not just `[`. Got: {text:?}"
+    );
+}
+
 /// fulgur-2ykw: the canonical 3-item case — open-bracket string +
 /// `counter()` + close-bracket string — on `::before` (the spec sibling
 /// of the `::after` path; both go through blitz-dom's shared

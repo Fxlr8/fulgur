@@ -1839,7 +1839,7 @@ use crate::gcpm::running::{RunningElementStore, serialize_node};
 use crate::gcpm::string_set::{StringSetEntry, StringSetStore, extract_text_content};
 use crate::gcpm::{
     ContentCounterMapping, ContentItem, CounterMapping, CounterOp, ParsedSelector, PseudoElement,
-    RunningMapping, StringSetMapping, StringSetValue, TargetUrl,
+    RunningMapping, StaticContentMapping, StringSetMapping, StringSetValue, TargetUrl,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -2318,7 +2318,7 @@ impl CounterPass {
                     "{}[data-fulgur-cid=\"{}\"]::before{{content:\"{}\"}}",
                     specificity_prefix,
                     cid,
-                    css_escape_string(&resolved)
+                    crate::gcpm::parser::css_escape_string(&resolved)
                 );
             }
         }
@@ -2345,7 +2345,7 @@ impl CounterPass {
                     "{}[data-fulgur-cid=\"{}\"]::after{{content:\"{}\"}}",
                     specificity_prefix,
                     cid,
-                    css_escape_string(&resolved)
+                    crate::gcpm::parser::css_escape_string(&resolved)
                 );
             }
         }
@@ -2728,24 +2728,6 @@ fn resolve_label(
     out
 }
 
-fn css_escape_string(s: &str) -> String {
-    let mut out = String::new();
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\a "),
-            '\r' => out.push_str("\\d "),
-            '\0' => out.push_str("\\0 "),
-            c if c.is_control() => {
-                out.push_str(&format!("\\{:x} ", c as u32));
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 /// Serialize a string as a CSS identifier per the CSSOM
 /// [serialize an identifier][algo] algorithm — the same logic as the
 /// JavaScript `CSS.escape()` function.
@@ -2801,6 +2783,42 @@ fn css_escape_ident(s: &str) -> String {
         index += 1;
     }
     out
+}
+
+/// Serialize flattened static pseudo-content mappings into CSS: one
+/// `<selector><pseudo> { content: "<flattened>" }` rule per mapping.
+///
+/// Injected after the author stylesheet (via [`InjectCssPass`]), each rule
+/// carries the same specificity as the author's simple-selector rule — the
+/// GCPM parser only produces mappings for simple `.class` / `#id` / `tag`
+/// selectors — and so wins by source order, rendering the full flattened
+/// value where blitz-dom 0.2.4 would otherwise emit only `items[0]`. Cost is
+/// O(mappings): unlike `CounterPass`, no DOM walk and no per-node rule, so a
+/// hostile document cannot amplify a small input into an OOM (see
+/// [`crate::gcpm::StaticContentMapping`]).
+pub(crate) fn build_static_content_css(mappings: &[StaticContentMapping]) -> String {
+    use std::fmt::Write;
+    let mut css = String::new();
+    for m in mappings {
+        let selector = match &m.parsed {
+            // Tag names come from the HTML parser as valid identifiers and
+            // match case-insensitively for HTML — lowercased for good measure
+            // (mirrors `element_specificity_prefix`).
+            ParsedSelector::Tag(name) => name.to_ascii_lowercase(),
+            ParsedSelector::Class(name) => format!(".{}", css_escape_ident(name)),
+            ParsedSelector::Id(name) => format!("#{}", css_escape_ident(name)),
+        };
+        let pseudo = match m.pseudo {
+            PseudoElement::Before => "::before",
+            PseudoElement::After => "::after",
+        };
+        let _ = write!(
+            css,
+            "{selector}{pseudo}{{content:\"{}\"}}",
+            crate::gcpm::parser::css_escape_string(&m.text)
+        );
+    }
+    css
 }
 
 /// Reconstruct a CSS selector prefix from an element's own identity —
@@ -3395,6 +3413,39 @@ mod tests {
     use super::*;
     use crate::gcpm::TargetTextKind;
 
+    #[test]
+    fn build_static_content_css_serializes_selectors_and_escapes() {
+        let mappings = vec![
+            StaticContentMapping {
+                parsed: ParsedSelector::Tag("DIV".into()),
+                pseudo: PseudoElement::Before,
+                text: "[x]".into(),
+            },
+            StaticContentMapping {
+                parsed: ParsedSelector::Class("note".into()),
+                pseudo: PseudoElement::After,
+                // A `"` and a `\` must be CSS-escaped so the injected rule
+                // is well-formed and cannot break out of the string.
+                text: "a\"b\\c".into(),
+            },
+            StaticContentMapping {
+                parsed: ParsedSelector::Id("foo".into()),
+                pseudo: PseudoElement::Before,
+                text: "y".into(),
+            },
+        ];
+        let css = build_static_content_css(&mappings);
+        assert_eq!(
+            css,
+            r#"div::before{content:"[x]"}.note::after{content:"a\"b\\c"}#foo::before{content:"y"}"#
+        );
+    }
+
+    #[test]
+    fn build_static_content_css_empty_for_no_mappings() {
+        assert!(build_static_content_css(&[]).is_empty());
+    }
+
     /// `relayout_position_fixed` must reshape every `position: fixed`
     /// subtree against the supplied viewport, not against the nearest
     /// positioned ancestor (the size that Taffy assigned during the
@@ -3671,6 +3722,7 @@ mod tests {
             string_set_mappings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             page_settings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
@@ -3711,6 +3763,7 @@ mod tests {
             string_set_mappings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             page_settings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
@@ -3737,6 +3790,7 @@ mod tests {
             string_set_mappings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             page_settings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
@@ -3766,6 +3820,7 @@ mod tests {
             string_set_mappings: vec![],
             counter_mappings: vec![],
             content_counter_mappings: vec![],
+            static_content_mappings: vec![],
             page_settings: vec![],
             bookmark_mappings: vec![],
             cleaned_css: String::new(),
