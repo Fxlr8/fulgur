@@ -329,7 +329,7 @@ pub(super) fn inline_box_baseline_offset_from_drawables(
     doc: &BaseDocument,
     out: &crate::drawables::Drawables,
     node_id: usize,
-) -> Option<f32> {
+) -> Option<crate::units::Pt> {
     if let Some(block) = out.block_styles.get(&node_id)
         && block.style.has_overflow_clip()
     {
@@ -351,7 +351,7 @@ fn pageable_last_baseline_from_drawables(
     out: &crate::drawables::Drawables,
     node_id: usize,
     depth: usize,
-) -> Option<f32> {
+) -> Option<crate::units::Pt> {
     if depth >= MAX_DOM_DEPTH {
         return None;
     }
@@ -361,10 +361,10 @@ fn pageable_last_baseline_from_drawables(
         let top_inset = out
             .block_styles
             .get(&node_id)
-            .map(|b| b.style.border_widths[0].to_f32() + b.style.padding[0].to_f32())
-            .unwrap_or(0.0);
+            .map(|b| b.style.border_widths[0] + b.style.padding[0])
+            .unwrap_or(crate::units::Pt::ZERO);
         if let Some(line) = para.lines.last() {
-            return Some(top_inset + line.baseline.to_f32());
+            return Some(top_inset + line.baseline);
         }
     }
     // 2) Otherwise walk DOM children in REVERSE, mirroring v1's
@@ -388,7 +388,7 @@ fn pageable_last_baseline_from_drawables(
             // recursively returns its inner baseline relative to its
             // own top edge; the container's own `top_inset` is folded
             // in by branch (1) above.
-            return Some(px_to_pt(child.final_layout.location.y) + inner);
+            return Some(child.final_layout.location.y.px().in_pt() + inner);
         }
     }
     None
@@ -573,7 +573,7 @@ pub(super) fn extract_paragraph(
                     // `block_styles[node_id]` for top-inset) directly.
                     let baseline_shift =
                         inline_box_baseline_offset_from_drawables(doc, out, node_id)
-                            .map(|bo| height - bo.pt())
+                            .map(|bo| height - bo)
                             .unwrap_or(crate::units::Pt::ZERO);
                     let computed_y =
                         positioned.y.px().in_pt() - accumulated_line_top + baseline_shift;
@@ -1269,7 +1269,7 @@ mod tests {
         let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
         assert_eq!(
             result,
-            Some(12.0),
+            Some(12.0_f32.pt()),
             "no overflow clip + paragraph entry → Some(baseline)"
         );
     }
@@ -1284,7 +1284,11 @@ mod tests {
         out.block_styles.insert(node_id, make_block_entry_plain()); // overflow Visible
         out.paragraphs.insert(node_id, make_paragraph_entry(&[9.0]));
         let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
-        assert_eq!(result, Some(9.0), "visible overflow must not short-circuit");
+        assert_eq!(
+            result,
+            Some(9.0_f32.pt()),
+            "visible overflow must not short-circuit"
+        );
     }
 
     // ── pageable_last_baseline_from_drawables ──────────────────────────────────
@@ -1317,7 +1321,7 @@ mod tests {
         let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
         assert_eq!(
             result,
-            Some(26.0),
+            Some(26.0_f32.pt()),
             "must return last line baseline (26.0), not first (12.0)"
         );
     }
@@ -1338,7 +1342,7 @@ mod tests {
         let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
         // top_inset = 4 + 2 = 6; baseline = 12 → Some(18).
         assert!(
-            result.is_some_and(|v| (v - 18.0).abs() < 0.001),
+            result.is_some_and(|v| (v.to_f32() - 18.0).abs() < 0.001),
             "expected Some(18.0), got {:?}",
             result
         );
@@ -1380,7 +1384,7 @@ mod tests {
             "reverse DOM walk must find child's paragraph entry"
         );
         assert!(
-            result.unwrap() >= 12.0,
+            result.unwrap().to_f32() >= 12.0,
             "baseline must be at least the child paragraph's baseline"
         );
     }
