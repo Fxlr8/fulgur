@@ -774,6 +774,22 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
                         })
                         .collect(),
                 );
+                // Strip the original declaration from cleaned CSS (this affects
+                // the AssetBundle / `<link>` paths, where cleaned_css is what
+                // Blitz sees) so it cannot compete with the injected flattened
+                // rule. This matters most when the original is `!important`:
+                // left in place it wins in Stylo and blitz-dom keeps truncating
+                // to `items[0]` (renders `[` not `[x]`). Inline `<style>`
+                // discards cleaned_css, so its original persists there and the
+                // injection wins by source order instead (inline `!important`
+                // multi-item is thus an unchanged, pre-existing limitation).
+                let start = decl_start.position().byte_index();
+                let end = input.position().byte_index();
+                self.edits.push(CssEdit::Replace {
+                    start,
+                    end,
+                    replacement: String::new(),
+                });
             } else if has_counter || items.len() > 1 {
                 // Per-element dynamic content (counter / `target-*` / `attr()`,
                 // or any other multi-item list Blitz cannot render in full).
@@ -2055,9 +2071,15 @@ mod tests {
         assert_eq!(m.parsed, ParsedSelector::Tag("div".into()));
         assert_eq!(m.pseudo, PseudoElement::Before);
         assert_eq!(m.text, "ABCD");
-        // Sibling declarations are untouched; the original `content` stays in
-        // cleaned CSS (the injected selector-level rule overrides it — we never
-        // rewrite cleaned CSS, so inline `<style>` is handled identically).
+        // The original `content` declaration is stripped from cleaned CSS so it
+        // cannot compete with the injected flattened rule (critical for an
+        // `!important` original on the AssetBundle / `<link>` path). Sibling
+        // declarations survive.
+        assert!(
+            !ctx.cleaned_css.contains("\"AB\""),
+            "original multi-item content must be stripped: {:?}",
+            ctx.cleaned_css
+        );
         assert!(ctx.cleaned_css.contains("color: red"));
     }
 

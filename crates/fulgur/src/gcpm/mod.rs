@@ -226,10 +226,17 @@ pub struct ContentCounterMapping {
 /// / `CounterPass` machinery — which emits one generated rule per *matching
 /// node* and lets a hostile document amplify a small input into an OOM —
 /// fulgur concatenates the strings once here and injects a single selector-
-/// level rule (`<selector><pseudo> { content: "<flattened>" }`). The rule
-/// carries the same specificity as the author rule and is injected after it,
-/// so it wins by source order. See `crate::gcpm::parser` (routing) and
-/// `crate::blitz_adapter::build_static_content_css` (injection).
+/// level rule (`<selector><pseudo> { content: "<flattened>" }`).
+///
+/// The injected rule carries the same specificity as the author's (always
+/// simple) selector. For AssetBundle / `<link>` CSS the parser also strips the
+/// original declaration from `cleaned_css`, so the injection is the only
+/// source — this is what makes an `!important` original render `[x]` rather
+/// than truncating. Inline `<style>` text is never rewritten to `cleaned_css`,
+/// so there the original persists and the injection wins by source order (it
+/// is emitted after the author stylesheet). See `crate::gcpm::parser`
+/// (routing + strip) and `crate::blitz_adapter::build_static_content_css`
+/// (injection).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticContentMapping {
     pub parsed: ParsedSelector,
