@@ -25,13 +25,16 @@ pub(crate) const MAX_DOM_DEPTH: usize = 512;
 /// time). This constant therefore caps single-element amplification, not the
 /// absolute page count — code must not assume `page_count <= MAX_PAGES`.
 ///
-/// Set high enough that legitimate large documents (batch report generation
-/// is a primary use case) do not hit it — at this value the truncation only
-/// fires for attacker-amplified input, and rendering the bound is still
-/// bounded (~100k pages ≈ a few seconds). Content past the per-element cap is
+/// Kept deliberately conservative for untrusted server-side rendering (a
+/// shared multi-tenant renderer is the primary deployment): a tiny
+/// pathological input must not amplify into one render iteration and PDF
+/// page per fragment. The most common amplifier — a childless block with a
+/// huge height, which prints only blank pages — is additionally collapsed to
+/// a single page in `pagination_layout` (fulgur-ezst), so this ceiling only
+/// bounds the residual content-bearing case. Content past the cap is
 /// truncated (clamp-and-warn). Sibling of the `MAX_DOM_DEPTH` / background
 /// `MAX_TILES` defensive bounds.
-pub(crate) const MAX_PAGES: u32 = 100_000;
+pub(crate) const MAX_PAGES: u32 = 10_000;
 
 pub mod asset;
 pub mod background;

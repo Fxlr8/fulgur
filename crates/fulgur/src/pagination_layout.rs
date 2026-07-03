@@ -977,6 +977,24 @@ impl<'a> PaginationLayoutTree<'a> {
                 );
                 let mut remaining = child_h - first_slice_h;
                 let mut last_slice_h = first_slice_h;
+                // fulgur-ezst: a CHILDLESS block whose slicing would exceed
+                // the cap is a pathological amplifier — `<div
+                // style="height:99999999px">` is a web-only spacer/overflow
+                // idiom that prints nothing but blank pages. Emit only its
+                // first slice: skip the per-page fragment pushes while
+                // leaving the loop's page_index / cursor_y / remaining math
+                // untouched, so following in-flow siblings keep their exact
+                // positions (no reflow) and a trailing block collapses for
+                // free (`implied_page_count` reads the max fragment index).
+                // Background / border presence does NOT gate this — nobody
+                // authors a >MAX_PAGES-tall filled band on purpose. A
+                // content-bearing block, or a childless band that fits
+                // within the cap, is not collapsed and takes the
+                // truncate-and-warn path below unchanged.
+                let collapse_childless = self.page_height_px > 0.0
+                    && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
+                    && !subtree_has_rendered_content(self.doc, child_id, 0)
+                    && !is_replaced_content(self.doc, child_id);
                 // fulgur-2m6w: cap the per-page-strip slicing at
                 // `MAX_PAGES`. `child_h` is attacker-controlled CSS
                 // (`height` / `vh`), so without this bound a few bytes of
@@ -988,26 +1006,37 @@ impl<'a> PaginationLayoutTree<'a> {
                 while remaining > 0.0 && page_index < crate::MAX_PAGES {
                     page_index += 1;
                     last_slice_h = remaining.min(self.page_height_px);
-                    self.geometry
-                        .entry(child_id)
-                        .or_default()
-                        .fragments
-                        .push(Fragment {
-                            page_index,
-                            x: frag_x.px(),
-                            y: 0.0_f32.px(),
-                            width: child_w.px(),
-                            height: last_slice_h.px(),
-                        });
+                    if !collapse_childless {
+                        self.geometry
+                            .entry(child_id)
+                            .or_default()
+                            .fragments
+                            .push(Fragment {
+                                page_index,
+                                x: frag_x.px(),
+                                y: 0.0_f32.px(),
+                                width: child_w.px(),
+                                height: last_slice_h.px(),
+                            });
+                    }
                     remaining -= last_slice_h;
                 }
                 if remaining > 0.0 {
-                    log::warn!(
-                        "pagination: block height {child_h}px exceeds the \
-                         {}-page limit; truncating remaining content to bound \
-                         rendering (fulgur-2m6w)",
-                        crate::MAX_PAGES,
-                    );
+                    if collapse_childless {
+                        log::warn!(
+                            "pagination: collapsed a childless block of \
+                             height {child_h}px (slicing would exceed the \
+                             {}-page limit) to a single page (fulgur-ezst)",
+                            crate::MAX_PAGES,
+                        );
+                    } else {
+                        log::warn!(
+                            "pagination: block height {child_h}px exceeds the \
+                             {}-page limit; truncating remaining content to \
+                             bound rendering (fulgur-2m6w)",
+                            crate::MAX_PAGES,
+                        );
+                    }
                 }
                 cursor_y = if child_h - first_slice_h > 0.0 {
                     last_slice_h
@@ -1090,6 +1119,80 @@ impl<'a> PaginationLayoutTree<'a> {
 
         emitted
     }
+}
+
+/// fulgur-ezst (Codex P2 on PR #553): true if `node_id` is a replaced
+/// element that paints its own box content — `<img>` / `<svg>`, matching
+/// `convert::replaced`'s dispatch. Such a node has no rendered *descendants*
+/// yet is visible content in its own right, so a pathologically tall one
+/// must NOT be collapsed like a blank spacer (the collapse would clip the
+/// image to a single page). A background / border is decoration, not
+/// replaced content, and stays collapsible by design (see `MAX_PAGES`).
+fn is_replaced_content(doc: &BaseDocument, node_id: usize) -> bool {
+    doc.get_node(node_id)
+        .and_then(|n| n.element_data())
+        .is_some_and(|el| matches!(el.name.local.as_ref(), "img" | "svg"))
+}
+
+/// fulgur-ezst: true if `parent_id`'s subtree renders any VISIBLE box (a
+/// descendant with positive area — both width and height > 0). Used to
+/// classify a pathologically tall block as "childless" (collapsible): the
+/// collapse is safe only when nothing visible would be lost.
+///
+/// Walks children like `record_subtree_descendants` (the `layout_children`
+/// preference, short-circuiting on the first hit), but the emptiness test
+/// differs deliberately: a descendant with zero AREA (EITHER dimension
+/// <= 0) paints nothing, so it does not count as content — instead we
+/// recurse into it, because with `overflow: visible` a zero-height /
+/// zero-width box can still host visible descendants that overflow it.
+/// (This is why the test is `||`, not `&&`: an empty block child lays out
+/// width>0 / height==0, and `&&` would wrongly count it as content and
+/// disable the collapse — a trivial DoS bypass,
+/// `<div style="height:99999999px"><div></div></div>`; Codex P2 on PR #553.)
+/// `record_subtree_descendants` still *records* such zero-area boxes (their
+/// node ids may carry counters / ids), which is a separate question from
+/// "does this paint anything". Conservative on depth: a subtree deeper than
+/// `MAX_DOM_DEPTH` reads as no content, matching `record_subtree_descendants`
+/// (which also stops recording there, so such content renders blank anyway).
+fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usize) -> bool {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return false;
+    }
+    let Some(parent) = doc.get_node(parent_id) else {
+        return false;
+    };
+    let layout_children_borrow = parent.layout_children.borrow();
+    let walk_children: &[usize] = layout_children_borrow
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .unwrap_or(&parent.children);
+    for &child_id in walk_children {
+        let Some(child) = doc.get_node(child_id) else {
+            continue;
+        };
+        let layout = child.final_layout;
+        // `visibility: hidden` / `collapse` occupies layout space but paints
+        // nothing (conversion skips its paint), so it does not count as
+        // content — a `<div style="visibility:hidden">` must not defeat the
+        // collapse (Codex P2 on PR #553).
+        let invisible = {
+            use style::properties::longhands::visibility::computed_value::T as Visibility;
+            child
+                .primary_styles()
+                .is_some_and(|s| s.clone_visibility() != Visibility::Visible)
+        };
+        if invisible || layout.size.height <= 0.0 || layout.size.width <= 0.0 {
+            // An invisible or zero-area box paints nothing itself, but may
+            // host visible descendants — overflowing it (overflow: visible)
+            // or flipping `visibility` back to `visible` — so recurse.
+            if subtree_has_rendered_content(doc, child_id, depth + 1) {
+                return true;
+            }
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 /// fulgur-s67g Phase 2.5: recursively record fragments for every
@@ -3958,40 +4061,237 @@ mod tests {
         walk(doc, doc.root_element().id, id)
     }
 
-    /// fulgur-2m6w: a tiny input with a pathologically tall CSS height
-    /// must not generate an unbounded number of page strips. Without the
-    /// page cap a `height: 99999999px` div on an 800px strip slices into
-    /// ~125 000 fragments/pages, which downstream (`render.rs`) turns into
-    /// a `vec![Vec::new(); page_count]` allocation plus a per-page render
-    /// loop — a CPU/memory-exhaustion DoS from a few bytes of untrusted
-    /// HTML. The slicing loop is clamped to `MAX_PAGES`.
+    /// fulgur-ezst: a tiny input with a pathologically tall CSS height on a
+    /// CHILDLESS block prints only blank pages, so instead of slicing it to
+    /// the `MAX_PAGES` cap (~10k blank pages) the fragmenter collapses it to
+    /// a single page. `height: 99999999px` would otherwise slice into
+    /// ~125 000 fragments — the small-input DoS.
     #[test]
-    fn pathological_tall_block_is_page_capped() {
+    fn pathological_childless_tall_block_collapses() {
         let html = r#"<html><body><div style="height: 99999999px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "childless pathological height must collapse to a single page",
+        );
+    }
+
+    /// fulgur-ezst: Stylo/Taffy clamps an absurd `<length>` to `f32::MAX`
+    /// (≈3.4e38), the worst-case finite input. A childless block that tall
+    /// also collapses to one page (the ceiling-bounded slice loop still runs
+    /// its counter math but pushes no fragment).
+    #[test]
+    fn f32_max_childless_height_collapses() {
+        let html = r#"<html><body><div style="height: 1e39px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "childless f32::MAX height must collapse to a single page",
+        );
+    }
+
+    /// fulgur-ezst: background presence does not gate the collapse — a
+    /// childless filled band this tall is still a pathological amplifier.
+    #[test]
+    fn childless_tall_block_with_background_collapses() {
+        let html =
+            r#"<html><body><div style="height: 99999999px; background: red"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(implied_page_count(&table), 1);
+    }
+
+    /// fulgur-ezst: a tall block WITH rendered content is not childless, so
+    /// it is NOT collapsed — it still clamps to ~MAX_PAGES (truncate-and-
+    /// warn). Also guards routing: a huge parent with a small child must
+    /// reach the slice loop, not the recursion branch (the recursion gate
+    /// measures descendant overflow, not the parent's intrinsic height).
+    #[test]
+    fn content_bearing_tall_block_is_page_capped() {
+        let html = r#"<html><body><div style="height: 99999999px"><p>x</p></div></body></html>"#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
         let pages = implied_page_count(&table);
         assert!(
+            pages > 1_000,
+            "content-bearing block must take the cap path, not collapse; got {pages}",
+        );
+        assert!(
             pages <= crate::MAX_PAGES + 1,
-            "page count must be clamped to ~MAX_PAGES ({}), got {pages}",
+            "content-bearing block must stay clamped to ~MAX_PAGES ({}); got {pages}",
             crate::MAX_PAGES,
         );
     }
 
-    /// fulgur-2m6w: Stylo/Taffy clamps an absurd `<length>` to `f32::MAX`
-    /// (≈3.4e38) rather than `+inf`, so `height: 1e39px` is the true
-    /// worst-case *finite* input — without the cap it would slice into
-    /// ~4e35 strips (an effective hang, and `page_index` (u32) would wrap
-    /// /panic long before). The cap bounds it to `MAX_PAGES` all the same.
+    /// fulgur-ezst: a childless band that fits WITHIN the cap renders its
+    /// full page count — the collapse must not over-fire on ordinary
+    /// multi-page spacers. `height: 4000px` on an 800px strip = 5 pages.
     #[test]
-    fn f32_max_height_block_is_page_capped() {
-        let html = r#"<html><body><div style="height: 1e39px"></div></body></html>"#;
+    fn childless_subcap_band_renders_full() {
+        let html = r#"<html><body><div style="height: 4000px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            5,
+            "a sub-cap childless band must render fully, not collapse",
+        );
+    }
+
+    /// fulgur-ezst (Codex P2 on PR #553): an empty *block* child lays out
+    /// with positive width but zero height, so a `height <= 0 && width <= 0`
+    /// emptiness test would wrongly count it as content and disable the
+    /// collapse — a trivial DoS bypass. `subtree_has_rendered_content` treats
+    /// any zero-AREA descendant as blank (recursing for overflow), so a tall
+    /// block whose only child is an empty block still collapses to one page.
+    #[test]
+    fn childless_tall_block_with_empty_block_child_collapses() {
+        let html = r#"<html><body><div style="height: 99999999px"><div></div></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "an empty (zero-area) block child must not defeat the collapse",
+        );
+    }
+
+    /// fulgur-ezst: the emptiness recursion must still find VISIBLE content
+    /// nested under a zero-area wrapper — a zero-height (overflow:visible)
+    /// wrapper holding a real `<p>` is content, so the tall block is NOT
+    /// childless and stays on the cap path. Guards the `||` fix against
+    /// over-collapsing (dropping visibly-overflowing descendants).
+    #[test]
+    fn tall_block_with_content_under_zero_height_wrapper_is_not_collapsed() {
+        let html = r#"<html><body><div style="height: 99999999px"><div style="height: 0"><p>x</p></div></div></body></html>"#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
         let pages = implied_page_count(&table);
         assert!(
+            pages > 1_000,
+            "visible content under a zero-height wrapper must block the collapse; got {pages}",
+        );
+        assert!(
             pages <= crate::MAX_PAGES + 1,
-            "f32::MAX height must be clamped to ~MAX_PAGES ({}), got {pages}",
+            "still clamped to ~MAX_PAGES ({}); got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-ezst: the defensive guards of `subtree_has_rendered_content`
+    /// read as "no content" (false) without panicking — a nonexistent node
+    /// id (the `get_node` None guard) and a call already at the recursion
+    /// ceiling (the `MAX_DOM_DEPTH` guard).
+    #[test]
+    fn subtree_has_rendered_content_guards() {
+        use std::ops::DerefMut;
+        let html = r#"<html><body><div id="x">hi</div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let x = find_by_id(doc.deref_mut(), "x").expect("div#x");
+        assert!(!subtree_has_rendered_content(
+            doc.deref_mut(),
+            usize::MAX,
+            0
+        ));
+        assert!(!subtree_has_rendered_content(
+            doc.deref_mut(),
+            x,
+            crate::MAX_DOM_DEPTH
+        ));
+    }
+
+    /// fulgur-ezst (Codex P2 on PR #553): a replaced element (`<img>`/`<svg>`)
+    /// has no descendants but paints its own box, so a pathologically tall
+    /// one must NOT collapse (that would clip the image to one page) — it
+    /// takes the cap path like any content-bearing block.
+    #[test]
+    fn replaced_tall_block_is_not_collapsed() {
+        let html = r#"<html><body><img style="display:block;width:10px;height:99999999px" src="x.png"></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages > 1_000,
+            "a replaced element paints its own content and must not collapse; got {pages}",
+        );
+        assert!(
+            pages <= crate::MAX_PAGES + 1,
+            "still clamped to ~MAX_PAGES ({}); got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-ezst (Codex P2 on PR #553): a `visibility:hidden` descendant
+    /// occupies layout space but paints nothing, so it must not defeat the
+    /// collapse — a tall block whose only child is invisible still collapses.
+    #[test]
+    fn invisible_only_child_collapses() {
+        let html = r#"<html><body><div style="height:99999999px"><div style="visibility:hidden;height:1px"></div></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "a visibility:hidden-only descendant must not defeat the collapse",
+        );
+    }
+
+    /// fulgur-ezst: the visibility skip must still recurse — a
+    /// `visibility:visible` descendant under a `visibility:hidden` wrapper is
+    /// real content, so the tall block is not childless and stays capped.
+    #[test]
+    fn visible_child_under_hidden_wrapper_blocks_collapse() {
+        let html = r#"<html><body><div style="height:99999999px"><div style="visibility:hidden"><p style="visibility:visible">x</p></div></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages > 1_000,
+            "visible content under a hidden wrapper must block the collapse; got {pages}",
+        );
+    }
+
+    /// fulgur-ezst: pins the no-reflow / no-free-page-reduction mechanism of
+    /// the childless collapse. The collapse skips only the per-page fragment
+    /// pushes — it deliberately leaves the slice loop's `page_index` counter
+    /// advancing all the way to `MAX_PAGES` — so a following in-flow sibling
+    /// lands on the SAME deep page it would occupy without the collapse (the
+    /// document is not silently shortened, and siblings do not reflow up to
+    /// page 0). If someone "optimizes" the loop to break early once the
+    /// collapse is decided, the `<p>` would jump to page ~0/1 and this test
+    /// fails. Asserts: the tall div contributes exactly one fragment
+    /// (collapse fired) while the `<p>` sibling's fragment stays at
+    /// `page_index >= MAX_PAGES`.
+    #[test]
+    fn childless_collapse_does_not_reflow_following_sibling() {
+        use std::ops::DerefMut;
+        let html = r#"<html><body><div id="tall" style="height: 99999999px"></div><p id="after">after</p></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let tall_id = find_by_id(doc.deref_mut(), "tall").expect("div#tall");
+        let after_id = find_by_id(doc.deref_mut(), "after").expect("p#after");
+        let tall_frags = table
+            .get(&tall_id)
+            .expect("div#tall must appear in geometry")
+            .fragments
+            .len();
+        assert_eq!(
+            tall_frags, 1,
+            "collapsed childless div must contribute exactly one fragment, got {tall_frags}",
+        );
+        let after_page = table
+            .get(&after_id)
+            .expect("p#after must appear in geometry")
+            .fragments[0]
+            .page_index;
+        assert!(
+            after_page >= crate::MAX_PAGES,
+            "following sibling must stay on its deep page (>= MAX_PAGES {}); got {after_page} \
+             — an early loop break would reflow it near page 0",
             crate::MAX_PAGES,
         );
     }
