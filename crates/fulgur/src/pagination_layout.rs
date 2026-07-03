@@ -1120,16 +1120,26 @@ impl<'a> PaginationLayoutTree<'a> {
     }
 }
 
-/// fulgur-ezst: true if `parent_id`'s subtree renders any box (a descendant
-/// with non-zero size). Mirrors `record_subtree_descendants`' walk — the
-/// `layout_children` preference and the zero-size-container recursion (so a
-/// `<tbody>`/`<tr>`/anonymous wrapper still counts its cells as content) —
-/// but short-circuits on the first rendered descendant. Used to classify a
-/// pathologically tall block as "childless" (collapsible). Conservative: a
-/// subtree deeper than `MAX_DOM_DEPTH` reads as no content, matching
-/// `record_subtree_descendants` (which also stops recording there, so such
-/// content renders blank regardless). Keep this walk in sync with
-/// `record_subtree_descendants`.
+/// fulgur-ezst: true if `parent_id`'s subtree renders any VISIBLE box (a
+/// descendant with positive area — both width and height > 0). Used to
+/// classify a pathologically tall block as "childless" (collapsible): the
+/// collapse is safe only when nothing visible would be lost.
+///
+/// Walks children like `record_subtree_descendants` (the `layout_children`
+/// preference, short-circuiting on the first hit), but the emptiness test
+/// differs deliberately: a descendant with zero AREA (EITHER dimension
+/// <= 0) paints nothing, so it does not count as content — instead we
+/// recurse into it, because with `overflow: visible` a zero-height /
+/// zero-width box can still host visible descendants that overflow it.
+/// (This is why the test is `||`, not `&&`: an empty block child lays out
+/// width>0 / height==0, and `&&` would wrongly count it as content and
+/// disable the collapse — a trivial DoS bypass,
+/// `<div style="height:99999999px"><div></div></div>`; Codex P2 on PR #553.)
+/// `record_subtree_descendants` still *records* such zero-area boxes (their
+/// node ids may carry counters / ids), which is a separate question from
+/// "does this paint anything". Conservative on depth: a subtree deeper than
+/// `MAX_DOM_DEPTH` reads as no content, matching `record_subtree_descendants`
+/// (which also stops recording there, so such content renders blank anyway).
 fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usize) -> bool {
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
@@ -1147,7 +1157,9 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
             continue;
         };
         let layout = child.final_layout;
-        if layout.size.height <= 0.0 && layout.size.width <= 0.0 {
+        if layout.size.height <= 0.0 || layout.size.width <= 0.0 {
+            // Zero-area box paints nothing itself, but may host visible
+            // descendants overflowing it (overflow: visible) — recurse.
             if subtree_has_rendered_content(doc, child_id, depth + 1) {
                 return true;
             }
@@ -4103,6 +4115,68 @@ mod tests {
             5,
             "a sub-cap childless band must render fully, not collapse",
         );
+    }
+
+    /// fulgur-ezst (Codex P2 on PR #553): an empty *block* child lays out
+    /// with positive width but zero height, so a `height <= 0 && width <= 0`
+    /// emptiness test would wrongly count it as content and disable the
+    /// collapse — a trivial DoS bypass. `subtree_has_rendered_content` treats
+    /// any zero-AREA descendant as blank (recursing for overflow), so a tall
+    /// block whose only child is an empty block still collapses to one page.
+    #[test]
+    fn childless_tall_block_with_empty_block_child_collapses() {
+        let html = r#"<html><body><div style="height: 99999999px"><div></div></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "an empty (zero-area) block child must not defeat the collapse",
+        );
+    }
+
+    /// fulgur-ezst: the emptiness recursion must still find VISIBLE content
+    /// nested under a zero-area wrapper — a zero-height (overflow:visible)
+    /// wrapper holding a real `<p>` is content, so the tall block is NOT
+    /// childless and stays on the cap path. Guards the `||` fix against
+    /// over-collapsing (dropping visibly-overflowing descendants).
+    #[test]
+    fn tall_block_with_content_under_zero_height_wrapper_is_not_collapsed() {
+        let html = r#"<html><body><div style="height: 99999999px"><div style="height: 0"><p>x</p></div></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages > 1_000,
+            "visible content under a zero-height wrapper must block the collapse; got {pages}",
+        );
+        assert!(
+            pages <= crate::MAX_PAGES + 1,
+            "still clamped to ~MAX_PAGES ({}); got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-ezst: the defensive guards of `subtree_has_rendered_content`
+    /// read as "no content" (false) without panicking — a nonexistent node
+    /// id (the `get_node` None guard) and a call already at the recursion
+    /// ceiling (the `MAX_DOM_DEPTH` guard).
+    #[test]
+    fn subtree_has_rendered_content_guards() {
+        use std::ops::DerefMut;
+        let html = r#"<html><body><div id="x">hi</div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let x = find_by_id(doc.deref_mut(), "x").expect("div#x");
+        assert!(!subtree_has_rendered_content(
+            doc.deref_mut(),
+            usize::MAX,
+            0
+        ));
+        assert!(!subtree_has_rendered_content(
+            doc.deref_mut(),
+            x,
+            crate::MAX_DOM_DEPTH
+        ));
     }
 
     /// fulgur-ezst: pins the no-reflow / no-free-page-reduction mechanism of
