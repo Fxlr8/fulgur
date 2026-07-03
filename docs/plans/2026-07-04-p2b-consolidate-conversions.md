@@ -251,9 +251,19 @@ params retyped to `Pt`), `inline_root.rs` (×2 `Size`), `list_item.rs` (×4 `Siz
 (`mod.rs:401,623`, the documented pt-valued-`f32` exception), `compute_content_box`
 subtraction (`mod.rs:1041`, mixes with `f32` insets), `replaced.rs` content-dim math + the
 `else`-arm return (`(f32,f32,f32,bool)` signature kept, since content dims derive from
-still-`f32` `Margin`), and the `debug_print_tree` `Display` args (`mod.rs:329`). Test asserts
-compare via `.to_f32()`. Net −26 source lines across 6 files. Operand order preserved
-everywhere (no reassociation).
+still-`f32` `Margin`). Test asserts compare via `.to_f32()`. Net −26 source lines across 6
+files. Operand order preserved everywhere (no reassociation).
+
+**Coverage (measured, not assumed).** `cargo llvm-cov nextest --workspace --exclude
+fulgur-vrt --show-missing-lines` (the CI config) confirmed every changed PROD line is hit by
+a **non-VRT** test: the transform `.to_f32()` sites (`mod.rs:402/625`) by
+`render_smoke::render_v2_smoke_transform_translate` + `transform_integration`; the bordered
+`replaced` content-dim path by the `render_smoke` `<img border>` case; the four `list_marker`
+intrinsic sites by `list_style_image_test`; every `Size` sink by the block / list / table
+renders. The lone exception is `debug_print_tree` (`mod.rs:329`), which is `FULGUR_DEBUG`-gated
+and never runs under test — reworked to `{:?}` + bare `Pt` args so the patch footprint is a
+single format-string line (not four `.to_f32()` args), per memory
+`project_units_migration_patch_coverage`.
 
 **Task 2 (secondary `px_to_pt`) — 4 sites.** `list_marker.rs` `size_raster_marker` (×2) and
 the SVG intrinsic-size path (×2): `px_to_pt(v).pt()` → `v.px().in_pt()`. All other `px_to_pt`
