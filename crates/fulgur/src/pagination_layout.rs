@@ -977,6 +977,23 @@ impl<'a> PaginationLayoutTree<'a> {
                 );
                 let mut remaining = child_h - first_slice_h;
                 let mut last_slice_h = first_slice_h;
+                // fulgur-ezst: a CHILDLESS block whose slicing would exceed
+                // the cap is a pathological amplifier — `<div
+                // style="height:99999999px">` is a web-only spacer/overflow
+                // idiom that prints nothing but blank pages. Emit only its
+                // first slice: skip the per-page fragment pushes while
+                // leaving the loop's page_index / cursor_y / remaining math
+                // untouched, so following in-flow siblings keep their exact
+                // positions (no reflow) and a trailing block collapses for
+                // free (`implied_page_count` reads the max fragment index).
+                // Background / border presence does NOT gate this — nobody
+                // authors a >MAX_PAGES-tall filled band on purpose. A
+                // content-bearing block, or a childless band that fits
+                // within the cap, is not collapsed and takes the
+                // truncate-and-warn path below unchanged.
+                let collapse_childless = self.page_height_px > 0.0
+                    && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
+                    && !subtree_has_rendered_content(self.doc, child_id, 0);
                 // fulgur-2m6w: cap the per-page-strip slicing at
                 // `MAX_PAGES`. `child_h` is attacker-controlled CSS
                 // (`height` / `vh`), so without this bound a few bytes of
@@ -988,26 +1005,37 @@ impl<'a> PaginationLayoutTree<'a> {
                 while remaining > 0.0 && page_index < crate::MAX_PAGES {
                     page_index += 1;
                     last_slice_h = remaining.min(self.page_height_px);
-                    self.geometry
-                        .entry(child_id)
-                        .or_default()
-                        .fragments
-                        .push(Fragment {
-                            page_index,
-                            x: frag_x.px(),
-                            y: 0.0_f32.px(),
-                            width: child_w.px(),
-                            height: last_slice_h.px(),
-                        });
+                    if !collapse_childless {
+                        self.geometry
+                            .entry(child_id)
+                            .or_default()
+                            .fragments
+                            .push(Fragment {
+                                page_index,
+                                x: frag_x.px(),
+                                y: 0.0_f32.px(),
+                                width: child_w.px(),
+                                height: last_slice_h.px(),
+                            });
+                    }
                     remaining -= last_slice_h;
                 }
                 if remaining > 0.0 {
-                    log::warn!(
-                        "pagination: block height {child_h}px exceeds the \
-                         {}-page limit; truncating remaining content to bound \
-                         rendering (fulgur-2m6w)",
-                        crate::MAX_PAGES,
-                    );
+                    if collapse_childless {
+                        log::warn!(
+                            "pagination: collapsed a childless block of \
+                             height {child_h}px (slicing would exceed the \
+                             {}-page limit) to a single page (fulgur-ezst)",
+                            crate::MAX_PAGES,
+                        );
+                    } else {
+                        log::warn!(
+                            "pagination: block height {child_h}px exceeds the \
+                             {}-page limit; truncating remaining content to \
+                             bound rendering (fulgur-2m6w)",
+                            crate::MAX_PAGES,
+                        );
+                    }
                 }
                 cursor_y = if child_h - first_slice_h > 0.0 {
                     last_slice_h
@@ -3996,41 +4024,84 @@ mod tests {
         walk(doc, doc.root_element().id, id)
     }
 
-    /// fulgur-2m6w: a tiny input with a pathologically tall CSS height
-    /// must not generate an unbounded number of page strips. Without the
-    /// page cap a `height: 99999999px` div on an 800px strip slices into
-    /// ~125 000 fragments/pages, which downstream (`render.rs`) turns into
-    /// a `vec![Vec::new(); page_count]` allocation plus a per-page render
-    /// loop — a CPU/memory-exhaustion DoS from a few bytes of untrusted
-    /// HTML. The slicing loop is clamped to `MAX_PAGES`.
+    /// fulgur-ezst: a tiny input with a pathologically tall CSS height on a
+    /// CHILDLESS block prints only blank pages, so instead of slicing it to
+    /// the `MAX_PAGES` cap (~10k blank pages) the fragmenter collapses it to
+    /// a single page. `height: 99999999px` would otherwise slice into
+    /// ~125 000 fragments — the small-input DoS.
     #[test]
-    fn pathological_tall_block_is_page_capped() {
+    fn pathological_childless_tall_block_collapses() {
         let html = r#"<html><body><div style="height: 99999999px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "childless pathological height must collapse to a single page",
+        );
+    }
+
+    /// fulgur-ezst: Stylo/Taffy clamps an absurd `<length>` to `f32::MAX`
+    /// (≈3.4e38), the worst-case finite input. A childless block that tall
+    /// also collapses to one page (the ceiling-bounded slice loop still runs
+    /// its counter math but pushes no fragment).
+    #[test]
+    fn f32_max_childless_height_collapses() {
+        let html = r#"<html><body><div style="height: 1e39px"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "childless f32::MAX height must collapse to a single page",
+        );
+    }
+
+    /// fulgur-ezst: background presence does not gate the collapse — a
+    /// childless filled band this tall is still a pathological amplifier.
+    #[test]
+    fn childless_tall_block_with_background_collapses() {
+        let html =
+            r#"<html><body><div style="height: 99999999px; background: red"></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(implied_page_count(&table), 1);
+    }
+
+    /// fulgur-ezst: a tall block WITH rendered content is not childless, so
+    /// it is NOT collapsed — it still clamps to ~MAX_PAGES (truncate-and-
+    /// warn). Also guards routing: a huge parent with a small child must
+    /// reach the slice loop, not the recursion branch (the recursion gate
+    /// measures descendant overflow, not the parent's intrinsic height).
+    #[test]
+    fn content_bearing_tall_block_is_page_capped() {
+        let html = r#"<html><body><div style="height: 99999999px"><p>x</p></div></body></html>"#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
         let pages = implied_page_count(&table);
         assert!(
+            pages > 1_000,
+            "content-bearing block must take the cap path, not collapse; got {pages}",
+        );
+        assert!(
             pages <= crate::MAX_PAGES + 1,
-            "page count must be clamped to ~MAX_PAGES ({}), got {pages}",
+            "content-bearing block must stay clamped to ~MAX_PAGES ({}); got {pages}",
             crate::MAX_PAGES,
         );
     }
 
-    /// fulgur-2m6w: Stylo/Taffy clamps an absurd `<length>` to `f32::MAX`
-    /// (≈3.4e38) rather than `+inf`, so `height: 1e39px` is the true
-    /// worst-case *finite* input — without the cap it would slice into
-    /// ~4e35 strips (an effective hang, and `page_index` (u32) would wrap
-    /// /panic long before). The cap bounds it to `MAX_PAGES` all the same.
+    /// fulgur-ezst: a childless band that fits WITHIN the cap renders its
+    /// full page count — the collapse must not over-fire on ordinary
+    /// multi-page spacers. `height: 4000px` on an 800px strip = 5 pages.
     #[test]
-    fn f32_max_height_block_is_page_capped() {
-        let html = r#"<html><body><div style="height: 1e39px"></div></body></html>"#;
+    fn childless_subcap_band_renders_full() {
+        let html = r#"<html><body><div style="height: 4000px"></div></body></html>"#;
         let mut doc = parse(html, 600.0);
         let table = run_pass(&mut doc, 800.0);
-        let pages = implied_page_count(&table);
-        assert!(
-            pages <= crate::MAX_PAGES + 1,
-            "f32::MAX height must be clamped to ~MAX_PAGES ({}), got {pages}",
-            crate::MAX_PAGES,
+        assert_eq!(
+            implied_page_count(&table),
+            5,
+            "a sub-cap childless band must render fully, not collapse",
         );
     }
 
