@@ -350,23 +350,24 @@ fn take_unit(rest: &str) -> (Option<&str>, &str) {
 }
 
 /// Parse `WxH` custom page dimensions, e.g. `210x297mm` or `2352.6ptx3481.39pt`.
-/// Separator is a single `x`/`X` or a run of whitespace. A unit on one side
-/// applies to both; both sides unitless is rejected (unit required).
+/// Separator is an `x`/`X` (optionally surrounded by whitespace) or a bare run
+/// of whitespace. A unit on one side applies to both; both sides unitless is
+/// rejected (unit required).
 fn parse_custom_size(s: &str) -> Option<PageSize> {
     let s = s.trim();
 
     let (wv, rest) = take_number(s)?;
     let (wunit, rest) = take_unit(rest);
 
-    // Separator: exactly one 'x'/'X', or a run of whitespace.
-    let rest = if let Some(after) = rest.strip_prefix(['x', 'X']) {
-        after
+    // Separator: optional whitespace, then 'x'/'X', then optional whitespace;
+    // or a bare run of whitespace with no 'x' (e.g. "100mm 200mm").
+    let after_lead_ws = rest.trim_start();
+    let rest = if let Some(after) = after_lead_ws.strip_prefix(['x', 'X']) {
+        after.trim_start()
+    } else if after_lead_ws.len() != rest.len() {
+        after_lead_ws // whitespace-only separator
     } else {
-        let trimmed = rest.trim_start();
-        if trimmed.len() == rest.len() {
-            return None; // no separator
-        }
-        trimmed
+        return None; // no separator
     };
 
     let (hv, rest) = take_number(rest)?;
@@ -832,6 +833,19 @@ mod tests {
     fn custom_whitespace_separator() {
         let s = parse_page_size("100mm 200mm");
         assert!(approx(s.width, 100.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 200.0 * 72.0 / 25.4));
+    }
+
+    #[test]
+    fn custom_whitespace_around_x_separator() {
+        // 'x' may be surrounded by whitespace: "100mm x 200mm".
+        let s = parse_page_size("100mm x 200mm");
+        assert!(approx(s.width, 100.0 * 72.0 / 25.4));
+        assert!(approx(s.height, 200.0 * 72.0 / 25.4));
+        // Asymmetric spacing is accepted too.
+        let s = parse_page_size("100mmx 200mm");
+        assert!(approx(s.width, 100.0 * 72.0 / 25.4));
+        let s = parse_page_size("100mm x200mm");
         assert!(approx(s.height, 200.0 * 72.0 / 25.4));
     }
 

@@ -23,12 +23,15 @@ fn render_with_size(size: &str) -> Vec<u8> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn fulgur render");
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"<html><body><p>x</p></body></html>")
-        .unwrap();
+    // Take stdin so it is dropped (closed) after writing, sending EOF to the
+    // `--stdin` reader. `Child::wait` also closes stdin, but taking it here
+    // makes the EOF explicit and independent of that detail.
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(b"<html><body><p>x</p></body></html>")
+            .unwrap();
+    }
     assert!(
         child.wait().unwrap().success(),
         "render failed for --size {size}"
@@ -50,21 +53,12 @@ fn media_box(pdf: &[u8]) -> String {
 
 #[test]
 fn custom_pt_size_sets_media_box() {
-    let bin = fulgur_bin();
-    if !bin.exists() {
-        eprintln!("fulgur binary not found, skipping");
-        return;
-    }
     let pdf = render_with_size("200ptx400pt");
     assert_eq!(media_box(&pdf), "0 0 200 400");
 }
 
 #[test]
 fn custom_mm_size_sets_media_box() {
-    let bin = fulgur_bin();
-    if !bin.exists() {
-        return;
-    }
     // 100mm x 200mm = 283.46 x 566.93 pt (distinct from the A4 fallback)
     let pdf = render_with_size("100x200mm");
     let mb = media_box(&pdf);
@@ -73,21 +67,13 @@ fn custom_mm_size_sets_media_box() {
 
 #[test]
 fn keyword_size_still_works() {
-    let bin = fulgur_bin();
-    if !bin.exists() {
-        return;
-    }
     let pdf = render_with_size("A4");
     assert!(media_box(&pdf).starts_with("0 0 595.2"));
 }
 
 #[test]
 fn help_documents_custom_and_priority() {
-    let bin = fulgur_bin();
-    if !bin.exists() {
-        return;
-    }
-    let out = Command::new(&bin)
+    let out = Command::new(fulgur_bin())
         .args(["render", "--help"])
         .output()
         .expect("run --help");
