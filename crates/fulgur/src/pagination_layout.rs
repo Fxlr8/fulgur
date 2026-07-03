@@ -993,7 +993,8 @@ impl<'a> PaginationLayoutTree<'a> {
                 // truncate-and-warn path below unchanged.
                 let collapse_childless = self.page_height_px > 0.0
                     && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
-                    && !subtree_has_rendered_content(self.doc, child_id, 0);
+                    && !subtree_has_rendered_content(self.doc, child_id, 0)
+                    && !is_replaced_content(self.doc, child_id);
                 // fulgur-2m6w: cap the per-page-strip slicing at
                 // `MAX_PAGES`. `child_h` is attacker-controlled CSS
                 // (`height` / `vh`), so without this bound a few bytes of
@@ -1120,6 +1121,19 @@ impl<'a> PaginationLayoutTree<'a> {
     }
 }
 
+/// fulgur-ezst (Codex P2 on PR #553): true if `node_id` is a replaced
+/// element that paints its own box content — `<img>` / `<svg>`, matching
+/// `convert::replaced`'s dispatch. Such a node has no rendered *descendants*
+/// yet is visible content in its own right, so a pathologically tall one
+/// must NOT be collapsed like a blank spacer (the collapse would clip the
+/// image to a single page). A background / border is decoration, not
+/// replaced content, and stays collapsible by design (see `MAX_PAGES`).
+fn is_replaced_content(doc: &BaseDocument, node_id: usize) -> bool {
+    doc.get_node(node_id)
+        .and_then(|n| n.element_data())
+        .is_some_and(|el| matches!(el.name.local.as_ref(), "img" | "svg"))
+}
+
 /// fulgur-ezst: true if `parent_id`'s subtree renders any VISIBLE box (a
 /// descendant with positive area — both width and height > 0). Used to
 /// classify a pathologically tall block as "childless" (collapsible): the
@@ -1157,9 +1171,20 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
             continue;
         };
         let layout = child.final_layout;
-        if layout.size.height <= 0.0 || layout.size.width <= 0.0 {
-            // Zero-area box paints nothing itself, but may host visible
-            // descendants overflowing it (overflow: visible) — recurse.
+        // `visibility: hidden` / `collapse` occupies layout space but paints
+        // nothing (conversion skips its paint), so it does not count as
+        // content — a `<div style="visibility:hidden">` must not defeat the
+        // collapse (Codex P2 on PR #553).
+        let invisible = {
+            use style::properties::longhands::visibility::computed_value::T as Visibility;
+            child
+                .primary_styles()
+                .is_some_and(|s| s.clone_visibility() != Visibility::Visible)
+        };
+        if invisible || layout.size.height <= 0.0 || layout.size.width <= 0.0 {
+            // An invisible or zero-area box paints nothing itself, but may
+            // host visible descendants — overflowing it (overflow: visible)
+            // or flipping `visibility` back to `visible` — so recurse.
             if subtree_has_rendered_content(doc, child_id, depth + 1) {
                 return true;
             }
@@ -4177,6 +4202,57 @@ mod tests {
             x,
             crate::MAX_DOM_DEPTH
         ));
+    }
+
+    /// fulgur-ezst (Codex P2 on PR #553): a replaced element (`<img>`/`<svg>`)
+    /// has no descendants but paints its own box, so a pathologically tall
+    /// one must NOT collapse (that would clip the image to one page) — it
+    /// takes the cap path like any content-bearing block.
+    #[test]
+    fn replaced_tall_block_is_not_collapsed() {
+        let html = r#"<html><body><img style="display:block;width:10px;height:99999999px" src="x.png"></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages > 1_000,
+            "a replaced element paints its own content and must not collapse; got {pages}",
+        );
+        assert!(
+            pages <= crate::MAX_PAGES + 1,
+            "still clamped to ~MAX_PAGES ({}); got {pages}",
+            crate::MAX_PAGES,
+        );
+    }
+
+    /// fulgur-ezst (Codex P2 on PR #553): a `visibility:hidden` descendant
+    /// occupies layout space but paints nothing, so it must not defeat the
+    /// collapse — a tall block whose only child is invisible still collapses.
+    #[test]
+    fn invisible_only_child_collapses() {
+        let html = r#"<html><body><div style="height:99999999px"><div style="visibility:hidden;height:1px"></div></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert_eq!(
+            implied_page_count(&table),
+            1,
+            "a visibility:hidden-only descendant must not defeat the collapse",
+        );
+    }
+
+    /// fulgur-ezst: the visibility skip must still recurse — a
+    /// `visibility:visible` descendant under a `visibility:hidden` wrapper is
+    /// real content, so the tall block is not childless and stays capped.
+    #[test]
+    fn visible_child_under_hidden_wrapper_blocks_collapse() {
+        let html = r#"<html><body><div style="height:99999999px"><div style="visibility:hidden"><p style="visibility:visible">x</p></div></div></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        let pages = implied_page_count(&table);
+        assert!(
+            pages > 1_000,
+            "visible content under a hidden wrapper must block the collapse; got {pages}",
+        );
     }
 
     /// fulgur-ezst: pins the no-reflow / no-free-page-reduction mechanism of
