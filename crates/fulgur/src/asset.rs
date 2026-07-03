@@ -508,4 +508,57 @@ mod tests {
         // Long path does NOT match the base → None
         assert!(bundle.get_image("home/user/project/icon.png").is_none());
     }
+
+    #[test]
+    fn add_css_file_reads_content_from_disk() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        use std::io::Write as _;
+        write!(tmp, "body {{ color: red; }}").expect("write");
+        let mut bundle = AssetBundle::new();
+        bundle.add_css_file(tmp.path()).expect("add_css_file");
+        assert_eq!(bundle.css, vec!["body { color: red; }"]);
+    }
+
+    #[test]
+    fn add_font_file_accepts_valid_ttf_on_disk() {
+        // Write a file whose first 4 bytes are TTF magic (0x00010000);
+        // add_font_file reads it and passes it to add_font_bytes unchanged.
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        use std::io::Write as _;
+        let mut data = vec![0x00u8, 0x01, 0x00, 0x00];
+        data.extend_from_slice(&[0xAB; 32]);
+        tmp.write_all(&data).expect("write");
+        let mut bundle = AssetBundle::new();
+        bundle
+            .add_font_file(tmp.path())
+            .expect("add_font_file should accept TTF");
+        assert_eq!(bundle.fonts.len(), 1);
+        assert_eq!(&bundle.fonts[0][..], &data[..]);
+    }
+
+    #[test]
+    fn set_base_url_with_root_url_clears_base_path() {
+        // "file:///" stripped of the prefix yields "" → base_path_str becomes None
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("logo.png", vec![7, 8, 9]);
+        bundle.set_base_url("file:///");
+        // No prefix to strip, so direct lookup still works.
+        assert!(bundle.get_image("logo.png").is_some());
+        // A path that would only match via prefix stripping must NOT match.
+        assert!(bundle.get_image("logo.png/extra").is_none());
+    }
+
+    #[test]
+    fn add_image_file_reads_bytes_from_disk() {
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        use std::io::Write as _;
+        let pixels = vec![0xFFu8, 0xD8, 0xFF, 0xE0]; // JPEG magic
+        tmp.write_all(&pixels).expect("write");
+        let mut bundle = AssetBundle::new();
+        bundle
+            .add_image_file("photo.jpg", tmp.path())
+            .expect("add_image_file");
+        let stored = bundle.get_image("photo.jpg").expect("should be present");
+        assert_eq!(&stored[..], &pixels[..]);
+    }
 }
