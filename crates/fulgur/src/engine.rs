@@ -319,6 +319,22 @@ impl Engine {
             crate::blitz_adapter::apply_single_pass(&inject_pass, &mut doc, &ctx);
         }
 
+        // Inject flattened static pseudo-content (multi-item string `content:`
+        // lists). One selector-level rule per mapping — no per-node expansion,
+        // so this stays O(mappings) even for a hostile document. Injected after
+        // the author stylesheet so the flattened rule wins by source order and
+        // renders in full where blitz-dom would truncate to `items[0]`
+        // (fulgur-2ykw). Works for AssetBundle / `<link>` CSS *and* inline
+        // `<style>` (whose original text is never rewritten to `cleaned_css`).
+        if !gcpm.static_content_mappings.is_empty() {
+            let static_css =
+                crate::blitz_adapter::build_static_content_css(&gcpm.static_content_mappings);
+            if !static_css.is_empty() {
+                let inject_pass = crate::blitz_adapter::InjectCssPass { css: static_css };
+                crate::blitz_adapter::apply_single_pass(&inject_pass, &mut doc, &ctx);
+            }
+        }
+
         // BookmarkPass runs AFTER CounterPass and StringSetPass so it can
         // resolve `counter()` / `string()` inside `bookmark-label` against
         // the per-node snapshots harvested above (fulgur-70c).

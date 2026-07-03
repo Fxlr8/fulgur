@@ -3845,6 +3845,148 @@ fn pseudo_multi_item_content_renders_all_items() {
     );
 }
 
+/// Static multi-item pseudo content is injected once at the *selector*
+/// level, not once per matching node — that per-node expansion is the
+/// availability bug this hardening removed (a hostile document could turn a
+/// small `p::after { content: "…20KB…" "x" }` plus many `<p>` into O(nodes ×
+/// literal_len) generated CSS). This proves the single injected `p::after`
+/// rule still reaches every matching element: all three paragraphs render
+/// the full flattened `Q1Q2`.
+#[test]
+fn pseudo_multi_item_static_content_covers_all_matching_nodes() {
+    let html = r##"<!doctype html><html><head><style>
+      body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; }
+      p::after { content: "Q1" "Q2"; }
+    </style></head><body>
+      <p>a</p><p>b</p><p>c</p>
+    </body></html>"##;
+    let pdf = tagged_render_with_noto(html);
+    assert!(!pdf.is_empty());
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    // One `p::after` rule, three matching `<p>` → three contiguous `Q1Q2`.
+    let count = text.matches("Q1Q2").count();
+    assert!(
+        count >= 3,
+        "one selector-level `p::after` rule must reach all three \
+         paragraphs (expected >= 3 contiguous `Q1Q2`, got {count}). \
+         Text: {text:?}"
+    );
+}
+
+/// Multi-item static pseudo content declared in **AssetBundle / `<link>`
+/// CSS** (not inline `<style>`) — the finding's primary attack surface via
+/// `render_html(combined_css)`. On this path `cleaned_css` is what Blitz sees,
+/// so the parser strips the original declaration and the injected selector-
+/// level rule is the only source. This asserts the full `[x]` renders (see
+/// `verify_bundle_important_multi_item` for the `!important` variant that the
+/// strip specifically rescues).
+#[test]
+fn pseudo_multi_item_static_content_via_bundle_css() {
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets
+        .add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans: {e}"));
+    // The GCPM content rule is in bundle CSS, not inline `<style>`.
+    assets.add_css(
+        "body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; } \
+         p::after { content: \"[\" \"x\" \"]\"; }",
+    );
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .assets(assets)
+        .build()
+        .render("<!doctype html><html><body><p>Body text</p></body></html>")
+        .expect("bundle render");
+    assert!(!pdf.is_empty());
+
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert!(
+        text.contains("[x]"),
+        "multi-item static content declared in bundle CSS must render all \
+         items (`[x]`), not just `[`. Got: {text:?}"
+    );
+}
+
+/// Regression: a multi-item static `content` declared `!important` in
+/// AssetBundle / `<link>` CSS. Because the injected selector-level rule is
+/// normal priority, an un-stripped `!important` original would win in Stylo
+/// and blitz-dom would keep truncating to `items[0]` (`[`). The parser
+/// therefore strips the original from `cleaned_css` on the bundle/link path,
+/// so the injection is the only source and the full `[x]` renders. (Inline
+/// `<style>` `!important` is a separate, pre-existing limitation — its text is
+/// never in `cleaned_css`, so the important original survives there.)
+#[test]
+fn pseudo_multi_item_important_static_content_via_bundle_css() {
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/.fonts/NotoSans-Regular.ttf");
+    let mut assets = AssetBundle::default();
+    assets
+        .add_font_file(&font_path)
+        .unwrap_or_else(|e| panic!("failed to load Noto Sans: {e}"));
+    assets.add_css(
+        "body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; } \
+         p::after { content: \"[\" \"x\" \"]\" !important; }",
+    );
+    let pdf = Engine::builder()
+        .tagged(true)
+        .lang("en")
+        .assets(assets)
+        .build()
+        .render("<!doctype html><html><body><p>Body text</p></body></html>")
+        .expect("bundle render");
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    assert!(
+        text.contains("[x]"),
+        "`!important` multi-item static content in bundle CSS must render all \
+         items (`[x]`); a surviving `!important` original would truncate to \
+         `[`. Got: {text:?}"
+    );
+}
+
+/// Known limitation (documented, not a bug to fix here): when the *same*
+/// simple `selector::pseudo` is declared twice — first with `counter()` /
+/// `target-*` (routed per-node through `CounterPass` with boosted specificity)
+/// and then with a static multi-item string (injected at plain selector-level
+/// specificity) — the later static rule does NOT override the earlier dynamic
+/// one, so `[1]` wins instead of `Q1Q2`. Preserving source order here would
+/// require cross-rule declaration-order tracking; the DoS-safe fix is not
+/// worth the surface for a pattern no real document uses (same class as the
+/// accepted GCPM cascade-collision limitation fulgur-da3u). This test pins the
+/// current behavior so a future change is noticed.
+#[test]
+fn pseudo_counter_then_static_same_selector_is_known_limitation() {
+    let html = r##"<!doctype html><html><head><style>
+      body { font-family: 'Noto Sans', sans-serif; font-size: 12pt; counter-reset: n; }
+      p { counter-increment: n; }
+      p::after { content: "[" counter(n) "]"; }
+      p::after { content: "Q1" "Q2"; }
+    </style></head><body><p>x</p></body></html>"##;
+    let pdf = tagged_render_with_noto(html);
+    let Some(text) = extract_pdf_text(&pdf) else {
+        eprintln!("pdftotext not available; skipping text assertion");
+        return;
+    };
+    // Documents the current (limitation) behavior: the counter content wins.
+    assert!(
+        text.contains("[1]") && !text.contains("Q1Q2"),
+        "known limitation: counter content is expected to win over the later \
+         static rule. Got: {text:?}"
+    );
+}
+
 /// fulgur-2ykw: the canonical 3-item case — open-bracket string +
 /// `counter()` + close-bracket string — on `::before` (the spec sibling
 /// of the `::after` path; both go through blitz-dom's shared

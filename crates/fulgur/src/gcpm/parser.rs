@@ -8,8 +8,8 @@ use super::margin_box::MarginBoxPosition;
 use super::{
     ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle, ElementPolicy,
     GcpmContext, LeaderStyle, MarginBoxRule, PageSettingsRule, PageSizeDecl, ParsedSelector,
-    PartialMargin, PseudoElement, RunningMapping, StringPolicy, StringSetMapping, StringSetValue,
-    TargetTextKind, TargetUrl,
+    PartialMargin, PseudoElement, RunningMapping, StaticContentMapping, StringPolicy,
+    StringSetMapping, StringSetValue, TargetTextKind, TargetUrl,
 };
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,7 @@ struct GcpmSheetParser<'a> {
     string_set_mappings: &'a mut Vec<StringSetMapping>,
     counter_mappings: &'a mut Vec<CounterMapping>,
     content_counter_mappings: &'a mut Vec<ContentCounterMapping>,
+    static_content_mappings: &'a mut Vec<StaticContentMapping>,
     page_settings: &'a mut Vec<PageSettingsRule>,
     bookmark_mappings: &'a mut Vec<BookmarkMapping>,
 }
@@ -197,6 +198,7 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
         let mut string_set: Option<(String, Vec<StringSetValue>)> = None;
         let mut counter_ops: Vec<CounterOp> = Vec::new();
         let mut content_items: Option<Vec<ContentItem>> = None;
+        let mut static_content: Option<String> = None;
         let mut bookmark_level: Option<BookmarkLevel> = None;
         let mut bookmark_label: Option<Vec<ContentItem>> = None;
 
@@ -206,6 +208,7 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
             string_set: &mut string_set,
             counter_ops: &mut counter_ops,
             content_items: &mut content_items,
+            static_content: &mut static_content,
             bookmark_level: &mut bookmark_level,
             bookmark_label: &mut bookmark_label,
             has_pseudo: pseudo.is_some(),
@@ -243,6 +246,16 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
                     parsed: selector.clone(),
                     pseudo,
                     content: items,
+                });
+            }
+        }
+
+        if let Some(text) = static_content {
+            if let Some(pseudo) = pseudo {
+                self.static_content_mappings.push(StaticContentMapping {
+                    parsed: selector.clone(),
+                    pseudo,
+                    text,
                 });
             }
         }
@@ -612,6 +625,10 @@ struct StyleRuleParser<'a> {
     string_set: &'a mut Option<(String, Vec<StringSetValue>)>,
     counter_ops: &'a mut Vec<CounterOp>,
     content_items: &'a mut Option<Vec<ContentItem>>,
+    /// The flattened value of a static, all-`String` multi-item pseudo
+    /// `content` list. Mutually exclusive with `content_items` (the last
+    /// `content` declaration in a rule wins and sets exactly one of them).
+    static_content: &'a mut Option<String>,
     bookmark_level: &'a mut Option<BookmarkLevel>,
     bookmark_label: &'a mut Option<Vec<ContentItem>>,
     has_pseudo: bool,
@@ -728,26 +745,62 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
                         | ContentItem::TargetText { .. }
                 )
             });
-            // blitz-dom 0.2.4's `flush_pseudo_elements`
-            // (`construct.rs:367`) materializes only `items[0]` of a
-            // pseudo element's multi-item `Content::Items` list, so a
-            // plain `content: "[" "x" "]"` would render just the leading
-            // `[`. Route ANY multi-item content (not only counter-bearing
-            // lists) through CounterPass, which flattens every item into
-            // a single resolved string and injects it as a synthetic
-            // single-item rule Blitz can render in full (fulgur-2ykw).
-            // Single-item plain content stays on Blitz's native path —
-            // `items[0]` IS the whole value there, so no truncation and
-            // no behavior change.
-            let route_via_counter_pass = has_counter || items.len() > 1;
-            // Last-declaration-wins: always update content_items (clear when
-            // the new content needs no CounterPass handling).
-            if route_via_counter_pass {
+            let is_plain_text = !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| matches!(item, ContentItem::String(_)));
+            // blitz-dom 0.2.4's `flush_pseudo_elements` (`construct.rs:367`)
+            // materializes only `items[0]` of a pseudo element's multi-item
+            // `Content::Items` list, so a plain `content: "[" "x" "]"` would
+            // render just the leading `[`. Routing splits by whether the
+            // content is *static* or *per-element dynamic*. Last-declaration-
+            // wins: each branch sets exactly one of `content_items` /
+            // `static_content` and clears the other.
+            if is_plain_text && items.len() > 1 {
+                // Static multi-item string list. Flatten by concatenation and
+                // record it for a single selector-level injection
+                // (`StaticContentMapping`). Routing it through CounterPass
+                // instead would emit one generated rule *per matching node*,
+                // an O(nodes * literal_len) amplification a hostile document
+                // can drive into an OOM — the fulgur-2ykw truncation fix must
+                // not reintroduce that DoS.
+                *self.content_items = None;
+                *self.static_content = Some(
+                    items
+                        .iter()
+                        .filter_map(|item| match item {
+                            ContentItem::String(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                );
+                // Strip the original declaration from cleaned CSS (this affects
+                // the AssetBundle / `<link>` paths, where cleaned_css is what
+                // Blitz sees) so it cannot compete with the injected flattened
+                // rule. This matters most when the original is `!important`:
+                // left in place it wins in Stylo and blitz-dom keeps truncating
+                // to `items[0]` (renders `[` not `[x]`). Inline `<style>`
+                // discards cleaned_css, so its original persists there and the
+                // injection wins by source order instead (inline `!important`
+                // multi-item is thus an unchanged, pre-existing limitation).
+                let start = decl_start.position().byte_index();
+                let end = input.position().byte_index();
+                self.edits.push(CssEdit::Replace {
+                    start,
+                    end,
+                    replacement: String::new(),
+                });
+            } else if has_counter || items.len() > 1 {
+                // Per-element dynamic content (counter / `target-*` / `attr()`,
+                // or any other multi-item list Blitz cannot render in full).
+                // Blitz cannot resolve it, so it routes through CounterPass,
+                // which resolves per element. These values are short (or, for
+                // `attr()`, bytes the author already spent inline on every
+                // matching element), so there is no amplification. Strip the
+                // original `content: ...` so Blitz does not also render its
+                // truncated view.
                 *self.content_items = Some(items);
-                // Strip the original `content: ...` from cleaned CSS so
-                // Blitz does not also render its (truncated) view —
-                // CounterPass injects a synthetic ::before/::after rule
-                // with the fully resolved value.
+                *self.static_content = None;
                 let start = decl_start.position().byte_index();
                 let end = input.position().byte_index();
                 self.edits.push(CssEdit::Replace {
@@ -756,9 +809,12 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
                     replacement: String::new(),
                 });
             } else {
-                // Plain `content: "..."` stays in cleaned CSS so Blitz can
-                // render it directly.
+                // Single-item plain content is already the whole value at
+                // `items[0]`, and unsupported single-item forms (e.g.
+                // `content: url(...)`) are best left to Blitz. Either way the
+                // declaration stays verbatim in cleaned CSS.
                 *self.content_items = None;
+                *self.static_content = None;
             }
         } else {
             // Skip other declarations
@@ -1266,6 +1322,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
     let mut string_set_mappings = Vec::new();
     let mut counter_mappings = Vec::new();
     let mut content_counter_mappings = Vec::new();
+    let mut static_content_mappings = Vec::new();
     let mut page_settings = Vec::new();
     let mut bookmark_mappings = Vec::new();
     let mut edits: Vec<CssEdit> = Vec::new();
@@ -1282,6 +1339,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
             string_set_mappings: &mut string_set_mappings,
             counter_mappings: &mut counter_mappings,
             content_counter_mappings: &mut content_counter_mappings,
+            static_content_mappings: &mut static_content_mappings,
             page_settings: &mut page_settings,
             bookmark_mappings: &mut bookmark_mappings,
         };
@@ -1301,10 +1359,35 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
         string_set_mappings,
         counter_mappings,
         content_counter_mappings,
+        static_content_mappings,
         page_settings,
         bookmark_mappings,
         cleaned_css,
     }
+}
+
+/// Serialize `s` as the body of a CSS double-quoted string (the caller
+/// supplies the surrounding `"`). Escapes `"` and `\`, and every control
+/// character per the CSS `<string-token>` grammar, so a resolved literal can
+/// be re-embedded into a generated rule — `CounterPass`'s per-node overlay or
+/// [`crate::blitz_adapter::build_static_content_css`]'s selector-level static
+/// injection — without malforming, or prematurely closing, the string.
+pub(crate) fn css_escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\a "),
+            '\r' => out.push_str("\\d "),
+            '\0' => out.push_str("\\0 "),
+            c if c.is_control() => {
+                out.push_str(&format!("\\{:x} ", c as u32));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Build `cleaned_css` from the original CSS and a list of edits.
@@ -1966,6 +2049,67 @@ mod tests {
             ctx.cleaned_css
         );
         assert!(ctx.cleaned_css.contains("font-weight: bold"));
+    }
+
+    #[test]
+    fn test_parse_pseudo_multi_item_plain_string_flattened_not_routed() {
+        // A multi-item, all-`String` content list must NOT enter
+        // `content_counter_mappings` (CounterPass expands one generated rule
+        // per matching node — an O(nodes * literal_len) amplification / DoS).
+        // Instead it is flattened once and recorded as a `StaticContentMapping`
+        // for a single selector-level injection (fulgur-2ykw truncation
+        // workaround preserved without per-node expansion).
+        let css = r#"div::before { content: "AB" "CD"; color: red; }"#;
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.content_counter_mappings.is_empty(),
+            "plain multi-item strings must not enter CounterPass: {:?}",
+            ctx.content_counter_mappings
+        );
+        assert_eq!(ctx.static_content_mappings.len(), 1);
+        let m = &ctx.static_content_mappings[0];
+        assert_eq!(m.parsed, ParsedSelector::Tag("div".into()));
+        assert_eq!(m.pseudo, PseudoElement::Before);
+        assert_eq!(m.text, "ABCD");
+        // The original `content` declaration is stripped from cleaned CSS so it
+        // cannot compete with the injected flattened rule (critical for an
+        // `!important` original on the AssetBundle / `<link>` path). Sibling
+        // declarations survive.
+        assert!(
+            !ctx.cleaned_css.contains("\"AB\""),
+            "original multi-item content must be stripped: {:?}",
+            ctx.cleaned_css
+        );
+        assert!(ctx.cleaned_css.contains("color: red"));
+    }
+
+    #[test]
+    fn test_parse_pseudo_multi_item_plain_string_flatten_keeps_unescaped_text() {
+        // The recorded `text` is the raw concatenation of the parsed (already
+        // unescaped) `String` items. CSS-escaping happens later, at injection
+        // time (`build_static_content_css`), so the mapping stores the literal
+        // value `a"bc\d`.
+        let css = r#"p::after { content: "a\"b" "c\\d"; }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.content_counter_mappings.is_empty());
+        assert_eq!(ctx.static_content_mappings.len(), 1);
+        assert_eq!(ctx.static_content_mappings[0].text, "a\"bc\\d");
+    }
+
+    #[test]
+    fn test_parse_pseudo_single_item_plain_string_not_recorded_as_static() {
+        // A single-item plain string is already the whole value at `items[0]`
+        // — Blitz renders it natively, so it needs neither CounterPass nor a
+        // static injection. It must stay verbatim in cleaned CSS.
+        let css = r#".note::before { content: "Note: "; }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.content_counter_mappings.is_empty());
+        assert!(
+            ctx.static_content_mappings.is_empty(),
+            "single-item plain content must not be recorded: {:?}",
+            ctx.static_content_mappings
+        );
+        assert!(ctx.cleaned_css.contains(r#"content: "Note: ""#));
     }
 
     #[test]
