@@ -208,13 +208,9 @@ jobs:
     # published — a failed gh release upload/edit must not leave npm shipped
     # while the release is missing its binaries.
     needs: [setup, build-binaries, release]
-    # KNOWN TEMPORARY REGRESSION (fulgur-n5tw → to be fixed in fulgur-f7o2):
-    # this workflow now triggers on tag push, so `github.event.pull_request`
-    # no longer exists and the previous `release:skip-bindings` label gate
-    # (`!contains(github.event.pull_request.labels.*.name, ...)`) cannot be
-    # evaluated. npm publish is therefore unconditional for now. release-python
-    # / release-ruby already reverse-look-up the merged PR's labels via the GH
-    # API on `release:published`; f7o2 will give npm the same treatment.
+    # npm publishes unconditionally, in lockstep with the crates.io release —
+    # bindings are never partially skipped, so there is no per-release label gate
+    # to evaluate here. See fulgur-f7o2 for the removal of the old label support.
     runs-on: ubuntu-latest
     # `environment: release` here is NOT an approval gate (the `release`
     # environment has no required reviewers — approval is the Release PR gate,
