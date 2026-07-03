@@ -115,7 +115,7 @@ pub enum VerticalAlign {
     Super,
     TextTop,
     TextBottom,
-    Length(f32),
+    Length(crate::units::Pt),
     Percent(f32),
 }
 
@@ -944,7 +944,7 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
             VerticalAlign::Super => baseline - metrics.superscript_offset.pt() - img.height,
             VerticalAlign::TextTop => baseline - metrics.ascent.pt(),
             VerticalAlign::TextBottom => baseline + metrics.descent.pt() - img.height,
-            VerticalAlign::Length(v) => baseline - v.pt() - img.height,
+            VerticalAlign::Length(v) => baseline - v - img.height,
             VerticalAlign::Percent(p) => baseline - (original_height * p) - img.height,
         };
 
@@ -1320,7 +1320,7 @@ mod tests {
         line.items.push(LineItem::Image(make_inline_image(
             10.0,
             6.0,
-            VerticalAlign::Length(3.0),
+            VerticalAlign::Length(3.0_f32.pt()),
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
