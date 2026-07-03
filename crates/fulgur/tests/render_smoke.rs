@@ -4677,7 +4677,7 @@ fn table_caption_preserves_full_width_table() {
 /// a moderate height (~tens of pages) keeps the render fast — the page CAP
 /// itself (the `99999999px` / `f32::MAX` amplification bound) is covered by
 /// the fast pagination unit tests in `pagination_layout.rs`, which need no
-/// render. Rendering the full 100k-page ceiling here would just be a slow
+/// render. Rendering the full 10k-page ceiling here would just be a slow
 /// CI tax for no extra coverage.
 #[test]
 fn pathological_tall_block_render_is_bounded() {
@@ -4687,6 +4687,25 @@ fn pathological_tall_block_render_is_bounded() {
         .render(html)
         .expect("render must terminate and succeed");
     assert!(!pdf.is_empty(), "expected a non-empty bounded PDF");
+}
+
+/// fulgur-ezst: a childless block tall enough to exceed the page cap must
+/// collapse end-to-end — a real `render` yields a tiny, single-page
+/// PDF rather than a ~10k-page one. Byte size cleanly separates the two: a
+/// collapsed render is a few KB; the uncollapsed cap render would be MBs.
+#[test]
+fn childless_cap_exceeding_block_collapses_end_to_end() {
+    let html = r#"<!doctype html><html><body><div style="height:99999999px"></div></body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render must terminate and succeed");
+    assert!(!pdf.is_empty(), "expected a non-empty PDF");
+    assert!(
+        pdf.len() < 500_000,
+        "collapsed render must be small (single page); got {} bytes",
+        pdf.len(),
+    );
 }
 
 /// fulgur-2qpt: deprecated aliases `render_html` and `render_html_to_file`
