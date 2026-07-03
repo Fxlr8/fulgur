@@ -334,10 +334,11 @@ fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
         NodeData::Comment => "#comment".to_string(),
         _ => "#other".to_string(),
     };
-    // `{:?}` + bare Pt args (not `.to_f32()`): this dev-only branch is gated
-    // behind FULGUR_DEBUG and never runs under test, so keep the migrated diff
-    // to a single format-string line and avoid the `.to_f32()` region artifact
-    // (memory project_units_migration_patch_coverage).
+    // `Pt` has no `Display` by design (a length must not silently format as a
+    // bare number), so this dev-only dump formats the typed values with `{:?}`
+    // rather than `.to_f32()`. Bonus: since the branch is FULGUR_DEBUG-gated and
+    // never runs under test, `{:?}` keeps the migrated diff to one format-string
+    // line instead of four uncovered `.to_f32()` arg lines in the patch.
     eprintln!(
         "{indent}{tag} id={} pos=({:?},{:?}) size={:?}x{:?} inline_root={}",
         node_id,
@@ -1575,20 +1576,20 @@ mod utility_fn_tests {
             ..taffy::Layout::new()
         };
         let (x, y, w, h) = layout_in_pt(&layout);
-        assert_eq!(x.to_f32(), 3.0);
-        assert_eq!(y.to_f32(), 6.0);
-        assert_eq!(w.to_f32(), 75.0);
-        assert_eq!(h.to_f32(), 150.0);
+        assert_eq!(x, 3.0_f32.pt());
+        assert_eq!(y, 6.0_f32.pt());
+        assert_eq!(w, 75.0_f32.pt());
+        assert_eq!(h, 150.0_f32.pt());
     }
 
     #[test]
     fn layout_in_pt_zero_layout_stays_zero() {
         let layout = taffy::Layout::new();
         let (x, y, w, h) = layout_in_pt(&layout);
-        assert_eq!(x.to_f32(), 0.0);
-        assert_eq!(y.to_f32(), 0.0);
-        assert_eq!(w.to_f32(), 0.0);
-        assert_eq!(h.to_f32(), 0.0);
+        assert_eq!(x, 0.0_f32.pt());
+        assert_eq!(y, 0.0_f32.pt());
+        assert_eq!(w, 0.0_f32.pt());
+        assert_eq!(h, 0.0_f32.pt());
     }
 
     // --- size_in_pt ---
@@ -1601,8 +1602,8 @@ mod utility_fn_tests {
             height: 120.0,
         };
         let (w, h) = size_in_pt(size);
-        assert_eq!(w.to_f32(), 60.0);
-        assert_eq!(h.to_f32(), 90.0);
+        assert_eq!(w, 60.0_f32.pt());
+        assert_eq!(h, 90.0_f32.pt());
     }
 
     #[test]
@@ -1612,8 +1613,8 @@ mod utility_fn_tests {
             height: 0.0,
         };
         let (w, h) = size_in_pt(size);
-        assert_eq!(w.to_f32(), 0.0);
-        assert_eq!(h.to_f32(), 0.0);
+        assert_eq!(w, 0.0_f32.pt());
+        assert_eq!(h, 0.0_f32.pt());
     }
 
     // --- px_to_pt / pt_to_px roundtrip ---
