@@ -6169,4 +6169,105 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // --- dispatch_inline_box_content: transform on inline-block ---
+
+    #[test]
+    fn render_smoke_inline_block_with_transform_dispatches_under_transform() {
+        // An inline-block element with `transform` inside a paragraph creates a
+        // `LineItem::InlineBox` in the shaped line. `dispatch_inline_box_content`
+        // must route it through `draw_under_transform` (the first branch,
+        // `drawables.transforms.get(&content_id).is_some()`).
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <p>Before
+              <span style="display:inline-block;transform:rotate(15deg);
+                           background:#cef;width:40px;height:20px;
+                           line-height:20px;text-align:center">R</span>
+            after</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- dispatch_inline_box_content: overflow:hidden clip on inline-block ---
+
+    #[test]
+    fn render_smoke_inline_block_with_overflow_hidden_dispatches_under_clip() {
+        // An inline-block with `overflow:hidden` containing a wider child exercises
+        // `dispatch_inline_box_content`'s clip branch (`block.style.has_overflow_clip()`).
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <p>Text
+              <span style="display:inline-block;overflow:hidden;
+                           width:40px;height:20px;background:#fce">
+                <span style="display:inline-block;width:120px;height:20px;
+                             background:#e9f">wide child</span>
+              </span>
+            more text</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- dispatch_inline_box_content: opacity scope on inline-block ---
+
+    #[test]
+    fn render_smoke_inline_block_with_opacity_and_svg_child_dispatches_under_opacity() {
+        // An inline-block with fractional `opacity` and an SVG child triggers
+        // `opacity_descendants` population during convert, then
+        // `dispatch_inline_box_content` routes through `draw_under_opacity`
+        // (the third branch, `!block.opacity_descendants.is_empty()`).
+        let pdf = render_html(
+            r##"<!doctype html><html><body>
+            <p>Text
+              <span style="display:inline-block;opacity:0.5;width:24px;height:24px">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">
+                  <circle cx="12" cy="12" r="10" fill="#3af"/>
+                </svg>
+              </span>
+            more</p>
+            </body></html>"##,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- dest_registry: body_y_off = 0.0 branch on page 2+ ---
+
+    #[test]
+    fn render_smoke_id_anchor_on_second_page_sets_destination() {
+        // A node with `id` whose first fragment is on page 2+ exercises the
+        // `body_y_off = 0.0` branch in `render_v2`'s dest-registry loop
+        // (`page_idx != 0` → else 0.0).
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="height:1200pt">spacer to push to page 2</div>
+            <p id="page2-target">This paragraph is on page 2.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- draw_v2_page: multicol rule skipped for transformed descendant ---
+
+    #[test]
+    fn render_smoke_multicol_rule_inside_transform_skips_outer_paint() {
+        // A multicol container nested inside a `transform` element ends up in
+        // `transformed_descendants`. The column-rule loop in `draw_v2_page` must
+        // skip it (the `transformed_descendants.contains(&container_id)` guard at
+        // the top of the loop) and instead paint the rule from inside
+        // `draw_under_transform`.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="transform:rotate(1deg)">
+              <div style="column-count:2;column-rule:2px solid #369;
+                          column-gap:20px;width:400px;font-size:12px">
+                <p>Column A text here for rule test.</p>
+                <p>Column B text here for rule test.</p>
+              </div>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
