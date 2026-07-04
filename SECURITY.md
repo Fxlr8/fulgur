@@ -22,7 +22,7 @@ details** — and we will follow up.
 A good report includes:
 
 - The affected version(s) and which surface is impacted
-  (`fulgur` crate, `@fulgur-rs/cli`, `pyfulgur`, `fulgur-ruby`, WASM).
+  (`fulgur` crate, `@fulgur-rs/cli`, `pyfulgur`, `fulgur-ruby`, `fulgur-wasm`).
 - A **minimal HTML/CSS input** (and any bundled assets) that reproduces the issue.
 - The observed impact — crash/panic, unbounded memory or CPU, reading of
   unintended files, incorrect output that crosses a trust boundary, etc.
@@ -31,6 +31,12 @@ A good report includes:
 ## Supported Versions
 
 Fulgur is pre-1.0 and releases as a single lockstep version across all crates.
+
+| Version | Supported |
+| ------- | --------- |
+| Latest (0.x.y) | :white_check_mark: |
+| < Latest | :x: |
+
 Only the **most recent published release** receives security fixes; there are no
 backports to earlier `0.x` releases. Upgrading to the latest release is the
 supported remediation path.
@@ -48,7 +54,7 @@ they demonstrate that such an input can harm the host or other tenants.
 - Denial of service that a caller cannot reasonably bound — pathological memory
   or CPU consumption, or unbounded recursion, triggered by crafted HTML/CSS/SVG
   or a malformed bundled asset.
-- Panics reachable from library entry points (e.g. `Engine::render_html`) that a
+- Panics reachable from library entry points (e.g. `Engine::render`) that a
   server cannot cleanly contain, when driven by untrusted input.
 - Reading or exfiltration of files outside the intended asset scope via crafted
   asset references or path resolution.
