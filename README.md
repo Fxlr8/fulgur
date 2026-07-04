@@ -171,6 +171,38 @@ let engine = Engine::builder()
 let pdf = engine.render(html)?;
 ```
 
+### Layout output (advanced)
+
+`Engine::layout()` exposes the shared parse → style → layout stage as a
+renderer-agnostic `LayoutOutput`, letting out-of-core consumers (image
+rasterization, OCR label generation) reuse Fulgur's layout without pulling PDF
+serialization into the core crate.
+
+```rust
+use fulgur::engine::{Engine, LayoutOutput};
+use fulgur::config::PageSize;
+
+let html = "<h1>Hello</h1>";
+let engine = Engine::builder().page_size(PageSize::A4).build();
+let out: LayoutOutput = engine.layout(html)?;
+
+// `LayoutOutput` is `#[non_exhaustive]`: read its fields, do not destructure it.
+let drawables = &out.drawables; // per-node draw payloads — coordinates in PDF pt
+let geometry = &out.geometry;   // pagination fragments — coordinates in CSS px
+```
+
+`layout()` runs the same two-pass resolution as `render()`, so `target-counter()`
+/ `target-text()` cross-references are already resolved in the returned
+`drawables`.
+
+**Limitations:** `LayoutOutput` carries **body** layout only. `@page` margin
+boxes and `position: running()` headers/footers are painted render-side and are
+not included, and the resolved page box (after `@page { size / margin }`
+overrides) is not yet surfaced — a consumer must not assume `Engine::config()`
+alone describes the canvas. See the design doc for the full contract and the
+consumer split (core owns unit conversion; consumers own composition):
+[`docs/plans/2026-06-27-engine-layout-api-design.md`](docs/plans/2026-06-27-engine-layout-api-design.md).
+
 ## Tagged PDF
 
 Fulgur can embed a semantic structure tree in the PDF output, required for accessibility tools and PDF/UA-1 conformance.
