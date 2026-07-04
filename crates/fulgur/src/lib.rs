@@ -67,7 +67,7 @@ pub mod units;
 
 pub use asset::AssetBundle;
 pub use config::{Config, ConfigBuilder, Margin, PageSize};
-pub use engine::{Engine, EngineBuilder};
+pub use engine::{Engine, EngineBuilder, LayoutOutput};
 pub use error::{Error, Result};
 pub use outline::build_outline;
 

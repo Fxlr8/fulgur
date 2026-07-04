@@ -39,6 +39,23 @@ fn page_count(pdf: &[u8]) -> usize {
     count
 }
 
+/// Concatenate every `ShapedGlyphRun` string across a paragraph's shaped
+/// lines — enough to identify a paragraph by its text content in the flat
+/// `Drawables.paragraphs` map, or to assert resolved pseudo-content text.
+/// Reads the pre-raster run text (`ShapedGlyphRun::text`), so it is
+/// font-independent (no glyph inspection).
+fn paragraph_run_text(entry: &fulgur::drawables::ParagraphEntry) -> String {
+    entry
+        .lines
+        .iter()
+        .flat_map(|line| line.items.iter())
+        .filter_map(|item| match item {
+            fulgur::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Render `html` through the v2 pipeline and assert it produced a valid
 /// PDF that paginated (`>= 2` pages). `what` labels the failure case.
 fn assert_paginates(html: &str, what: &str) {
@@ -680,7 +697,6 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     // produces multiple wrapped lines; with the relayout, the fixed
     // subtree is reshaped against the page area and the sentence fits
     // on one line.
-    use fulgur::paragraph::LineItem;
 
     // The fixed paragraph carries a unique sentence so we can identify
     // it in the flat `Drawables.paragraphs` map by text content. The
@@ -707,18 +723,7 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     let fixed_para = drawables
         .paragraphs
         .values()
-        .find(|p| {
-            let combined: String = p
-                .lines
-                .iter()
-                .flat_map(|l| l.items.iter())
-                .filter_map(|it| match it {
-                    LineItem::Text(run) => Some(run.text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            combined.contains(FIXED_TEXT)
-        })
+        .find(|&p| paragraph_run_text(p).contains(FIXED_TEXT))
         .expect("fixed paragraph must appear in Drawables.paragraphs");
 
     assert_eq!(
@@ -5142,4 +5147,72 @@ fn render_v2_smoke_break_after_recursing_child_emits_parent_fragment() {
         </div>
     </body></html>"#;
     assert_paginates(html, "recursing break-after must paginate");
+}
+
+/// Smoke: public `Engine::layout()` single-pass path. A plain document
+/// (no `target-*`) takes the `!needs_pass_two` early return. Asserts the
+/// renderer-agnostic layout output carries drawables + geometry, so an
+/// out-of-core consumer (image / OCR) has something to compose.
+#[test]
+fn layout_single_pass_returns_drawables_and_geometry() {
+    let out = Engine::builder()
+        .build()
+        .layout("<html><body><p>hello layout</p></body></html>")
+        .expect("layout single-pass");
+    assert!(!out.geometry.is_empty(), "geometry should record fragments");
+    assert!(
+        !out.drawables.paragraphs.is_empty(),
+        "the <p> should produce a paragraph draw payload"
+    );
+}
+
+/// Smoke: public `Engine::layout()` 2-pass path. A `target-counter()` in
+/// `::after` forces `needs_pass_two`, so `layout()` falls through the early
+/// return and re-lays out with the pass-1 `AnchorMap`. Covers the else-arm
+/// of the branch for codecov/patch (the single-pass test covers the `return`).
+#[test]
+fn layout_two_pass_target_counter_returns_drawables_and_geometry() {
+    let html = r##"<!doctype html>
+<html><head><style>
+  a::after { content: " (p." target-counter(attr(href), page) ")"; }
+  h2 { page-break-before: always; }
+</style></head>
+<body>
+  <a href="#a">Chapter A</a>
+  <h2 id="a">Chapter A</h2>
+  <p>aaa</p>
+</body></html>"##;
+    let out = Engine::builder()
+        .build()
+        .layout(html)
+        .expect("layout 2-pass");
+    assert!(!out.geometry.is_empty(), "geometry should record fragments");
+    assert!(
+        !out.drawables.paragraphs.is_empty(),
+        "the paragraphs should produce draw payloads after 2-pass layout"
+    );
+
+    // Pass-2-SPECIFIC guard: `target-counter(attr(href), page)` in the
+    // `a::after` resolves against the pass-1 `AnchorMap`. The `#a` heading
+    // lands on page 2 (`page-break-before: always`), so the resolved pseudo
+    // content is " (p.2)". On a regression to single-pass this stays a
+    // fixed-width placeholder (never the literal resolved page number), so
+    // this assert fails — which the non-empty checks above cannot detect.
+    // Reads the pre-raster run text (`ShapedGlyphRun::text`), so it is
+    // font-independent (no glyph inspection).
+    let resolved = out
+        .drawables
+        .paragraphs
+        .values()
+        .any(|p| paragraph_run_text(p).contains("(p.2)"));
+    assert!(
+        resolved,
+        "pass-2 target-counter should resolve to the real page number \"(p.2)\"; \
+         got paragraph texts: {:?}",
+        out.drawables
+            .paragraphs
+            .values()
+            .map(paragraph_run_text)
+            .collect::<Vec<_>>()
+    );
 }

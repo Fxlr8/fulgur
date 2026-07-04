@@ -36,6 +36,59 @@ struct RenderPassOutput {
     needs_pass_two: bool,
 }
 
+/// Renderer-agnostic layout result produced by [`Engine::layout`].
+///
+/// Carries the parse → style → layout → `Drawables` output that both PDF
+/// rendering and out-of-core consumers (image rasterization, OCR label
+/// generation) build on, without pulling PDF serialization into core.
+///
+/// Unit contract: `drawables` coordinates are PDF pt; `geometry` fragments are
+/// CSS px (`units::Px`). See the crate `units` module and
+/// `.claude/rules/coordinate-system.md`.
+///
+/// # Limitations
+///
+/// This carries only **body** layout. CSS Paged Media constructs that
+/// [`render`](Engine::render) paints from the render-side GCPM state —
+/// `@page` margin boxes, `position: running()` headers/footers, and the page
+/// numbers rendered inside them — are **not** included in `drawables` /
+/// `geometry`; an image / OCR consumer composing from `LayoutOutput` alone
+/// will omit them (fulgur-2map design doc §1/§9).
+///
+/// Likewise, when author CSS overrides the page box (`@page { size / margin }`,
+/// including `:left` / `:right` / `:first`), the pipeline paginates against the
+/// **resolved** content box, but the resolved page size / margin is not yet
+/// surfaced here — a consumer must not assume [`Engine::config`] alone
+/// describes the canvas. Surfacing margin boxes and resolved page geometry is a
+/// tracked follow-up ([fulgur-2map.10] notes).
+///
+/// This struct is `#[non_exhaustive]`: it is only ever returned by
+/// [`Engine::layout`] (consumers read fields, never construct it), so those
+/// follow-up fields can be added without a breaking change.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct LayoutOutput {
+    pub drawables: crate::drawables::Drawables,
+    pub geometry: crate::pagination_layout::PaginationGeometryTable,
+}
+
+/// Full per-pass output of [`Engine::layout_to_drawables`] — a superset of the
+/// public [`LayoutOutput`] holding every side-channel `render::render_v2`
+/// needs. `fonts` / `system_fonts` are intentionally absent: both are re-derived
+/// from `&self` at the render call site, byte-identically to the old inline path.
+struct LayoutArtifacts {
+    drawables: crate::drawables::Drawables,
+    pagination_geometry: crate::pagination_layout::PaginationGeometryTable,
+    gcpm: crate::gcpm::GcpmContext,
+    running_store: crate::gcpm::running::RunningElementStore,
+    string_set_for_render: HashMap<usize, Vec<(String, String)>>,
+    counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+    html_title: Option<String>,
+    implicit_href_map: BTreeMap<usize, String>,
+    collected_anchor_map: AnchorMap,
+    needs_pass_two: bool,
+}
+
 impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
@@ -59,6 +112,16 @@ impl Engine {
 
     pub fn assets(&self) -> Option<&AssetBundle> {
         self.assets.as_ref()
+    }
+
+    /// Font byte-blobs registered on the [`AssetBundle`], or an empty slice
+    /// when no assets are set. Shared by every layout / render entry point so
+    /// they all parse against the identical font set.
+    fn fonts(&self) -> &[std::sync::Arc<Vec<u8>>] {
+        self.assets
+            .as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Render HTML string to PDF bytes.
@@ -94,16 +157,26 @@ impl Engine {
         Ok(pdf2)
     }
 
-    /// Single render pass. When `anchor_map` is `Some`, the supplied map
-    /// is wired into [`CounterPass`] so `target-counter()` /
-    /// `target-counters()` / `target-text()` inside `::before` / `::after`
-    /// resolve against pass-1 anchor data, and is passed through to
-    /// `render::render_v2` so margin-box `target-*` resolvers can do the
-    /// same. When `None`, those resolvers fall back to placeholders /
-    /// empty strings.
+    /// Run the full parse → style → layout → convert pipeline for a single
+    /// pass and return the resolved [`LayoutArtifacts`] (drawables, pagination
+    /// geometry, and the side-channel data `render::render_v2` needs) —
+    /// **without** serializing a PDF.
     ///
-    /// See [`RenderPassOutput`] for the returned fields.
-    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
+    /// When `anchor_map` is `Some`, the supplied pass-1 map is wired into
+    /// [`CounterPass`] so `target-counter()` / `target-counters()` /
+    /// `target-text()` inside `::before` / `::after` resolve against pass-1
+    /// anchor data, and is carried in the returned artifacts so margin-box
+    /// `target-*` resolvers in `render::render_v2` can do the same. When
+    /// `None`, those resolvers fall back to placeholders / empty strings.
+    ///
+    /// This is the single shared layout path: both `render_pass` (which
+    /// serializes the result to PDF) and the public [`layout`](Engine::layout)
+    /// build on it. See [`LayoutArtifacts`] for the returned fields.
+    fn layout_to_drawables(
+        &self,
+        html: &str,
+        anchor_map: Option<&AnchorMap>,
+    ) -> Result<LayoutArtifacts> {
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self
@@ -116,11 +189,7 @@ impl Engine {
         let mut gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
         let css_to_inject = gcpm.cleaned_css.clone();
 
-        let fonts = self
-            .assets
-            .as_ref()
-            .map(|a| a.fonts.as_slice())
-            .unwrap_or(&[]);
+        let fonts = self.fonts();
 
         // Parse the HTML and resolve every <link rel="stylesheet"> /
         // @import file inside `base_path` in one shot. The returned
@@ -597,9 +666,49 @@ impl Engine {
 
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
         let html_title = crate::blitz_adapter::extract_html_title(&doc);
+        // Reclaim the post-convert geometry without partially moving
+        // `convert_ctx`, then drop it so its `&running_store` borrow ends and
+        // `running_store` can be moved into the artifacts.
+        let pagination_geometry = std::mem::take(&mut convert_ctx.pagination_geometry);
+        drop(convert_ctx);
+        Ok(LayoutArtifacts {
+            drawables,
+            pagination_geometry,
+            gcpm,
+            running_store,
+            string_set_for_render,
+            counter_ops_for_render,
+            html_title,
+            implicit_href_map,
+            collected_anchor_map,
+            needs_pass_two: needs_anchor_map_for_pass_two,
+        })
+    }
+
+    /// Single render pass: lay out via [`layout_to_drawables`], then serialize
+    /// the pages via the unchanged [`render::render_v2`]. `render`'s 2-pass
+    /// loop is untouched. See [`RenderPassOutput`] for the returned fields.
+    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
+        let LayoutArtifacts {
+            drawables,
+            pagination_geometry,
+            gcpm,
+            running_store,
+            string_set_for_render,
+            counter_ops_for_render,
+            html_title,
+            implicit_href_map,
+            collected_anchor_map,
+            needs_pass_two,
+        } = self.layout_to_drawables(html, anchor_map)?;
+
+        // Re-derive fonts / system_fonts from `&self` — byte-identical to the
+        // value `layout_to_drawables` used for parsing.
+        let fonts = self.fonts();
+
         let pdf = crate::render::render_v2(
             &self.config,
-            &convert_ctx.pagination_geometry,
+            &pagination_geometry,
             &drawables,
             &gcpm,
             &running_store,
@@ -615,7 +724,7 @@ impl Engine {
         Ok(RenderPassOutput {
             pdf,
             anchor_map: collected_anchor_map,
-            needs_pass_two: needs_anchor_map_for_pass_two,
+            needs_pass_two,
         })
     }
 
@@ -624,6 +733,47 @@ impl Engine {
         let pdf = self.render(html)?;
         std::fs::write(path, pdf)?;
         Ok(())
+    }
+
+    /// Lay out `html` and return the renderer-agnostic per-node draw payloads
+    /// (`drawables`) plus the pagination geometry, without serializing a PDF.
+    ///
+    /// Page shape (canvas size, margins, orientation) starts from the builder
+    /// configuration and is then resolved against author CSS exactly as
+    /// [`render`](Engine::render) resolves it — so `@page { size / margin }`
+    /// overrides (including `:left` / `:right` / `:first`) drive pagination
+    /// here too. The resolved page box itself is not surfaced on
+    /// [`LayoutOutput`] yet; see its `# Limitations`. Documents with
+    /// `target-counter()` / `target-counters()` / `target-text()` run the same
+    /// internal 2-pass resolution as `render`, so the returned `drawables`
+    /// carry resolved cross-reference values, not fixed-width placeholders.
+    ///
+    /// This is the shared layout path behind `render`; a downstream image
+    /// rasterizer or OCR-label generator can consume [`LayoutOutput`] without
+    /// pulling PDF serialization into core.
+    pub fn layout(&self, html: &str) -> Result<LayoutOutput> {
+        // Mirror `render`'s 2-pass loop: pass 1 always runs; when it reports
+        // `target-*` cross-references, pass 2 re-lays-out with the pass-1
+        // AnchorMap so those resolve. Project the final artifacts once.
+        let pass1 = self.layout_to_drawables(html, None)?;
+        let artifacts = if pass1.needs_pass_two {
+            // Retain only the AnchorMap across passes (as `render`'s loop
+            // effectively does — its per-pass drawables/geometry are dropped
+            // inside `render_pass`). Destructure `pass1` so its drawables,
+            // geometry, and GCPM stores are freed before pass 2 allocates,
+            // keeping peak memory single-pass-sized for large raster/OCR inputs.
+            let LayoutArtifacts {
+                collected_anchor_map,
+                ..
+            } = pass1;
+            self.layout_to_drawables(html, Some(&collected_anchor_map))?
+        } else {
+            pass1
+        };
+        Ok(LayoutOutput {
+            drawables: artifacts.drawables,
+            geometry: artifacts.pagination_geometry,
+        })
     }
 
     /// Render a template with data to PDF bytes.
@@ -694,11 +844,7 @@ impl Engine {
     /// constructs that do not touch GCPM.
     #[doc(hidden)]
     pub fn build_drawables_for_testing_no_gcpm(&self, html: &str) -> crate::drawables::Drawables {
-        let fonts = self
-            .assets
-            .as_ref()
-            .map(|a| a.fonts.as_slice())
-            .unwrap_or(&[]);
+        let fonts = self.fonts();
 
         let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
@@ -763,11 +909,7 @@ impl Engine {
         crate::drawables::Drawables,
         crate::pagination_layout::PaginationGeometryTable,
     ) {
-        let fonts = self
-            .assets
-            .as_ref()
-            .map(|a| a.fonts.as_slice())
-            .unwrap_or(&[]);
+        let fonts = self.fonts();
 
         let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
@@ -854,9 +996,10 @@ impl Engine {
         // those corrections from tests that drive
         // `pseudo_absolute_content_url::
         // absolute_pseudo_with_right_bottom_offsets_by_image_size`.
-        // The production `render` path already passes
-        // `&convert_ctx.pagination_geometry` to `render_v2` after
-        // convert, so this matches the production read order.
+        // The production path already reads `convert_ctx.pagination_geometry`
+        // after convert — `layout_to_drawables` `mem::take`s it into a
+        // `pagination_geometry` local (the same value) that `render_pass` then
+        // hands to `render_v2` — so this matches the production read order.
         (drawables, convert_ctx.pagination_geometry)
     }
 }
@@ -1723,7 +1866,7 @@ mod tests {
     #[test]
     fn render_page_with_css_landscape_size_produces_pdf() {
         // `@page { size: A4 landscape; }` triggers the `resolved_landscape =
-        // true` branch in render_pass (line 182).
+        // true` branch in `layout_to_drawables`.
         let html = "<!doctype html><html><head><style>\
             @page { size: A4 landscape; }\
             </style></head><body><p>landscape</p></body></html>";
