@@ -4441,7 +4441,6 @@ h2 { string-set: chapter-title content(text); }
     #[test]
     fn running_element_node_lands_in_geometry_with_zero_height() {
         use crate::blitz_adapter;
-        use crate::convert::pt_to_px;
         use crate::gcpm::parser::parse_gcpm;
         use std::ops::DerefMut;
         use std::sync::Arc;
@@ -4466,7 +4465,7 @@ h2 { string-set: chapter-title content(text); }
 
         let geometry = run_pass_with_break_and_running(
             doc.deref_mut(),
-            pt_to_px(800.0),
+            800.0_f32.as_pt().in_px().to_f32(),
             &column_styles,
             &store,
         );

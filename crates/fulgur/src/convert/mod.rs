@@ -62,8 +62,13 @@ pub(crate) fn px_to_pt(v: f32) -> f32 {
     v * PX_TO_PT
 }
 
-/// Convert a PDF-pt scalar to CSS px — use when feeding the Blitz viewport.
+/// Convert a PDF-pt scalar to CSS px. Retained only for the `px_to_pt`
+/// roundtrip test: fulgur-sipv.8 retyped the Blitz-viewport feeders to
+/// `units::Px` (`x.as_pt().in_px()`), so this has no production callers.
+/// Removed together with `px_to_pt` once fulgur-sipv.2 drops the last
+/// `px_to_pt` caller (`shadow.rs`).
 #[inline]
+#[allow(dead_code)] // test-only until fulgur-sipv.2 removes both px_to_pt / pt_to_px
 pub(crate) fn pt_to_px(v: f32) -> f32 {
     v / PX_TO_PT
 }
@@ -1200,7 +1205,13 @@ mod semantics_tests {
         // `parse_and_layout` already runs stylo + Taffy + the
         // `position: fixed` relayout, matching what the engine feeds
         // into convert at this point.
-        let mut doc = crate::blitz_adapter::parse_and_layout(html, 595.0_f32.as_px(), 842.0_f32.as_px(), &[], true);
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        );
 
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);

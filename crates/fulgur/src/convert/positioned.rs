@@ -471,7 +471,13 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────
 
     fn parse_doc(html: &str) -> HtmlDocument {
-        crate::blitz_adapter::parse_and_layout(html, 595.0_f32.as_px(), 842.0_f32.as_px(), &[], false)
+        crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            false,
+        )
     }
 
     fn find_first_by_tag(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
