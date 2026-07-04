@@ -980,43 +980,60 @@ impl<'a> PaginationLayoutTree<'a> {
                 // fulgur-ezst: a CHILDLESS block whose slicing would exceed
                 // the cap is a pathological amplifier — `<div
                 // style="height:99999999px">` is a web-only spacer/overflow
-                // idiom that prints nothing but blank pages. Emit only its
-                // first slice: skip the per-page fragment pushes while
-                // leaving the loop's page_index / cursor_y / remaining math
-                // untouched, so following in-flow siblings keep their exact
-                // positions (no reflow) and a trailing block collapses for
-                // free (`implied_page_count` reads the max fragment index).
-                // Background / border presence does NOT gate this — nobody
-                // authors a >MAX_PAGES-tall filled band on purpose. A
-                // content-bearing block, or a childless band that fits
-                // within the cap, is not collapsed and takes the
-                // truncate-and-warn path below unchanged.
+                // idiom that prints nothing but blank pages. Collapse it to
+                // its single first slice: emit only that slice AND bound the
+                // space it occupies (resume following content on the next
+                // page) so the document does not balloon. Background / border
+                // presence does NOT gate this — nobody authors a
+                // >MAX_PAGES-tall filled band on purpose. A content-bearing
+                // block, or a childless band that fits within the cap, is not
+                // collapsed and takes the truncate-and-warn path below
+                // unchanged.
                 //
                 // fulgur-c8re (security): a replaced element (`<img>` /
-                // `<svg>`) is NOT special-cased out of this collapse. It only
-                // reaches this branch when it is taller than `MAX_PAGES` pages
-                // (~10M px) — a range no legitimate single image occupies — so
-                // collapsing a non-painting one (unresolved `src`,
-                // `visibility:hidden`, undecodable format, empty `<svg>`) to a
-                // single clipped page loses nothing real, while gating on tag
-                // name alone (the removed `is_replaced_content`) let such a
-                // node amplify a few bytes of HTML into ~`MAX_PAGES` blank
-                // pages (a validated high-severity DoS).
+                // `<svg>`) is NOT special-cased out of this collapse —
+                // painting or not. It only reaches this branch when it is
+                // taller than `MAX_PAGES` pages (~10M px), a range no
+                // legitimate single image occupies, so clipping it to one page
+                // loses nothing real — even a *resolved* image, because a 1×1
+                // bitmap stretched with `height:99999999px` is the same
+                // amplifier as an unresolved `src`. Gating on tag name alone
+                // (the removed `is_replaced_content`) let such a node amplify a
+                // few bytes of HTML into ~`MAX_PAGES` blank pages (a validated
+                // high-severity DoS).
                 let collapse_childless = self.page_height_px > 0.0
                     && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
                     && !subtree_has_rendered_content(self.doc, child_id, 0);
-                // fulgur-2m6w: cap the per-page-strip slicing at
-                // `MAX_PAGES`. `child_h` is attacker-controlled CSS
-                // (`height` / `vh`), so without this bound a few bytes of
-                // HTML (`<div style="height:99999999px">`) generate ~10^5
-                // fragments — and a non-finite height would never reduce
-                // `remaining`, looping forever. The `page_index` ceiling is
-                // load-bearing on its own (it stops the loop even when
-                // `remaining` is `+inf`); content past the cap is truncated.
-                while remaining > 0.0 && page_index < crate::MAX_PAGES {
+                if collapse_childless {
+                    // fulgur-c8re (Codex P1 on PR #575): bound the OCCUPIED
+                    // SPACE, not just the fragment pushes. `implied_page_count`
+                    // reads the max fragment index across ALL nodes, so if the
+                    // slice loop advanced `page_index` to `MAX_PAGES` a trailing
+                    // in-flow sibling (`<div huge></div><p>after</p>`) would be
+                    // stranded on a deep page and re-inflate the PDF to
+                    // ~`MAX_PAGES` blank pages. The first slice already emitted
+                    // above fills the current strip, so resume following content
+                    // on the next page.
+                    log::warn!(
+                        "pagination: collapsed a childless block of height \
+                         {child_h}px (slicing would exceed the {}-page limit) \
+                         to a single page (fulgur-ezst)",
+                        crate::MAX_PAGES,
+                    );
                     page_index += 1;
-                    last_slice_h = remaining.min(self.page_height_px);
-                    if !collapse_childless {
+                    cursor_y = 0.0;
+                } else {
+                    // fulgur-2m6w: cap the per-page-strip slicing at
+                    // `MAX_PAGES`. `child_h` is attacker-controlled CSS
+                    // (`height` / `vh`), so without this bound a few bytes of
+                    // HTML (`<div style="height:99999999px">`) generate ~10^5
+                    // fragments — and a non-finite height would never reduce
+                    // `remaining`, looping forever. The `page_index` ceiling is
+                    // load-bearing on its own (it stops the loop even when
+                    // `remaining` is `+inf`); content past the cap is truncated.
+                    while remaining > 0.0 && page_index < crate::MAX_PAGES {
+                        page_index += 1;
+                        last_slice_h = remaining.min(self.page_height_px);
                         self.geometry
                             .entry(child_id)
                             .or_default()
@@ -1028,18 +1045,9 @@ impl<'a> PaginationLayoutTree<'a> {
                                 width: child_w.as_px(),
                                 height: last_slice_h.as_px(),
                             });
+                        remaining -= last_slice_h;
                     }
-                    remaining -= last_slice_h;
-                }
-                if remaining > 0.0 {
-                    if collapse_childless {
-                        log::warn!(
-                            "pagination: collapsed a childless block of \
-                             height {child_h}px (slicing would exceed the \
-                             {}-page limit) to a single page (fulgur-ezst)",
-                            crate::MAX_PAGES,
-                        );
-                    } else {
+                    if remaining > 0.0 {
                         log::warn!(
                             "pagination: block height {child_h}px exceeds the \
                              {}-page limit; truncating remaining content to \
@@ -1047,12 +1055,12 @@ impl<'a> PaginationLayoutTree<'a> {
                             crate::MAX_PAGES,
                         );
                     }
+                    cursor_y = if child_h - first_slice_h > 0.0 {
+                        last_slice_h
+                    } else {
+                        cursor_y + first_slice_h
+                    };
                 }
-                cursor_y = if child_h - first_slice_h > 0.0 {
-                    last_slice_h
-                } else {
-                    cursor_y + first_slice_h
-                };
                 emitted += 1;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
                 if !is_float {
@@ -4267,19 +4275,19 @@ mod tests {
         );
     }
 
-    /// fulgur-ezst: pins the no-reflow / no-free-page-reduction mechanism of
-    /// the childless collapse. The collapse skips only the per-page fragment
-    /// pushes — it deliberately leaves the slice loop's `page_index` counter
-    /// advancing all the way to `MAX_PAGES` — so a following in-flow sibling
-    /// lands on the SAME deep page it would occupy without the collapse (the
-    /// document is not silently shortened, and siblings do not reflow up to
-    /// page 0). If someone "optimizes" the loop to break early once the
-    /// collapse is decided, the `<p>` would jump to page ~0/1 and this test
-    /// fails. Asserts: the tall div contributes exactly one fragment
-    /// (collapse fired) while the `<p>` sibling's fragment stays at
-    /// `page_index >= MAX_PAGES`.
+    /// fulgur-c8re (security, Codex P1 on PR #575): the childless collapse must
+    /// bound the SPACE the pathological element occupies, not just skip its
+    /// per-page fragment pushes. The predecessor behaviour left the slice loop
+    /// advancing `page_index` all the way to `MAX_PAGES`, so a following in-flow
+    /// sibling was stranded on a deep page and `implied_page_count` — which
+    /// reads the max fragment index across ALL nodes — re-inflated the document
+    /// to ~`MAX_PAGES` blank pages (`<div huge></div><p>after</p>`), defeating
+    /// the collapse. The element now consumes only its single first slice and
+    /// following content reflows onto the next page. Asserts: the tall div
+    /// contributes exactly one fragment (collapse fired) AND the `<p>` sibling
+    /// lands on a bounded page, so the whole document stays a handful of pages.
     #[test]
-    fn childless_collapse_does_not_reflow_following_sibling() {
+    fn childless_collapse_reflows_following_sibling() {
         use std::ops::DerefMut;
         let html = r#"<html><body><div id="tall" style="height: 99999999px"></div><p id="after">after</p></body></html>"#;
         let mut doc = parse(html, 600.0);
@@ -4301,10 +4309,33 @@ mod tests {
             .fragments[0]
             .page_index;
         assert!(
-            after_page >= crate::MAX_PAGES,
-            "following sibling must stay on its deep page (>= MAX_PAGES {}); got {after_page} \
-             — an early loop break would reflow it near page 0",
-            crate::MAX_PAGES,
+            after_page <= 1,
+            "collapsed spacer must reflow its trailing sibling onto a bounded page \
+             (<= 1), not strand it ~MAX_PAGES deep; got {after_page}",
+        );
+        assert!(
+            implied_page_count(&table) <= 2,
+            "a childless spacer followed by content must stay a handful of pages; got {}",
+            implied_page_count(&table),
+        );
+    }
+
+    /// fulgur-c8re (security, Codex P1 on PR #575): the replaced-element
+    /// collapse must bound trailing content too. A non-painting tall image
+    /// (`<img src="missing.png" height:99999999px>`) followed by a `<p>` must
+    /// not amplify into ~`MAX_PAGES` blank pages — the same trailing-sibling
+    /// vector as `childless_collapse_reflows_following_sibling`, but exercising
+    /// the replaced-element path that the `is_replaced_content` removal opened.
+    #[test]
+    fn replaced_tall_collapse_bounds_trailing_sibling() {
+        let html = r#"<html><body><img src="missing.png" style="display:block;width:10px;height:99999999px"><p>after</p></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 800.0);
+        assert!(
+            implied_page_count(&table) <= 2,
+            "a non-painting tall replaced element followed by content must \
+             collapse without amplifying; got {} pages",
+            implied_page_count(&table),
         );
     }
 
