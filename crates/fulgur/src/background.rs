@@ -8,6 +8,7 @@ use crate::draw_primitives::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle, Canvas,
 };
+use crate::units::{F32Units, Px};
 
 /// Draw outer box-shadows behind the element's background.
 ///
@@ -971,9 +972,9 @@ fn expand_interpolation_hints(stops: Vec<ResolvedStop>) -> Vec<(f32, [u8; 4])> {
 /// Resolve `Vec<GradientStop>` (length / fraction / auto 混在) を krilla の
 /// `Stop` 列に変換する。
 ///
-/// **Unit contract:** `line_length` must be in **CSS px** (matching
+/// **Unit contract:** `line_length` is a [`Px`] (CSS px, matching
 /// `GradientStopPosition::LengthPx`). Callers in pt-space (Krilla draw
-/// surface) convert with `crate::convert::pt_to_px` before invoking.
+/// surface) tag with `.as_pt()` and convert with `.in_px()` before invoking.
 ///
 /// CSS Images Level 3 §3.5.1 の color-stop fixup に従って:
 ///   1. `LengthPx(px)` を `px / line_length` で fraction 化
@@ -988,7 +989,7 @@ fn expand_interpolation_hints(stops: Vec<ResolvedStop>) -> Vec<(f32, [u8; 4])> {
 /// `line_length <= 0` の場合は length stop が解決不能なので None。
 fn resolve_gradient_stops(
     stops: &[crate::draw_primitives::GradientStop],
-    line_length: f32,
+    line_length: Px,
     repeating: bool,
 ) -> Option<Vec<krilla::paint::Stop>> {
     use crate::draw_primitives::GradientStopPosition;
@@ -996,7 +997,7 @@ fn resolve_gradient_stops(
     if stops.len() < 2 {
         return None;
     }
-    if line_length <= 0.0 {
+    if line_length <= Px::ZERO {
         // length-typed stop が一つでもあれば解決不能。fraction-only でも
         // 退化した gradient なので Layer drop 相当 (caller で先に early
         // return しているため通常到達しない)。
@@ -1009,7 +1010,7 @@ fn resolve_gradient_stops(
         .map(|s| match s.position {
             GradientStopPosition::Auto => None,
             GradientStopPosition::Fraction(f) => Some(f),
-            GradientStopPosition::LengthPx(px) => Some(px / line_length),
+            GradientStopPosition::LengthPx(px) => Some(px.as_px() / line_length),
         })
         .collect();
 
@@ -1215,7 +1216,7 @@ fn draw_linear_gradient(
     // CSS px で保持されている。`resolve_gradient_stops` は同一単位空間での
     // `px / line_length` で fraction 化するので、line_length も CSS px に揃える。
     // (例: 400px box → length = 300pt → px 換算で 400 → 50px / 400 = 0.125)
-    let length_px = crate::convert::pt_to_px(length);
+    let length_px = length.as_pt().in_px();
     let Some(krilla_stops) = resolve_gradient_stops(stops, length_px, repeating) else {
         return;
     };
@@ -1341,7 +1342,7 @@ fn draw_radial_gradient(
     // Radial gradient line length = rx (CSS Images §3.6.1, ellipse でも +X 軸)。
     // rx は pt 単位 (ow/oh が pt) なので、`LengthPx` (CSS px) との比較のために
     // CSS px に揃える。
-    let rx_px = crate::convert::pt_to_px(rx);
+    let rx_px = rx.as_pt().in_px();
     let Some(krilla_stops) = resolve_gradient_stops(stops, rx_px, repeating) else {
         return;
     };
@@ -1692,7 +1693,7 @@ fn draw_gradient_tiling_pattern(
 /// CSS では radial-gradient の position percentage は container の幅/高さに対する単純な割合。
 fn resolve_point(lp: &BgLengthPercentage, container: f32) -> f32 {
     match lp {
-        BgLengthPercentage::Length(v) => *v,
+        BgLengthPercentage::Length(v) => v.to_f32(),
         BgLengthPercentage::Percentage(p) => container * p,
     }
 }
@@ -1700,7 +1701,7 @@ fn resolve_point(lp: &BgLengthPercentage, container: f32) -> f32 {
 /// `BgLengthPercentage` を半径として解決 (length はそのまま、percentage は container 基準)。
 fn resolve_length(lp: &BgLengthPercentage, container: f32) -> f32 {
     match lp {
-        BgLengthPercentage::Length(v) => *v,
+        BgLengthPercentage::Length(v) => v.to_f32(),
         BgLengthPercentage::Percentage(p) => container * p,
     }
 }
@@ -1797,7 +1798,7 @@ fn resolve_size(layer: &BackgroundLayer, origin_w: f32, origin_h: f32) -> (f32, 
 
 fn resolve_lp(lp: &BgLengthPercentage, basis: f32) -> f32 {
     match lp {
-        BgLengthPercentage::Length(v) => *v,
+        BgLengthPercentage::Length(v) => v.to_f32(),
         BgLengthPercentage::Percentage(p) => basis * p,
     }
 }
@@ -1805,7 +1806,7 @@ fn resolve_lp(lp: &BgLengthPercentage, basis: f32) -> f32 {
 /// CSS spec: position = (container - image) * percentage, or just length.
 fn resolve_position(lp: &BgLengthPercentage, container: f32, image: f32) -> f32 {
     match lp {
-        BgLengthPercentage::Length(v) => *v,
+        BgLengthPercentage::Length(v) => v.to_f32(),
         BgLengthPercentage::Percentage(p) => (container - image) * p,
     }
 }
@@ -2213,7 +2214,7 @@ mod tests {
 
     #[test]
     fn test_position_length() {
-        let offset = resolve_position(&BgLengthPercentage::Length(30.0), 200.0, 100.0);
+        let offset = resolve_position(&BgLengthPercentage::Length(30.0_f32.as_pt()), 200.0, 100.0);
         assert_eq!(offset, 30.0);
     }
 
@@ -2314,7 +2315,10 @@ mod tests {
 
     #[test]
     fn resolve_lp_length_returns_value() {
-        assert_eq!(resolve_lp(&BgLengthPercentage::Length(42.0), 200.0), 42.0);
+        assert_eq!(
+            resolve_lp(&BgLengthPercentage::Length(42.0_f32.as_pt()), 200.0),
+            42.0
+        );
     }
 
     #[test]
@@ -2333,8 +2337,8 @@ mod tests {
             100.0,
             50.0,
             BgSize::Explicit(
-                Some(BgLengthPercentage::Length(80.0)),
-                Some(BgLengthPercentage::Length(40.0)),
+                Some(BgLengthPercentage::Length(80.0_f32.as_pt())),
+                Some(BgLengthPercentage::Length(40.0_f32.as_pt())),
             ),
         );
         let (w, h) = resolve_size(&layer, 200.0, 200.0);
@@ -2348,7 +2352,7 @@ mod tests {
         let layer = make_layer(
             100.0,
             50.0,
-            BgSize::Explicit(Some(BgLengthPercentage::Length(80.0)), None),
+            BgSize::Explicit(Some(BgLengthPercentage::Length(80.0_f32.as_pt())), None),
         );
         let (w, h) = resolve_size(&layer, 200.0, 200.0);
         assert_eq!(w, 80.0);
@@ -2361,7 +2365,7 @@ mod tests {
         let layer = make_layer(
             100.0,
             50.0,
-            BgSize::Explicit(None, Some(BgLengthPercentage::Length(40.0))),
+            BgSize::Explicit(None, Some(BgLengthPercentage::Length(40.0_f32.as_pt()))),
         );
         let (w, h) = resolve_size(&layer, 200.0, 200.0);
         assert_eq!(w, 80.0);
@@ -2410,7 +2414,7 @@ mod tests {
     #[test]
     fn resolve_gradient_size_explicit_both_resolves() {
         let size = BgSize::Explicit(
-            Some(BgLengthPercentage::Length(50.0)),
+            Some(BgLengthPercentage::Length(50.0_f32.as_pt())),
             Some(BgLengthPercentage::Percentage(0.25)),
         );
         let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
@@ -2435,7 +2439,7 @@ mod tests {
     #[test]
     fn resolve_gradient_size_explicit_one_auto_uses_origin() {
         // width specified, height auto → height fills origin (no aspect)
-        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(80.0)), None);
+        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(80.0_f32.as_pt())), None);
         let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
         assert!((w - 80.0).abs() < 1e-6);
         assert!((h - 100.0).abs() < 1e-6);
@@ -3437,7 +3441,7 @@ mod tests {
     #[test]
     fn resolve_point_length_returns_value() {
         assert_eq!(
-            resolve_point(&BgLengthPercentage::Length(42.0), 200.0),
+            resolve_point(&BgLengthPercentage::Length(42.0_f32.as_pt()), 200.0),
             42.0
         );
     }
@@ -3453,7 +3457,7 @@ mod tests {
     #[test]
     fn resolve_length_length_returns_value() {
         assert_eq!(
-            resolve_length(&BgLengthPercentage::Length(15.0), 300.0),
+            resolve_length(&BgLengthPercentage::Length(15.0_f32.as_pt()), 300.0),
             15.0
         );
     }
@@ -3493,7 +3497,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 2);
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
@@ -3506,7 +3510,7 @@ mod resolve_gradient_stops_tests {
             stop(px(50.0), [0, 0, 255, 255]),
         ];
         // line_length = 100 → 50px = 0.5
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 2);
         assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
     }
@@ -3514,7 +3518,7 @@ mod resolve_gradient_stops_tests {
     #[test]
     fn auto_position_filled_at_endpoints() {
         let stops = vec![stop(Auto, [255, 0, 0, 255]), stop(Auto, [0, 0, 255, 255])];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
     }
@@ -3526,7 +3530,7 @@ mod resolve_gradient_stops_tests {
             stop(Auto, [0, 255, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
     }
 
@@ -3539,7 +3543,7 @@ mod resolve_gradient_stops_tests {
             stop(px(50.0), [0, 0, 255, 255]),
             stop(Auto, [0, 255, 0, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 3);
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 0.5).abs() < 1e-6);
@@ -3556,7 +3560,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(px(50.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 30.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 30.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 2, "renormalize keeps 2 stops");
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
@@ -3570,7 +3574,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(-0.1), [255, 0, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 2, "renormalize keeps 2 stops");
         assert!((out[0].offset.get() - 0.0).abs() < 1e-6);
         assert!((out[1].offset.get() - 1.0).abs() < 1e-6);
@@ -3583,7 +3587,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.6), [255, 0, 0, 255]),
             stop(fr(0.3), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert!((out[0].offset.get() - 0.6).abs() < 1e-6);
         assert!((out[1].offset.get() - 0.6).abs() < 1e-6);
     }
@@ -3594,7 +3598,7 @@ mod resolve_gradient_stops_tests {
             stop(px(50.0), [255, 0, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 0.0, false);
+        let out = resolve_gradient_stops(&stops, 0.0_f32.as_px(), false);
         assert!(out.is_none());
     }
 
@@ -3607,7 +3611,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(fr(0.25), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, true).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
         // 期待: forward = ceil(0.75/0.25) = 3, backward = 0
         // → k = 0, 1, 2, 3 で各周期の (red, blue) を配置
         // (0, red), (0.25, blue), (0.25, red), (0.5, blue), (0.5, red),
@@ -3644,7 +3648,7 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.25), [255, 0, 0, 255]),
             stop(fr(0.5), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, true).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
         // backward = ceil(0.25/0.25) = 1, forward = ceil(0.5/0.25) = 2
         // 展開列: k=-1 (0.0 red, 0.25 blue), k=0 (0.25 red, 0.5 blue),
         //         k=1 (0.5 red, 0.75 blue), k=2 (0.75 red, 1.0 blue)
@@ -3666,7 +3670,8 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(fr(0.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, true).expect("solid fill, not None");
+        let out =
+            resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).expect("solid fill, not None");
         // 単色 fill: 2 stops at 0.0/1.0 で同色 (blue)。renormalize の fast path
         // (全 stop in [0, 1]) を通って 2 stops のまま。
         assert_eq!(out.len(), 2);
@@ -3682,8 +3687,8 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.0), [255, 0, 0, 255]),
             stop(fr(1.0), [0, 0, 255, 255]),
         ];
-        let repeat = resolve_gradient_stops(&stops, 100.0, true).unwrap();
-        let plain = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let repeat = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
+        let plain = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         // どちらも 2 stops で同じ位置。
         assert_eq!(repeat.len(), plain.len());
         for (r, p) in repeat.iter().zip(plain.iter()) {
@@ -3700,7 +3705,7 @@ mod resolve_gradient_stops_tests {
             stop(Auto, [0, 255, 0, 255]),
             stop(Auto, [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, true).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
         // forward = backward = 0 → 1 copy = 3 stops
         assert_eq!(out.len(), 3);
         assert!((out[0].offset.get() - 0.0).abs() < 1e-5);
@@ -3716,7 +3721,7 @@ mod resolve_gradient_stops_tests {
             stop(px(0.0), [255, 0, 0, 255]),
             stop(px(25.0), [0, 0, 255, 255]),
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, true).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
         // line_length=100, 25px → 0.25 fraction → repeating_simple_period と
         // 同じ展開: 8 stops
         assert_eq!(out.len(), 8);
@@ -4893,6 +4898,7 @@ mod repeating_stops_tests {
 #[cfg(test)]
 mod gradient_size_tests {
     use super::{BgLengthPercentage, BgSize, resolve_gradient_size};
+    use crate::units::F32Units;
 
     #[test]
     fn auto_returns_origin_size() {
@@ -4921,15 +4927,15 @@ mod gradient_size_tests {
     #[test]
     fn explicit_both_axes_resolved() {
         let size = BgSize::Explicit(
-            Some(BgLengthPercentage::Length(80.0)),
-            Some(BgLengthPercentage::Length(60.0)),
+            Some(BgLengthPercentage::Length(80.0_f32.as_pt())),
+            Some(BgLengthPercentage::Length(60.0_f32.as_pt())),
         );
         assert_eq!(resolve_gradient_size(&size, 300.0, 200.0), (80.0, 60.0));
     }
 
     #[test]
     fn explicit_width_only_height_falls_back_to_origin() {
-        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(150.0)), None);
+        let size = BgSize::Explicit(Some(BgLengthPercentage::Length(150.0_f32.as_pt())), None);
         let (w, h) = resolve_gradient_size(&size, 300.0, 200.0);
         assert_eq!(w, 150.0);
         assert_eq!(h, 200.0); // None → origin_h
@@ -4937,7 +4943,7 @@ mod gradient_size_tests {
 
     #[test]
     fn explicit_height_only_width_falls_back_to_origin() {
-        let size = BgSize::Explicit(None, Some(BgLengthPercentage::Length(50.0)));
+        let size = BgSize::Explicit(None, Some(BgLengthPercentage::Length(50.0_f32.as_pt())));
         let (w, h) = resolve_gradient_size(&size, 300.0, 200.0);
         assert_eq!(w, 300.0); // None → origin_w
         assert_eq!(h, 50.0);
@@ -5176,6 +5182,7 @@ mod ellipse_corner_scale_tests {
 #[cfg(test)]
 mod tile_position_tests {
     use super::{BgRepeat, compute_tile_positions, compute_tile_positions_slow};
+    use crate::units::F32Units;
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-3
@@ -5394,7 +5401,7 @@ mod tile_position_tests {
                 is_hint: false,
             },
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].offset, krilla::num::NormalizedF32::ZERO);
         assert_eq!(out[1].offset, krilla::num::NormalizedF32::ONE);
@@ -5410,7 +5417,7 @@ mod tile_position_tests {
             rgba: [255, 0, 0, 255],
             is_hint: false,
         }];
-        assert!(resolve_gradient_stops(&stops, 100.0, false).is_none());
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
     }
 
     #[test]
@@ -5430,7 +5437,7 @@ mod tile_position_tests {
                 is_hint: false,
             },
         ];
-        assert!(resolve_gradient_stops(&stops, 0.0, false).is_none());
+        assert!(resolve_gradient_stops(&stops, 0.0_f32.as_px(), false).is_none());
     }
 
     #[test]
@@ -5456,7 +5463,7 @@ mod tile_position_tests {
                 is_hint: false,
             },
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 3);
         let mid_offset = out[1].offset.get();
         assert!((mid_offset - 0.5).abs() < 1e-5, "mid offset={mid_offset}");
@@ -5485,7 +5492,7 @@ mod tile_position_tests {
                 is_hint: false,
             },
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, false).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].offset, krilla::num::NormalizedF32::ZERO);
         let mid = out[1].offset.get();
@@ -5511,7 +5518,7 @@ mod tile_position_tests {
                 is_hint: false,
             },
         ];
-        let out = resolve_gradient_stops(&stops, 100.0, true).unwrap();
+        let out = resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).unwrap();
         // repeating expands: many copies needed to cover [0, 1]
         assert!(out.len() > 2, "repeating should expand beyond 2 stops");
         assert_eq!(out[0].offset, krilla::num::NormalizedF32::ZERO);

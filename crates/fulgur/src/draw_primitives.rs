@@ -712,8 +712,8 @@ pub enum Overflow {
 /// A length or percentage value for background positioning/sizing.
 #[derive(Clone, Debug)]
 pub enum BgLengthPercentage {
-    /// Absolute length in points.
-    Length(f32),
+    /// Absolute length in PDF points.
+    Length(crate::units::Pt),
     /// Percentage (0.0–1.0).
     Percentage(f32),
 }
