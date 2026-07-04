@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.0] - 2026-07-04
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.24.0...v0.25.0
+
 ## [0.24.0] - 2026-07-04
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
