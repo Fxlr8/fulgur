@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.26.0] - 2026-07-04
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(fulgur): collapse tall non-painting replaced elements to close blank-page DoS by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/575
+### Documentation
+* docs: add security vulnerability disclosure policy by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/576
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.25.0...v0.26.0
+
 ## [0.25.0] - 2026-07-04
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
