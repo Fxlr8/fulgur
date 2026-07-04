@@ -45,7 +45,28 @@ struct RenderPassOutput {
 /// Unit contract: `drawables` coordinates are PDF pt; `geometry` fragments are
 /// CSS px (`units::Px`). See the crate `units` module and
 /// `.claude/rules/coordinate-system.md`.
+///
+/// # Limitations
+///
+/// This carries only **body** layout. CSS Paged Media constructs that
+/// [`render`](Engine::render) paints from the render-side GCPM state —
+/// `@page` margin boxes, `position: running()` headers/footers, and the page
+/// numbers rendered inside them — are **not** included in `drawables` /
+/// `geometry`; an image / OCR consumer composing from `LayoutOutput` alone
+/// will omit them (fulgur-2map design doc §1/§9).
+///
+/// Likewise, when author CSS overrides the page box (`@page { size / margin }`,
+/// including `:left` / `:right` / `:first`), the pipeline paginates against the
+/// **resolved** content box, but the resolved page size / margin is not yet
+/// surfaced here — a consumer must not assume [`Engine::config`] alone
+/// describes the canvas. Surfacing margin boxes and resolved page geometry is a
+/// tracked follow-up ([fulgur-2map.10] notes).
+///
+/// This struct is `#[non_exhaustive]`: it is only ever returned by
+/// [`Engine::layout`] (consumers read fields, never construct it), so those
+/// follow-up fields can be added without a breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct LayoutOutput {
     pub drawables: crate::drawables::Drawables,
     pub geometry: crate::pagination_layout::PaginationGeometryTable,
@@ -717,10 +738,14 @@ impl Engine {
     /// Lay out `html` and return the renderer-agnostic per-node draw payloads
     /// (`drawables`) plus the pagination geometry, without serializing a PDF.
     ///
-    /// Page shape (canvas size, margins, orientation) comes from the builder
-    /// configuration, exactly as [`render`](Engine::render) uses it. Documents
-    /// with `target-counter()` / `target-counters()` / `target-text()` run the
-    /// same internal 2-pass resolution as `render`, so the returned `drawables`
+    /// Page shape (canvas size, margins, orientation) starts from the builder
+    /// configuration and is then resolved against author CSS exactly as
+    /// [`render`](Engine::render) resolves it — so `@page { size / margin }`
+    /// overrides (including `:left` / `:right` / `:first`) drive pagination
+    /// here too. The resolved page box itself is not surfaced on
+    /// [`LayoutOutput`] yet; see its `# Limitations`. Documents with
+    /// `target-counter()` / `target-counters()` / `target-text()` run the same
+    /// internal 2-pass resolution as `render`, so the returned `drawables`
     /// carry resolved cross-reference values, not fixed-width placeholders.
     ///
     /// This is the shared layout path behind `render`; a downstream image
@@ -732,7 +757,16 @@ impl Engine {
         // AnchorMap so those resolve. Project the final artifacts once.
         let pass1 = self.layout_to_drawables(html, None)?;
         let artifacts = if pass1.needs_pass_two {
-            self.layout_to_drawables(html, Some(&pass1.collected_anchor_map))?
+            // Retain only the AnchorMap across passes (as `render`'s loop
+            // effectively does — its per-pass drawables/geometry are dropped
+            // inside `render_pass`). Destructure `pass1` so its drawables,
+            // geometry, and GCPM stores are freed before pass 2 allocates,
+            // keeping peak memory single-pass-sized for large raster/OCR inputs.
+            let LayoutArtifacts {
+                collected_anchor_map,
+                ..
+            } = pass1;
+            self.layout_to_drawables(html, Some(&collected_anchor_map))?
         } else {
             pass1
         };

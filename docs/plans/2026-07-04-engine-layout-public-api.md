@@ -88,9 +88,20 @@ fn layout_two_pass_target_counter_returns_drawables_and_geometry() {
         .layout(html)
         .expect("layout 2-pass");
     assert!(!out.geometry.is_empty(), "geometry should record fragments");
+    assert!(!out.drawables.paragraphs.is_empty());
+    // Pass-2-SPECIFIC guard: non-empty checks alone pass even if pass 2 never
+    // fires. Assert the RESOLVED content — `#a` lands on page 2 via
+    // `page-break-before: always`, so `target-counter(attr(href), page)` in the
+    // `a::after` resolves to " (p.2)". On a regression to single-pass this stays
+    // a fixed-width placeholder, never the literal resolved page number. Reads
+    // the pre-raster run text (`ShapedGlyphRun::text`) via the shared
+    // `paragraph_run_text` helper, so it is font-independent.
     assert!(
-        !out.drawables.paragraphs.is_empty(),
-        "the paragraphs should produce draw payloads after 2-pass layout"
+        out.drawables
+            .paragraphs
+            .values()
+            .any(|p| paragraph_run_text(p).contains("(p.2)")),
+        "pass-2 target-counter should resolve to \"(p.2)\""
     );
 }
 ```
