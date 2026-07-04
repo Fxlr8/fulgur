@@ -165,10 +165,9 @@ impl_unit_arith!(Px);
 impl_unit_arith!(Pt);
 
 impl Px {
-    /// The zero length. Use instead of `0.0_f32.as_px()` for sign comparisons
-    /// (`x > Px::ZERO`); the private field means `Px(0.0)` is not
-    /// constructible outside this module. (`Px` has no `max`/`min` yet —
-    /// add them, mirroring `Pt`, when a clamp idiom first needs them.)
+    /// The zero length. Use instead of `0.0_f32.as_px()` for clamp idioms
+    /// (`x.max(Px::ZERO)`) and sign comparisons (`x > Px::ZERO`); the private
+    /// field means `Px(0.0)` is not constructible outside this module.
     pub const ZERO: Px = Px(0.0);
 
     /// Raw `f32` value. Use only at FFI boundaries.
@@ -181,6 +180,19 @@ impl Px {
     #[inline]
     pub fn in_pt(self) -> Pt {
         Pt(self.0 * PX_TO_PT)
+    }
+
+    /// Larger of two lengths. Mirrors `f32::max` (same NaN handling) so a
+    /// migrated `x.max(y)` stays byte-identical.
+    #[inline]
+    pub fn max(self, other: Px) -> Px {
+        Px(self.0.max(other.0))
+    }
+
+    /// Smaller of two lengths. Mirrors `f32::min`.
+    #[inline]
+    pub fn min(self, other: Px) -> Px {
+        Px(self.0.min(other.0))
     }
 }
 
@@ -299,6 +311,15 @@ mod tests {
         assert!(Px(1.0) > Px::ZERO);
         // boundary: zero is not strictly greater than zero (the `> Px::ZERO` idiom)
         assert!(Px(0.0) <= Px::ZERO);
+    }
+
+    #[test]
+    fn px_max_min_mirror_f32() {
+        assert_eq!(Px(1.0).max(Px(2.0)), Px(2.0));
+        assert_eq!(Px(1.0).min(Px(2.0)), Px(1.0));
+        // identical to f32::max/min, including the 0.0 clamp idiom
+        assert_eq!(Px(-3.0).max(Px::ZERO), Px::ZERO);
+        assert_eq!(Px(-3.0).min(Px::ZERO), Px(-3.0));
     }
 
     #[test]

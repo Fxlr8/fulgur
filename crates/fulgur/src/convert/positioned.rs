@@ -1,4 +1,5 @@
 use super::*;
+use crate::units::{F32Units, Pt, Px};
 
 /// Walk a parent node's child id list, recursing into each via
 /// `convert_node`. Replaces v1's `collect_positioned_children`: instead of
@@ -74,21 +75,21 @@ fn is_position_static(node: &Node) -> bool {
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 pub(super) struct AbsCb {
-    pub(super) padding_box_size: (f32, f32),
-    pub(super) border_top_left: (f32, f32),
+    pub(super) padding_box_size: (Px, Px),
+    pub(super) border_top_left: (Px, Px),
     pub(super) parent_offset_in_cb_bp: (f32, f32),
 }
 
-fn cb_padding_box(node: &Node) -> ((f32, f32), (f32, f32)) {
+fn cb_padding_box(node: &Node) -> ((Px, Px), (Px, Px)) {
     let style = extract_block_style(node, None);
-    let bl_pt = style.border_widths[3].to_f32();
-    let br_pt = style.border_widths[1].to_f32();
-    let bt_pt = style.border_widths[0].to_f32();
-    let bb_pt = style.border_widths[2].to_f32();
+    let bl_pt = style.border_widths[3];
+    let br_pt = style.border_widths[1];
+    let bt_pt = style.border_widths[0];
+    let bb_pt = style.border_widths[2];
     let sz = node.final_layout.size;
-    let pb_w = (sz.width - pt_to_px(bl_pt + br_pt)).max(0.0);
-    let pb_h = (sz.height - pt_to_px(bt_pt + bb_pt)).max(0.0);
-    ((pb_w, pb_h), (pt_to_px(bl_pt), pt_to_px(bt_pt)))
+    let pb_w = (sz.width.as_px() - (bl_pt + br_pt).in_px()).max(Px::ZERO);
+    let pb_h = (sz.height.as_px() - (bt_pt + bb_pt).in_px()).max(Px::ZERO);
+    ((pb_w, pb_h), (bl_pt.in_px(), bt_pt.in_px()))
 }
 
 fn resolve_cb_for_absolute(
@@ -122,11 +123,11 @@ fn resolve_cb_for_absolute(
             if elem.name.local.as_ref() == "body" {
                 let (mut padding_box_size, border_top_left) = cb_padding_box(cur);
                 if let Some((vw, vh)) = viewport_size_px {
-                    if padding_box_size.0 <= 0.0 {
-                        padding_box_size.0 = vw;
+                    if padding_box_size.0 <= Px::ZERO {
+                        padding_box_size.0 = vw.as_px();
                     }
-                    if padding_box_size.1 <= 0.0 {
-                        padding_box_size.1 = vh;
+                    if padding_box_size.1 <= Px::ZERO {
+                        padding_box_size.1 = vh.as_px();
                     }
                 }
                 body_fallback = Some(AbsCb {
@@ -164,12 +165,14 @@ fn resolve_cb_for_absolute(
 // origin, no size dependence).
 fn resolve_inset_px(
     inset: &::style::values::computed::position::Inset,
-    basis_px: f32,
-) -> Option<f32> {
+    basis_px: Px,
+) -> Option<Px> {
     use ::style::values::computed::Length;
     use ::style::values::generics::position::GenericInset;
     match inset {
-        GenericInset::LengthPercentage(lp) => Some(lp.resolve(Length::new(basis_px)).px()),
+        GenericInset::LengthPercentage(lp) => {
+            Some(lp.resolve(Length::new(basis_px.to_f32())).px().as_px())
+        }
         _ => None,
     }
 }
@@ -178,7 +181,7 @@ fn resolve_inset_px(
 /// `pagination_geometry` for a textless `content: url(...)` abs pseudo
 /// whose `right` or `bottom` inset was specified.
 ///
-/// `pseudo_w_pt` / `pseudo_h_pt` come from the just-built `ImageEntry`,
+/// `pseudo_w` / `pseudo_h` (pt) come from the just-built `ImageEntry`,
 /// which sized the image from the pseudo's CSS `width` / `height`
 /// (via `build_pseudo_image_entry`). For pseudos that didn't set a
 /// `right` or `bottom` inset, this is a no-op — Taffy's location is
@@ -199,8 +202,8 @@ fn maybe_apply_abs_pseudo_inset_correction(
     pseudo_id: usize,
     parent_id: usize,
     cb: AbsCb,
-    pseudo_w_pt: f32,
-    pseudo_h_pt: f32,
+    pseudo_w: Pt,
+    pseudo_h: Pt,
     ctx: &mut ConvertContext<'_>,
 ) {
     // Defer to `append_position_fixed_fragments` for `position: fixed`:
@@ -264,11 +267,11 @@ fn maybe_apply_abs_pseudo_inset_correction(
     else {
         return;
     };
-    let parent_x_px = parent_frag.x.to_f32();
-    let parent_y_px = parent_frag.y.to_f32();
+    let parent_x_px = parent_frag.x;
+    let parent_y_px = parent_frag.y;
 
-    let pseudo_w_px = pt_to_px(pseudo_w_pt);
-    let pseudo_h_px = pt_to_px(pseudo_h_pt);
+    let pseudo_w_px = pseudo_w.in_px();
+    let pseudo_h_px = pseudo_h.in_px();
 
     // CSS 2.1 §10.3.7 / §10.6.4: when start-side is auto, end-side
     // determines position. Use the pseudo's effective image size
@@ -279,12 +282,12 @@ fn maybe_apply_abs_pseudo_inset_correction(
         cb_w_px - pseudo_w_px - right.unwrap()
     } else {
         // left is Some (or both auto -> 0)
-        left.unwrap_or(0.0)
+        left.unwrap_or(Px::ZERO)
     };
     let y_in_pp_px = if needs_bottom {
         cb_h_px - pseudo_h_px - bottom.unwrap()
     } else {
-        top.unwrap_or(0.0)
+        top.unwrap_or(Px::ZERO)
     };
 
     // Padding-box frame → CB border-box frame → parent's frame.
@@ -294,8 +297,8 @@ fn maybe_apply_abs_pseudo_inset_correction(
     // CB" case this is `(0, 0)`.
     let (bl_px, bt_px) = cb.border_top_left;
     let (ox_px, oy_px) = cb.parent_offset_in_cb_bp;
-    let pseudo_local_x_px = x_in_pp_px + bl_px - ox_px;
-    let pseudo_local_y_px = y_in_pp_px + bt_px - oy_px;
+    let pseudo_local_x_px = x_in_pp_px + bl_px - ox_px.as_px();
+    let pseudo_local_y_px = y_in_pp_px + bt_px - oy_px.as_px();
 
     let new_x_px = parent_x_px + pseudo_local_x_px;
     let new_y_px = parent_y_px + pseudo_local_y_px;
@@ -306,10 +309,10 @@ fn maybe_apply_abs_pseudo_inset_correction(
     entry.fragments.clear();
     entry.fragments.push(crate::pagination_layout::Fragment {
         page_index: parent_frag.page_index,
-        x: new_x_px.as_px(),
-        y: new_y_px.as_px(),
-        width: pseudo_w_px.as_px(),
-        height: pseudo_h_px.as_px(),
+        x: new_x_px,
+        y: new_y_px,
+        width: pseudo_w_px,
+        height: pseudo_h_px,
     });
 }
 
@@ -368,7 +371,7 @@ pub(super) fn walk_absolute_pseudo_children(
             // and shifts the image off by its own w/h. Re-apply the
             // inset against the pseudo's effective image size and
             // overwrite the fragmenter's wrong placement.
-            let (img_w_pt, img_h_pt) = (img.width.to_f32(), img.height.to_f32());
+            let (img_w, img_h) = (img.width, img.height);
             out.images.insert(pseudo_id, img);
             if let Some(cb_resolved) = _cb {
                 maybe_apply_abs_pseudo_inset_correction(
@@ -376,8 +379,8 @@ pub(super) fn walk_absolute_pseudo_children(
                     pseudo_id,
                     node.id,
                     cb_resolved,
-                    img_w_pt,
-                    img_h_pt,
+                    img_w,
+                    img_h,
                     ctx,
                 );
             }
@@ -445,11 +448,11 @@ pub(super) fn try_build_absolute_pseudo_image(
     }
     let (basis_w_pt, basis_h_pt) = if let Some(cb) = cb {
         let (w_px, h_px) = cb.padding_box_size;
-        (px_to_pt(w_px), px_to_pt(h_px))
+        (w_px.in_pt(), h_px.in_pt())
     } else {
         (
-            px_to_pt(parent.final_layout.size.width),
-            px_to_pt(parent.final_layout.size.height),
+            parent.final_layout.size.width.as_px().in_pt(),
+            parent.final_layout.size.height.as_px().in_pt(),
         )
     };
     pseudo::build_pseudo_image_entry(pseudo, basis_w_pt, basis_h_pt, assets)
@@ -855,6 +858,7 @@ mod tests {
         let div_id = find_tag(&doc, "div");
         let node = doc.get_node(div_id).unwrap();
         let ((pb_w, pb_h), (bl, bt)) = cb_padding_box(node);
+        let (pb_w, pb_h, bl, bt) = (pb_w.to_f32(), pb_h.to_f32(), bl.to_f32(), bt.to_f32());
         let sz = node.final_layout.size;
         // No border → pb_w == sz.width, pb_h == sz.height.
         assert!(
@@ -889,6 +893,7 @@ mod tests {
         let div_id = find_tag(&doc, "div");
         let node = doc.get_node(div_id).unwrap();
         let ((pb_w, _pb_h), (bl, bt)) = cb_padding_box(node);
+        let (pb_w, bl, bt) = (pb_w.to_f32(), bl.to_f32(), bt.to_f32());
         let sz = node.final_layout.size;
         // With 10px border on each side, the border-box is 120×120px and the
         // padding box (content) is 100×100px.
@@ -923,7 +928,7 @@ mod tests {
         );
         let cb = result.unwrap();
         assert!(
-            cb.padding_box_size.0 > 0.0,
+            cb.padding_box_size.0 > Px::ZERO,
             "CB padding-box width should be > 0 (section has explicit width)"
         );
     }
@@ -949,10 +954,35 @@ mod tests {
         // Body is viewport-wide (~579px after default margins), which is wider
         // than the 200px div. Asserting > 200 proves the function used the body
         // CB and did not stop at the static div ancestor.
+        let cb_w = cb.padding_box_size.0.to_f32();
         assert!(
-            cb.padding_box_size.0 > 200.0,
-            "body padding-box width should exceed the 200px static div, confirming body fallback was used; got {}",
-            cb.padding_box_size.0
+            cb_w > 200.0,
+            "body padding-box width should exceed the 200px static div, confirming body fallback was used; got {cb_w}"
+        );
+    }
+
+    #[test]
+    fn resolve_cb_for_absolute_zero_width_body_substitutes_viewport_width() {
+        // A body forced to zero width: `cb_padding_box().0 == 0`, so the body
+        // fallback substitutes the viewport width. Exercises the
+        // `padding_box_size.0 = vw.as_px()` branch (the width sibling of the
+        // height fallback already covered by the tests above).
+        let doc = parse_doc(
+            r#"<!doctype html><html><body style="width:0;">
+                <div style="width:200px;height:100px;">
+                    <span>text</span>
+                </div>
+            </body></html>"#,
+        );
+        let span_id = find_tag(&doc, "span");
+        let span_node = doc.get_node(span_id).unwrap();
+        let result = resolve_cb_for_absolute(doc.deref(), span_node, false, Some((595.0, 842.0)));
+        let cb = result.expect("body fallback should produce Some");
+        // Body width resolved to 0 → replaced with the viewport width (595).
+        assert_eq!(
+            cb.padding_box_size.0,
+            595.0_f32.as_px(),
+            "zero-width body must substitute the viewport width"
         );
     }
 
@@ -977,10 +1007,10 @@ mod tests {
         // Body is viewport-wide (~579px after default margins), which is wider
         // than the 200px section. Asserting > 200 proves the function skipped
         // the relative section and used the body CB instead.
+        let cb_w = cb.padding_box_size.0.to_f32();
         assert!(
-            cb.padding_box_size.0 > 200.0,
-            "fixed: body padding-box width should exceed the 200px relative section, confirming it was skipped; got {}",
-            cb.padding_box_size.0
+            cb_w > 200.0,
+            "fixed: body padding-box width should exceed the 200px relative section, confirming it was skipped; got {cb_w}"
         );
     }
 
@@ -1235,7 +1265,7 @@ mod tests {
         );
         // The body width in a 595-px viewport should be > 0.
         assert!(
-            result.unwrap().padding_box_size.0 > 0.0,
+            result.unwrap().padding_box_size.0 > Px::ZERO,
             "body padding-box width must be positive"
         );
     }
@@ -1307,8 +1337,8 @@ mod tests {
             .get_node(before_id)
             .expect("::before node should be retrievable");
         let ab_cb = AbsCb {
-            padding_box_size: (100.0, 100.0),
-            border_top_left: (0.0, 0.0),
+            padding_box_size: (100.0_f32.as_px(), 100.0_f32.as_px()),
+            border_top_left: (Px::ZERO, Px::ZERO),
             parent_offset_in_cb_bp: (0.0, 0.0),
         };
         let result = try_build_absolute_pseudo_image(before_node, div_node, Some(ab_cb), None);
