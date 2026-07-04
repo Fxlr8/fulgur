@@ -2080,6 +2080,11 @@ pub struct CounterPass {
     /// will consume it. Engine flips this on via
     /// [`with_snapshot_recording`] when bookmarks are emitted.
     record_node_snapshots: bool,
+    /// Running total of counter values stored across all `node_snapshots`,
+    /// enforcing the [`crate::MAX_COUNTER_SNAPSHOT_ENTRIES`] budget so
+    /// per-node chain snapshots cannot accumulate unbounded memory (see the
+    /// recording site in `resolve_node`).
+    snapshot_entries: std::cell::Cell<usize>,
     /// Pass-2 cross-reference table built at the end of pass 1. When
     /// present, `target-counter()` / `target-counters()` / `target-text()`
     /// inside `::before` / `::after` `content` resolve against this map.
@@ -2106,6 +2111,7 @@ impl CounterPass {
             ops_by_node: RefCell::new(Vec::new()),
             node_snapshots: RefCell::new(BTreeMap::new()),
             record_node_snapshots: false,
+            snapshot_entries: std::cell::Cell::new(0),
             anchor_map: None,
         }
     }
@@ -2271,10 +2277,20 @@ impl CounterPass {
         // element that authors target with `bookmark-label`. Gated on
         // `record_node_snapshots` so renders that don't emit bookmarks pay
         // nothing for this clone (fulgur-70c).
-        if self.record_node_snapshots {
-            self.node_snapshots
-                .borrow_mut()
-                .insert(node_id, self.state.borrow().chain_snapshot());
+        if self.record_node_snapshots
+            && self.snapshot_entries.get() < crate::MAX_COUNTER_SNAPSHOT_ENTRIES
+        {
+            // `chain_snapshot` clamps each chain to `MAX_COUNTER_CHAIN_BYTES`
+            // entries; this budget bounds the *aggregate* across nodes, since
+            // storing even a clamped snapshot at every one of N nodes is still
+            // input-proportional in N. Once reached, later nodes record
+            // nothing (their `counter()` / `counters()` in `bookmark-label`
+            // degrade to CSS defaults — acceptable under adversarial input).
+            let snapshot = self.state.borrow().chain_snapshot();
+            let entries: usize = snapshot.values().map(|chain| chain.len()).sum();
+            self.snapshot_entries
+                .set(self.snapshot_entries.get() + entries);
+            self.node_snapshots.borrow_mut().insert(node_id, snapshot);
         }
 
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
@@ -4002,6 +4018,98 @@ mod tests {
         assert!(
             pass.take_node_snapshots().is_empty(),
             "snapshot map must be empty when recording is disabled"
+        );
+    }
+
+    /// DoS hardening (snapshot storage): `chain_snapshot` clones the full
+    /// active chain per node, so N sibling `counter-reset`s would store a
+    /// length-i chain at the i-th node — O(N²) memory. A value beyond
+    /// `MAX_COUNTER_CHAIN_BYTES` entries cannot appear in the byte-capped
+    /// output, so per-node chain length is clamped to that ceiling (lossless
+    /// for any realistic chain, which is far shorter).
+    #[test]
+    fn counter_pass_snapshot_clamps_per_node_chain_length() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        // More siblings than the clamp so the deepest chain is truncated.
+        const SIBLINGS: usize = crate::MAX_COUNTER_CHAIN_BYTES + 500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let max_chain = snapshots
+            .values()
+            .flat_map(|m| m.values())
+            .map(|chain| chain.len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_chain <= crate::MAX_COUNTER_CHAIN_BYTES,
+            "per-node stored chain length {max_chain} exceeded clamp {}",
+            crate::MAX_COUNTER_CHAIN_BYTES
+        );
+    }
+
+    /// DoS hardening (snapshot storage): even with each chain clamped, storing
+    /// a snapshot at every one of N nodes accumulates unbounded memory. The
+    /// aggregate stored-value count is capped by `MAX_COUNTER_SNAPSHOT_ENTRIES`;
+    /// recording stops once the budget is reached.
+    #[test]
+    fn counter_pass_snapshot_bounds_total_stored_entries() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        // Σ(1..=4096) ≈ 8.4M already exceeds the 8M budget, so a few thousand
+        // siblings past the clamp are enough to engage it.
+        const SIBLINGS: usize = crate::MAX_COUNTER_CHAIN_BYTES + 1000;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let total: usize = snapshots
+            .values()
+            .flat_map(|m| m.values())
+            .map(|chain| chain.len())
+            .sum();
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES;
+        assert!(
+            total <= crate::MAX_COUNTER_SNAPSHOT_ENTRIES + slack,
+            "total stored snapshot entries {total} exceeded budget {}",
+            crate::MAX_COUNTER_SNAPSHOT_ENTRIES
+        );
+        assert!(
+            snapshots.len() < SIBLINGS,
+            "budget did not engage: {} snapshots for {SIBLINGS} siblings",
+            snapshots.len()
         );
     }
 

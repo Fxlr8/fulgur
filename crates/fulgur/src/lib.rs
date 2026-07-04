@@ -85,6 +85,24 @@ pub(crate) const MAX_GENERATED_CSS_BYTES: usize = 8 * 1024 * 1024;
 /// realistic document (headings / figures with short labels) is clipped.
 pub(crate) const MAX_OUTLINE_LABEL_BYTES: usize = 8 * 1024 * 1024;
 
+/// Total-storage budget (in counter values) for the per-node counter-chain
+/// snapshots that [`blitz_adapter::CounterPass`] harvests for `BookmarkPass` /
+/// anchor resolution. Once the accumulated stored-value count reaches this
+/// bound, no further node snapshots are recorded.
+///
+/// Snapshot recording clones the *full* active counter chain
+/// (`chain_snapshot`) at every visited element. Sibling `counter-reset`s make
+/// the chain length ≈ the sibling index, so storing it at N nodes is O(N²)
+/// memory — a resource-exhaustion sink independent of any output budget
+/// (`MAX_GENERATED_CSS_BYTES` / `MAX_OUTLINE_LABEL_BYTES` bound output bytes,
+/// not this retained storage). Per-chain length is separately clamped to
+/// [`MAX_COUNTER_CHAIN_BYTES`] entries inside `chain_snapshot` (lossless w.r.t.
+/// the byte-capped output, since a value beyond that many entries cannot
+/// appear in the truncated result); this budget then bounds the aggregate
+/// across all nodes, mirroring the additive-not-multiplicative rationale of
+/// [`MAX_PAGES`]. ~8M values ≈ 32 MiB — far above any realistic document.
+pub(crate) const MAX_COUNTER_SNAPSHOT_ENTRIES: usize = 8 * 1024 * 1024;
+
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;

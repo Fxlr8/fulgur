@@ -799,12 +799,30 @@ impl CounterState {
             .unwrap_or_default()
     }
 
-    /// Snapshot of every counter's full chain (outer→inner). Used by
-    /// `CounterPass::take_node_snapshots` for `BookmarkPass`.
+    /// Snapshot of every counter's chain (outer→inner). Used by
+    /// `CounterPass::take_node_snapshots` for `BookmarkPass` / anchor
+    /// resolution.
+    ///
+    /// Each chain is clamped to [`crate::MAX_COUNTER_CHAIN_BYTES`] entries
+    /// (keeping the outermost, which is what `format_counter_chain` consumes
+    /// first). This snapshot is retained per node, so an unbounded chain would
+    /// make storage O(N²) under sibling `counter-reset` accumulation. The
+    /// clamp is lossless w.r.t. every consumer: `counters()` output is already
+    /// byte-capped at the same ceiling (a value past that many entries can't
+    /// appear), and `counter()` takes the innermost value, which is preserved
+    /// for any chain shorter than the clamp — i.e. every realistic chain.
     pub fn chain_snapshot(&self) -> BTreeMap<String, Vec<i32>> {
         self.stacks
             .iter()
-            .map(|(k, v)| (k.clone(), v.iter().map(|i| i.value).collect()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.iter()
+                        .take(crate::MAX_COUNTER_CHAIN_BYTES)
+                        .map(|i| i.value)
+                        .collect(),
+                )
+            })
             .collect()
     }
 }
