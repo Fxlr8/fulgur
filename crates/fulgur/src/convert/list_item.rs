@@ -33,14 +33,14 @@ pub(super) fn try_convert(
         let marker = list_marker::resolve_list_marker(node, marker_line_height, ctx.assets)
             .unwrap_or(crate::drawables::ListItemMarker::Text {
                 lines: marker_lines,
-                width: marker_width.pt(),
+                width: marker_width,
             });
 
         out.list_items.insert(
             node_id,
             crate::drawables::ListItemEntry {
                 marker,
-                marker_line_height: marker_line_height.pt(),
+                marker_line_height,
                 opacity,
                 visible,
             },
@@ -79,11 +79,11 @@ pub(super) fn try_convert(
 
         let line_height = {
             use ::style::values::computed::font::LineHeight;
-            let font_size_pt = px_to_pt(styles.clone_font_size().used_size().px());
+            let font_size_pt = styles.clone_font_size().used_size().px().px().in_pt();
             match styles.clone_line_height() {
                 LineHeight::Normal => font_size_pt * DEFAULT_LINE_HEIGHT_RATIO,
                 LineHeight::Number(num) => font_size_pt * num.0,
-                LineHeight::Length(value) => px_to_pt(value.0.px()),
+                LineHeight::Length(value) => value.0.px().px().in_pt(),
             }
         };
 
@@ -92,7 +92,7 @@ pub(super) fn try_convert(
                 node_id,
                 crate::drawables::ListItemEntry {
                     marker,
-                    marker_line_height: line_height.pt(),
+                    marker_line_height: line_height,
                     opacity,
                     visible,
                 },
@@ -131,18 +131,21 @@ pub(super) fn try_convert(
         let content_box = compute_content_box(node, &style);
 
         let (font_size_pt, line_height) = if let Some(styles) = node.primary_styles() {
-            let fs = px_to_pt(styles.clone_font_size().used_size().px());
+            let fs = styles.clone_font_size().used_size().px().px().in_pt();
             let lh = {
                 use ::style::values::computed::font::LineHeight;
                 match styles.clone_line_height() {
                     LineHeight::Normal => fs * DEFAULT_LINE_HEIGHT_RATIO,
                     LineHeight::Number(num) => fs * num.0,
-                    LineHeight::Length(value) => px_to_pt(value.0.px()),
+                    LineHeight::Length(value) => value.0.px().px().in_pt(),
                 }
             };
             (fs, lh)
         } else {
-            (px_to_pt(12.0), px_to_pt(12.0) * DEFAULT_LINE_HEIGHT_RATIO)
+            (
+                12.0_f32.px().in_pt(),
+                12.0_f32.px().in_pt() * DEFAULT_LINE_HEIGHT_RATIO,
+            )
         };
 
         let color = get_text_color(doc, node_id);
@@ -174,8 +177,8 @@ pub(super) fn try_convert(
             // Empty <li>: standalone paragraph with just the marker.
             if let Some(item) = empty_li_marker_item {
                 let lines = vec![ShapedLine {
-                    height: line_height.pt(),
-                    baseline: (line_height / DEFAULT_LINE_HEIGHT_RATIO).pt(),
+                    height: line_height,
+                    baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
                     items: vec![item],
                 }];
                 out.paragraphs.insert(
@@ -240,8 +243,8 @@ pub(super) fn try_convert(
             if let Some(item) = marker_item {
                 if !inject_marker_into_first_paragraph(out, &pre_paragraph_ids, item.clone()) {
                     let lines = vec![ShapedLine {
-                        height: line_height.pt(),
-                        baseline: (line_height / DEFAULT_LINE_HEIGHT_RATIO).pt(),
+                        height: line_height,
+                        baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
                         items: vec![item],
                     }];
                     out.paragraphs.insert(

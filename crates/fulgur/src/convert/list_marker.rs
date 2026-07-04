@@ -33,7 +33,7 @@ fn resolve_list_style_image_asset<'a>(
 fn size_raster_marker(
     data: &Arc<Vec<u8>>,
     format: crate::image::ImageFormat,
-    line_height: f32,
+    line_height: crate::units::Pt,
 ) -> Option<(crate::units::Pt, crate::units::Pt)> {
     let (iw, ih) = ImageRender::decode_dimensions(data, format)?;
     let intrinsic_w = (iw as f32).px().in_pt();
@@ -41,7 +41,7 @@ fn size_raster_marker(
     Some(crate::draw_primitives::clamp_marker_size(
         intrinsic_w,
         intrinsic_h,
-        line_height.pt(),
+        line_height,
     ))
 }
 
@@ -55,7 +55,7 @@ fn size_raster_marker(
 /// `extract_marker_lines` — matching CSS spec fallback semantics.
 pub(super) fn resolve_list_marker(
     node: &Node,
-    line_height: f32,
+    line_height: crate::units::Pt,
     assets: Option<&AssetBundle>,
 ) -> Option<ListItemMarker> {
     use crate::image::AssetKind;
@@ -64,7 +64,7 @@ pub(super) fn resolve_list_marker(
     // extract_marker_lines returns 0.0) would clamp image size to 0x0.
     // Return None so the caller falls back to the text marker instead of
     // creating an invisible image marker that suppresses the fallback.
-    if line_height <= 0.0 {
+    if line_height <= crate::units::Pt::ZERO {
         return None;
     }
     let (data, kind) = resolve_list_style_image_asset(node, assets)?;
@@ -90,11 +90,8 @@ pub(super) fn resolve_list_marker(
             let size = tree.size();
             let intrinsic_w = size.width().px().in_pt();
             let intrinsic_h = size.height().px().in_pt();
-            let (width, height) = crate::draw_primitives::clamp_marker_size(
-                intrinsic_w,
-                intrinsic_h,
-                line_height.pt(),
-            );
+            let (width, height) =
+                crate::draw_primitives::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
             let entry = crate::drawables::SvgEntry {
                 tree: Arc::new(tree),
                 width,
@@ -119,7 +116,7 @@ pub(super) fn resolve_list_marker(
 /// cannot be resolved, or the image is SVG.
 pub(super) fn resolve_inside_image_marker(
     node: &Node,
-    first_line_height: f32,
+    first_line_height: crate::units::Pt,
     assets: Option<&AssetBundle>,
 ) -> Option<InlineImage> {
     use crate::image::AssetKind;
@@ -129,7 +126,7 @@ pub(super) fn resolve_inside_image_marker(
     if !crate::blitz_adapter::is_list_position_inside(&list_data.position) {
         return None;
     }
-    if first_line_height <= 0.0 {
+    if first_line_height <= crate::units::Pt::ZERO {
         return None;
     }
 
@@ -160,38 +157,36 @@ pub(super) fn extract_marker_lines(
     doc: &BaseDocument,
     node: &Node,
     ctx: &mut ConvertContext<'_>,
-) -> (Vec<ShapedLine>, f32, f32) {
+) -> (Vec<ShapedLine>, crate::units::Pt, crate::units::Pt) {
     let elem_data = match node.element_data() {
         Some(d) => d,
-        None => return (Vec::new(), 0.0, 0.0),
+        None => return (Vec::new(), crate::units::Pt::ZERO, crate::units::Pt::ZERO),
     };
     let list_item_data = match &elem_data.list_item_data {
         Some(d) => d,
-        None => return (Vec::new(), 0.0, 0.0),
+        None => return (Vec::new(), crate::units::Pt::ZERO, crate::units::Pt::ZERO),
     };
     let Some(parley_layout) =
         crate::blitz_adapter::list_position_outside_layout(&list_item_data.position)
     else {
-        return (Vec::new(), 0.0, 0.0);
+        return (Vec::new(), crate::units::Pt::ZERO, crate::units::Pt::ZERO);
     };
 
     let marker_text = marker_to_string(&list_item_data.marker);
 
     let mut shaped_lines = Vec::new();
-    let mut max_width: f32 = 0.0;
-    let mut line_height_pt: f32 = 0.0;
+    let mut max_width = crate::units::Pt::ZERO;
+    let mut line_height_pt = crate::units::Pt::ZERO;
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
-        if line_height_pt == 0.0 {
-            // Stays f32: this feeds the f32 marker-row height returned from
-            // this fn, a distinct sink from the `Pt`-typed `ShapedLine.height`
-            // below (`.px().in_pt()`). The dual conversion idiom is intentional,
-            // not an inconsistency.
-            line_height_pt = px_to_pt(metrics.line_height);
+        if line_height_pt == crate::units::Pt::ZERO {
+            // Marker-row height returned from this fn (a distinct value from the
+            // per-line `ShapedLine.height` below, though both are now `Pt`).
+            line_height_pt = metrics.line_height.px().in_pt();
         }
         let mut items = Vec::new();
-        let mut line_width: f32 = 0.0;
+        let mut line_width = crate::units::Pt::ZERO;
         let mut prev_run_key = usize::MAX;
         let mut run_glyph_offset = 0usize;
 
@@ -236,7 +231,7 @@ pub(super) fn extract_marker_lines(
                         )
                     });
                     run_glyph_offset += 1;
-                    line_width += px_to_pt(g.advance);
+                    line_width += g.advance.px().in_pt();
                     glyphs.push(ShapedGlyph {
                         id: g.id,
                         x_advance: g.advance / font_size_parley,
@@ -347,7 +342,7 @@ pub(super) fn shape_marker_with_skrifa(
     marker: &Marker,
     font_data: &Arc<Vec<u8>>,
     font_index: u32,
-    font_size: f32,
+    font_size: crate::units::Pt,
     color: [u8; 4],
 ) -> Option<ShapedGlyphRun> {
     let text = marker_skrifa_text(marker);
@@ -355,7 +350,8 @@ pub(super) fn shape_marker_with_skrifa(
     let font_ref = skrifa::FontRef::from_index(font_data, font_index).ok()?;
     let charmap = font_ref.charmap();
     let glyph_metrics = font_ref.glyph_metrics(
-        skrifa::instance::Size::new(font_size),
+        // skrifa external boundary: font size is a raw f32 in font-metric space.
+        skrifa::instance::Size::new(font_size.to_f32()),
         skrifa::instance::LocationRef::default(),
     );
 
@@ -367,7 +363,7 @@ pub(super) fn shape_marker_with_skrifa(
         let advance = glyph_metrics.advance_width(gid).unwrap_or(0.0);
         glyphs.push(ShapedGlyph {
             id: gid.to_u32(),
-            x_advance: advance / font_size,
+            x_advance: advance / font_size.to_f32(),
             x_offset: 0.0,
             y_offset: 0.0,
             text_range: byte_offset..byte_offset + ch_len,
@@ -378,7 +374,7 @@ pub(super) fn shape_marker_with_skrifa(
     Some(ShapedGlyphRun {
         font_data: Arc::clone(font_data),
         font_index,
-        font_size: font_size.pt(),
+        font_size,
         color,
         decoration: TextDecoration::default(),
         glyphs,
@@ -426,7 +422,7 @@ mod tests {
     #[test]
     fn size_raster_marker_valid_png_within_line_height_passes_through() {
         // 1×1 px PNG → intrinsic 0.75×0.75 pt; line_height=12 → no downscale.
-        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 12.0);
+        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 12.0_f32.pt());
         assert!(result.is_some());
         let (w, h) = result.unwrap();
         let (w, h) = (w.to_f32(), h.to_f32());
@@ -437,7 +433,7 @@ mod tests {
     #[test]
     fn size_raster_marker_invalid_bytes_returns_none() {
         let bad = Arc::new(vec![0u8; 8]);
-        let result = size_raster_marker(&bad, ImageFormat::Png, 12.0);
+        let result = size_raster_marker(&bad, ImageFormat::Png, 12.0_f32.pt());
         assert!(result.is_none());
     }
 
@@ -445,7 +441,7 @@ mod tests {
     fn size_raster_marker_small_line_height_scales_down() {
         // Intrinsic 0.75×0.75 pt, line_height=0.5 → scale=0.5/0.75≈0.667
         // → result height clamped to line_height, width scaled proportionally.
-        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 0.5);
+        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 0.5_f32.pt());
         assert!(result.is_some());
         let (w, h) = result.unwrap();
         let (w, h) = (w.to_f32(), h.to_f32());
@@ -553,8 +549,13 @@ mod tests {
     #[test]
     fn shape_marker_with_skrifa_invalid_font_returns_none() {
         let bad_font = Arc::new(vec![0u8; 16]);
-        let result =
-            shape_marker_with_skrifa(&Marker::Char('•'), &bad_font, 0, 12.0, [0, 0, 0, 255]);
+        let result = shape_marker_with_skrifa(
+            &Marker::Char('•'),
+            &bad_font,
+            0,
+            12.0_f32.pt(),
+            [0, 0, 0, 255],
+        );
         assert!(result.is_none());
     }
 
@@ -562,8 +563,13 @@ mod tests {
     fn shape_marker_with_skrifa_char_produces_two_glyphs() {
         // Marker::Char('•') → skrifa text "• " (2 chars = 2 glyphs).
         let font_data = load_noto_sans_ttf();
-        let result =
-            shape_marker_with_skrifa(&Marker::Char('•'), &font_data, 0, 12.0, [255, 0, 0, 255]);
+        let result = shape_marker_with_skrifa(
+            &Marker::Char('•'),
+            &font_data,
+            0,
+            12.0_f32.pt(),
+            [255, 0, 0, 255],
+        );
         assert!(result.is_some());
         let run = result.unwrap();
         assert_eq!(run.glyphs.len(), 2, "bullet + trailing space = 2 glyphs");
@@ -582,7 +588,7 @@ mod tests {
             &Marker::String("1. ".to_string()),
             &font_data,
             0,
-            10.0,
+            10.0_f32.pt(),
             [0, 0, 0, 255],
         );
         assert!(result.is_some());
@@ -600,7 +606,7 @@ mod tests {
             &Marker::String("A".to_string()),
             &font_data,
             0,
-            12.0,
+            12.0_f32.pt(),
             [0, 0, 0, 255],
         );
         let run = result.unwrap();
@@ -621,7 +627,7 @@ mod tests {
             &Marker::String("AB".to_string()),
             &font_data,
             0,
-            12.0,
+            12.0_f32.pt(),
             [0, 0, 0, 255],
         );
         let run = result.unwrap();
