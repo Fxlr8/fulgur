@@ -3356,7 +3356,7 @@ fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
 /// Cached max-content width and render Pageable for margin boxes.
 /// Measure cache: (html, page_height as bits) → max-content width.
 /// Render cache: (html, final_width as bits, final_height as bits) → Pageable.
-type MeasureCache = HashMap<(String, u32, u32), f32>;
+type MeasureCache = HashMap<(String, u32, u32), crate::units::Pt>;
 type RenderCache = HashMap<
     (String, u32, u32),
     (
@@ -3386,7 +3386,7 @@ pub(crate) struct MarginBoxRenderer<'a> {
     pub running_states: Vec<BTreeMap<String, crate::pagination_layout::PageRunningState>>,
     pub counter_states: Vec<BTreeMap<String, i32>>,
     pub measure_cache: MeasureCache,
-    pub height_cache: HashMap<(String, u32, u32), f32>,
+    pub height_cache: HashMap<(String, u32, u32), crate::units::Pt>,
     pub render_cache: RenderCache,
     /// fulgur-qgy7: per-page implicit `href` for
     /// `target-*(attr(href), ...)` evaluated inside `@page` margin
@@ -3630,7 +3630,8 @@ impl<'a> MarginBoxRenderer<'a> {
         }
 
         // Stage 2: distribute each edge's boxes against the page rect.
-        let mut edge_defined: BTreeMap<Edge, BTreeMap<MarginBoxPosition, f32>> = BTreeMap::new();
+        let mut edge_defined: BTreeMap<Edge, BTreeMap<MarginBoxPosition, crate::units::Pt>> =
+            BTreeMap::new();
         for (&pos, html) in &resolved_htmls {
             let edge = match pos.edge() {
                 Some(e) => e,
@@ -3679,7 +3680,11 @@ impl<'a> MarginBoxRenderer<'a> {
                 .copied()
                 .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
 
-            let cache_key = (html.clone(), width_key(rect.width), width_key(rect.height));
+            let cache_key = (
+                html.clone(),
+                width_key(rect.width.to_f32()),
+                width_key(rect.height.to_f32()),
+            );
             if !self.render_cache.contains_key(&cache_key) {
                 let render_html = format!(
                     "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
@@ -3687,15 +3692,15 @@ impl<'a> MarginBoxRenderer<'a> {
                 );
                 let mut render_doc = crate::blitz_adapter::parse_and_layout(
                     &render_html,
-                    crate::convert::pt_to_px(rect.width),
-                    crate::convert::pt_to_px(rect.height),
+                    rect.width.in_px().to_f32(),
+                    rect.height.in_px().to_f32(),
                     self.font_data,
                     self.system_fonts,
                 );
                 let empty_column_styles = crate::column_css::ColumnStyleTable::new();
                 let geometry = crate::pagination_layout::run_pass_with_break_styles(
                     &mut render_doc,
-                    crate::convert::pt_to_px(rect.height),
+                    rect.height.in_px().to_f32(),
                     &empty_column_styles,
                 );
                 let dummy_store = RunningElementStore::new();
@@ -3721,7 +3726,13 @@ impl<'a> MarginBoxRenderer<'a> {
             if let Some((drawables, geometry)) = self.render_cache.get(&cache_key) {
                 if let Some(root_id) = drawables.root_id {
                     if let Some(root_block) = drawables.block_styles.get(&root_id) {
-                        paint_root_block_v2(canvas, root_block, rect.x, rect.y, None);
+                        paint_root_block_v2(
+                            canvas,
+                            root_block,
+                            rect.x.to_f32(),
+                            rect.y.to_f32(),
+                            None,
+                        );
                     }
                 }
                 // `body_offset_pt` is (0, 0) here because the wrapper HTML fixes
@@ -3739,8 +3750,8 @@ impl<'a> MarginBoxRenderer<'a> {
                 draw_v2_page(
                     canvas,
                     0,
-                    rect.x,
-                    rect.y,
+                    rect.x.to_f32(),
+                    rect.y.to_f32(),
                     geometry,
                     drawables,
                     &txd,
@@ -3756,12 +3767,12 @@ impl<'a> MarginBoxRenderer<'a> {
 /// Get a layout dimension of the first non-zero child of `<body>` in a Blitz document.
 /// When `use_width` is true, returns max-content width; otherwise returns height.
 ///
-/// Returned value is in PDF pt. Blitz's internal layout is in CSS px, so we
-/// multiply by `PX_TO_PT` on the way out — matching the convention used at
-/// the convert.rs boundary (`layout_in_pt`). This keeps the GCPM margin-box
-/// measure caches in the same unit (pt) as `page_size` / `margin`, which
-/// `compute_edge_layout` assumes when distributing along the edge.
-fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> f32 {
+/// Returns a [`crate::units::Pt`]. Blitz's internal layout is in CSS px, so the
+/// raw Taffy size is tagged `Px` and converted with `Px::in_pt` on the way out —
+/// matching the convention used at the convert.rs boundary (`layout_in_pt`). This
+/// keeps the GCPM margin-box measure caches in the same unit (pt) as `page_size` /
+/// `margin`, which `compute_edge_layout` assumes when distributing along the edge.
+fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> crate::units::Pt {
     use std::ops::Deref;
     let root = doc.root_element();
     let base_doc = doc.deref();
@@ -3790,7 +3801,7 @@ fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> 
         }
         0.0
     };
-    crate::convert::px_to_pt(px)
+    px.as_px().in_pt()
 }
 
 /// Escape a string for use in an HTML attribute value.
