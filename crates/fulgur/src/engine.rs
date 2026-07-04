@@ -1461,10 +1461,10 @@ mod tests {
     fn frag_on_page(page_index: u32) -> crate::pagination_layout::Fragment {
         crate::pagination_layout::Fragment {
             page_index,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 0.0_f32.px(),
-            height: 0.0_f32.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 0.0_f32.as_px(),
+            height: 0.0_f32.as_px(),
         }
     }
 

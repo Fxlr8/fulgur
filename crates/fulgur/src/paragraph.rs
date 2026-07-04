@@ -474,7 +474,7 @@ fn draw_line_decorations(
         if let Some(last) = spans.last_mut() {
             let last_end = last.x + last.width;
             let gap = (run_x - last_end).abs();
-            if last.decoration.same_appearance(&run.decoration) && gap < 0.5_f32.pt() {
+            if last.decoration.same_appearance(&run.decoration) && gap < 0.5_f32.as_pt() {
                 last.width = (run_x + run_width) - last.x;
                 continue;
             }
@@ -495,7 +495,7 @@ fn draw_line_decorations(
             get_decoration_metrics(&span.font_data, span.font_index, span.font_size.to_f32());
 
         if span.decoration.line.contains(TextDecorationLine::UNDERLINE) {
-            let line_y = baseline_y + metrics.underline_offset.pt();
+            let line_y = baseline_y + metrics.underline_offset.as_pt();
             draw_decoration_line(
                 canvas,
                 span.x.to_f32(),
@@ -507,7 +507,7 @@ fn draw_line_decorations(
             );
         }
         if span.decoration.line.contains(TextDecorationLine::OVERLINE) {
-            let line_y = baseline_y - metrics.overline_pos.pt();
+            let line_y = baseline_y - metrics.overline_pos.as_pt();
             draw_decoration_line(
                 canvas,
                 span.x.to_f32(),
@@ -523,7 +523,7 @@ fn draw_line_decorations(
             .line
             .contains(TextDecorationLine::LINE_THROUGH)
         {
-            let line_y = baseline_y - metrics.strikethrough_offset.pt();
+            let line_y = baseline_y - metrics.strikethrough_offset.as_pt();
             draw_decoration_line(
                 canvas,
                 span.x.to_f32(),
@@ -835,8 +835,10 @@ pub fn draw_shaped_lines(
                         let off_x = ox.to_f32() - geo_x_pt;
                         let off_y = oy.to_f32() - geo_y_pt;
                         let transform = krilla::geom::Transform::from_translate(off_x, off_y);
-                        let link_affine =
-                            crate::draw_primitives::Affine2D::translation(off_x.pt(), off_y.pt());
+                        let link_affine = crate::draw_primitives::Affine2D::translation(
+                            off_x.as_pt(),
+                            off_y.as_pt(),
+                        );
                         crate::draw_primitives::draw_with_opacity(canvas, ib.opacity, |canvas| {
                             if let Some(lc) = canvas.link_collector.as_deref_mut() {
                                 lc.push_transform(link_affine);
@@ -939,11 +941,11 @@ pub fn recalculate_line_box(line: &mut ShapedLine, metrics: &LineFontMetrics) {
                 continue;
             }
             VerticalAlign::Baseline => baseline - img.height,
-            VerticalAlign::Middle => baseline - metrics.x_height.pt() / 2.0 - img.height / 2.0,
-            VerticalAlign::Sub => baseline + metrics.subscript_offset.pt() - img.height,
-            VerticalAlign::Super => baseline - metrics.superscript_offset.pt() - img.height,
-            VerticalAlign::TextTop => baseline - metrics.ascent.pt(),
-            VerticalAlign::TextBottom => baseline + metrics.descent.pt() - img.height,
+            VerticalAlign::Middle => baseline - metrics.x_height.as_pt() / 2.0 - img.height / 2.0,
+            VerticalAlign::Sub => baseline + metrics.subscript_offset.as_pt() - img.height,
+            VerticalAlign::Super => baseline - metrics.superscript_offset.as_pt() - img.height,
+            VerticalAlign::TextTop => baseline - metrics.ascent.as_pt(),
+            VerticalAlign::TextBottom => baseline + metrics.descent.as_pt() - img.height,
             VerticalAlign::Length(v) => baseline - v - img.height,
             VerticalAlign::Percent(p) => baseline - (original_height * p) - img.height,
         };
@@ -1008,8 +1010,8 @@ mod tests {
         InlineImage {
             data: Arc::new(TEST_PNG.to_vec()),
             format: ImageFormat::Png,
-            width: width.pt(),
-            height: height.pt(),
+            width: width.as_pt(),
+            height: height.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: va,
             opacity: 1.0,
@@ -1032,8 +1034,8 @@ mod tests {
     /// A text-only line: height=16, baseline=12.
     fn text_line(height: f32, baseline: f32) -> ShapedLine {
         ShapedLine {
-            height: height.pt(),
-            baseline: baseline.pt(),
+            height: height.as_pt(),
+            baseline: baseline.as_pt(),
             items: Vec::new(),
         }
     }
@@ -1060,8 +1062,8 @@ mod tests {
             alt_text: None,
         });
         let mut img = make_inline_image(20.0, 10.0, VerticalAlign::Baseline);
-        img.x_offset = 2.0_f32.pt();
-        img.computed_y = 3.0_f32.pt();
+        img.x_offset = 2.0_f32.as_pt();
+        img.computed_y = 3.0_f32.as_pt();
         img.link = Some(Arc::clone(&link));
 
         let mut line = text_line(16.0, 12.0);
@@ -1082,7 +1084,7 @@ mod tests {
                 link_run_node_id: None,
             };
             // Draw origin (5, 7) pt; rect must land at (5+2, 7+3, 20, 10).
-            draw_shaped_lines(&mut canvas, &[line], 5.0_f32.pt(), 7.0_f32.pt(), None);
+            draw_shaped_lines(&mut canvas, &[line], 5.0_f32.as_pt(), 7.0_f32.as_pt(), None);
         }
 
         let occ = lc.take_page(0);
@@ -1320,7 +1322,7 @@ mod tests {
         line.items.push(LineItem::Image(make_inline_image(
             10.0,
             6.0,
-            VerticalAlign::Length(3.0_f32.pt()),
+            VerticalAlign::Length(3.0_f32.as_pt()),
         )));
         let m = default_metrics();
         recalculate_line_box(&mut line, &m);
@@ -1397,7 +1399,7 @@ mod tests {
         )));
 
         // Simulate the caller's coordinate conversion:
-        let y_acc = 16.0_f32.pt(); // first line height
+        let y_acc = 16.0_f32.as_pt(); // first line height
         line2.baseline -= y_acc; // now line-local: 12.0
         let m = default_metrics();
         recalculate_line_box(&mut line2, &m);
@@ -1455,9 +1457,9 @@ mod tests {
     fn line_item_inline_box_variant_can_be_constructed() {
         let item = LineItem::InlineBox(InlineBoxItem {
             node_id: Some(42),
-            width: 50.0_f32.pt(),
-            height: 20.0_f32.pt(),
-            x_offset: 10.0_f32.pt(),
+            width: 50.0_f32.as_pt(),
+            height: 20.0_f32.as_pt(),
+            x_offset: 10.0_f32.as_pt(),
             computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
@@ -1481,7 +1483,7 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
-            font_size: 10.0_f32.pt(),
+            font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
@@ -1499,10 +1501,10 @@ mod tests {
         // InlineBox variant — node_id: Some(1).
         let ib = LineItem::InlineBox(InlineBoxItem {
             node_id: Some(1),
-            width: 10.0_f32.pt(),
-            height: 5.0_f32.pt(),
-            x_offset: 1.0_f32.pt(),
-            computed_y: 2.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 5.0_f32.as_pt(),
+            x_offset: 1.0_f32.as_pt(),
+            computed_y: 2.0_f32.as_pt(),
             link: None,
             opacity: 1.0,
             visible: true,
@@ -1522,7 +1524,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
-            font_size: 12.0_f32.pt(),
+            font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
@@ -1683,16 +1685,16 @@ mod tests {
     #[test]
     fn recalculate_line_box_skips_inline_box_items() {
         let mut line = ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![
                 LineItem::Image(make_inline_image(10.0, 6.0, VerticalAlign::Top)),
                 LineItem::InlineBox(InlineBoxItem {
                     node_id: None,
-                    width: 30.0_f32.pt(),
-                    height: 20.0_f32.pt(),
+                    width: 30.0_f32.as_pt(),
+                    height: 20.0_f32.as_pt(),
                     x_offset: crate::units::Pt::ZERO,
-                    computed_y: 3.0_f32.pt(),
+                    computed_y: 3.0_f32.as_pt(),
                     link: None,
                     opacity: 1.0,
                     visible: true,
@@ -1735,7 +1737,7 @@ mod link_span_tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
-            font_size: 12.0_f32.pt(),
+            font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),

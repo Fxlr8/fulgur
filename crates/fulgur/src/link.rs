@@ -241,7 +241,7 @@ mod tests {
             let mut registry = DestinationRegistry::new();
             // Use page 0 so the destination is valid within this single-page document.
             registry.set_current_page(0);
-            registry.record("section1", 0.0.pt(), 120.0.pt());
+            registry.record("section1", 0.0.as_pt(), 120.0.as_pt());
             let occ = int_occ("section1", vec![make_quad(10.0, 40.0, 80.0, 12.0)]);
             emit_link_annotations(&mut page, &[occ], &registry, None);
         }
@@ -318,7 +318,7 @@ mod tests {
             let mut page = doc.start_page_with(page_settings());
             let mut registry = DestinationRegistry::new();
             registry.set_current_page(0);
-            registry.record("anchor", 0.0.pt(), 300.0.pt());
+            registry.record("anchor", 0.0.as_pt(), 300.0.as_pt());
             let occs = vec![
                 ext_occ("https://a.example", vec![make_quad(0.0, 0.0, 60.0, 12.0)]), // emitted
                 int_occ("anchor", vec![make_quad(0.0, 20.0, 60.0, 12.0)]), // emitted (resolved)

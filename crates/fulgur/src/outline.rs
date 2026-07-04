@@ -131,10 +131,10 @@ mod tests {
     #[test]
     fn simple_hierarchy() {
         let entries = vec![
-            entry(0, 10.0.pt(), 1, "Chapter 1"),
-            entry(0, 50.0.pt(), 2, "Section 1.1"),
-            entry(1, 10.0.pt(), 2, "Section 1.2"),
-            entry(2, 10.0.pt(), 1, "Chapter 2"),
+            entry(0, 10.0.as_pt(), 1, "Chapter 1"),
+            entry(0, 50.0.as_pt(), 2, "Section 1.1"),
+            entry(1, 10.0.as_pt(), 2, "Section 1.2"),
+            entry(2, 10.0.as_pt(), 1, "Chapter 2"),
         ];
         let tree = build_tree(&entries);
         let debug: Vec<_> = tree.iter().map(to_debug).collect();
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn orphan_h3_becomes_top_level_when_stack_empty() {
-        let entries = vec![entry(0, 10.0.pt(), 3, "Stray")];
+        let entries = vec![entry(0, 10.0.as_pt(), 3, "Stray")];
         let tree = build_tree(&entries);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].label, "Stray");
@@ -182,7 +182,10 @@ mod tests {
 
     #[test]
     fn skipped_level_nests_under_nearest_shallower() {
-        let entries = vec![entry(0, 10.0.pt(), 1, "A"), entry(0, 50.0.pt(), 3, "A.x")];
+        let entries = vec![
+            entry(0, 10.0.as_pt(), 1, "A"),
+            entry(0, 50.0.as_pt(), 3, "A.x"),
+        ];
         let tree = build_tree(&entries);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].children.len(), 1);

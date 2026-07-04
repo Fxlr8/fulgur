@@ -388,7 +388,7 @@ fn pageable_last_baseline_from_drawables(
             // recursively returns its inner baseline relative to its
             // own top edge; the container's own `top_inset` is folded
             // in by branch (1) above.
-            return Some(child.final_layout.location.y.px().in_pt() + inner);
+            return Some(child.final_layout.location.y.as_px().in_pt() + inner);
         }
     }
     None
@@ -472,7 +472,7 @@ pub(super) fn extract_paragraph(
                     let font_index = font_ref.index;
                     let font_arc = ctx.get_or_insert_font(font_ref);
                     let font_size_parley = run.font_size();
-                    let font_size = font_size_parley.px().in_pt();
+                    let font_size = font_size_parley.as_px().in_pt();
 
                     let brush = &glyph_run.style().brush;
                     let color = get_text_color(doc, brush.id);
@@ -521,7 +521,7 @@ pub(super) fn extract_paragraph(
 
                     if !glyphs.is_empty() {
                         let run_text = text.clone();
-                        let run_x_offset = glyph_run.offset().px().in_pt();
+                        let run_x_offset = glyph_run.offset().as_px().in_pt();
                         items.push(LineItem::Text(ShapedGlyphRun {
                             font_data: font_arc,
                             font_index,
@@ -567,7 +567,7 @@ pub(super) fn extract_paragraph(
                         .insert(node_id, descendants);
 
                     let link = ctx.link_cache.lookup(doc, node_id);
-                    let height = positioned.height.px().in_pt();
+                    let height = positioned.height.as_px().in_pt();
                     // Read baseline from `out` (Drawables). The Drawables-aware
                     // lookup queries `out.paragraphs[node_id]` (and
                     // `block_styles[node_id]` for top-inset) directly.
@@ -576,7 +576,7 @@ pub(super) fn extract_paragraph(
                             .map(|bo| height - bo)
                             .unwrap_or(crate::units::Pt::ZERO);
                     let computed_y =
-                        positioned.y.px().in_pt() - accumulated_line_top + baseline_shift;
+                        positioned.y.as_px().in_pt() - accumulated_line_top + baseline_shift;
                     let visible = doc
                         .get_node(node_id)
                         .map(super::style::extract_opacity_visible)
@@ -584,9 +584,9 @@ pub(super) fn extract_paragraph(
                         .unwrap_or(true);
                     items.push(LineItem::InlineBox(InlineBoxItem {
                         node_id: content,
-                        width: positioned.width.px().in_pt(),
+                        width: positioned.width.as_px().in_pt(),
                         height,
-                        x_offset: positioned.x.px().in_pt(),
+                        x_offset: positioned.x.as_px().in_pt(),
                         computed_y,
                         link,
                         opacity: 1.0,
@@ -596,10 +596,10 @@ pub(super) fn extract_paragraph(
             }
         }
 
-        let line_height = metrics.line_height.px().in_pt();
+        let line_height = metrics.line_height.as_px().in_pt();
         shaped_lines.push(ShapedLine {
             height: line_height,
-            baseline: metrics.baseline.px().in_pt(),
+            baseline: metrics.baseline.as_px().in_pt(),
             items,
         });
         accumulated_line_top += line_height;
@@ -643,8 +643,8 @@ mod tests {
     /// `px_to_pt(parley_metrics.baseline)` — a paragraph-relative value).
     fn text_line(height: f32, baseline: f32) -> ShapedLine {
         ShapedLine {
-            height: height.pt(),
-            baseline: baseline.pt(),
+            height: height.as_pt(),
+            baseline: baseline.as_pt(),
             items: Vec::new(),
         }
     }
@@ -653,7 +653,7 @@ mod tests {
         LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(font_data),
             font_index: 0,
-            font_size: 12.0_f32.pt(),
+            font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
@@ -667,8 +667,8 @@ mod tests {
         LineItem::Image(InlineImage {
             data: Arc::new(vec![]),
             format: ImageFormat::Png,
-            width: width.pt(),
-            height: height.pt(),
+            width: width.as_pt(),
+            height: height.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: va,
             opacity: 1.0,
@@ -681,8 +681,8 @@ mod tests {
     fn make_inline_box() -> LineItem {
         LineItem::InlineBox(InlineBoxItem {
             node_id: None,
-            width: 10.0_f32.pt(),
-            height: 10.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             computed_y: crate::units::Pt::ZERO,
             link: None,
@@ -1104,8 +1104,8 @@ mod tests {
             lines: baselines
                 .iter()
                 .map(|&b| ShapedLine {
-                    height: 16.0_f32.pt(),
-                    baseline: b.pt(),
+                    height: 16.0_f32.as_pt(),
+                    baseline: b.as_pt(),
                     items: vec![],
                 })
                 .collect(),
@@ -1269,7 +1269,7 @@ mod tests {
         let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
         assert_eq!(
             result,
-            Some(12.0_f32.pt()),
+            Some(12.0_f32.as_pt()),
             "no overflow clip + paragraph entry → Some(baseline)"
         );
     }
@@ -1286,7 +1286,7 @@ mod tests {
         let result = super::inline_box_baseline_offset_from_drawables(doc.deref(), &out, node_id);
         assert_eq!(
             result,
-            Some(9.0_f32.pt()),
+            Some(9.0_f32.as_pt()),
             "visible overflow must not short-circuit"
         );
     }
@@ -1321,7 +1321,7 @@ mod tests {
         let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
         assert_eq!(
             result,
-            Some(26.0_f32.pt()),
+            Some(26.0_f32.as_pt()),
             "must return last line baseline (26.0), not first (12.0)"
         );
     }
@@ -1336,8 +1336,8 @@ mod tests {
         out.paragraphs
             .insert(node_id, make_paragraph_entry(&[12.0]));
         let mut entry = make_block_entry_plain();
-        entry.style.border_widths[0] = 4.0_f32.pt(); // top border
-        entry.style.padding[0] = 2.0_f32.pt(); // top padding
+        entry.style.border_widths[0] = 4.0_f32.as_pt(); // top border
+        entry.style.padding[0] = 2.0_f32.as_pt(); // top padding
         out.block_styles.insert(node_id, entry);
         let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, node_id, 0);
         // top_inset = 4 + 2 = 6; baseline = 12 → Some(18).

@@ -180,8 +180,8 @@ pub(super) fn build_inline_pseudo_image(
     Some(InlineImage {
         data,
         format,
-        width: w.pt(),
-        height: h.pt(),
+        width: w.as_pt(),
+        height: h.as_pt(),
         x_offset: crate::units::Pt::ZERO,
         vertical_align,
         opacity,
@@ -276,8 +276,8 @@ mod tests {
         InlineImage {
             data: Arc::new(vec![]),
             format: ImageFormat::Png,
-            width: width.pt(),
-            height: 10.0_f32.pt(),
+            width: width.as_pt(),
+            height: 10.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: VerticalAlign::Baseline,
             opacity: 1.0,
@@ -289,22 +289,22 @@ mod tests {
 
     fn empty_line() -> ShapedLine {
         ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![],
         }
     }
 
     fn image_line(x_offset: f32, width: f32) -> ShapedLine {
         ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![LineItem::Image(InlineImage {
                 data: Arc::new(vec![]),
                 format: ImageFormat::Png,
-                width: width.pt(),
-                height: 10.0_f32.pt(),
-                x_offset: x_offset.pt(),
+                width: width.as_pt(),
+                height: 10.0_f32.as_pt(),
+                x_offset: x_offset.as_pt(),
                 vertical_align: VerticalAlign::Baseline,
                 opacity: 1.0,
                 visible: true,
@@ -383,7 +383,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 10.0_f32.pt(),
+            font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![ShapedGlyph {
@@ -394,12 +394,12 @@ mod tests {
                 text_range: 0..1,
             }],
             text: "a".to_string(),
-            x_offset: 3.0_f32.pt(),
+            x_offset: 3.0_f32.as_pt(),
             link: None,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![LineItem::Text(run)],
         }];
         super::inject_inline_pseudo_images(&mut lines, Some(make_image(20.0)), None);
@@ -416,17 +416,17 @@ mod tests {
     fn before_shifts_inline_box_items() {
         let ib = InlineBoxItem {
             node_id: None,
-            width: 30.0_f32.pt(),
-            height: 10.0_f32.pt(),
-            x_offset: 5.0_f32.pt(),
+            width: 30.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
+            x_offset: 5.0_f32.as_pt(),
             computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![LineItem::InlineBox(ib)],
         }];
         super::inject_inline_pseudo_images(&mut lines, Some(make_image(10.0)), None);
@@ -484,7 +484,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 4.0_f32.pt(),
+            font_size: 4.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![
@@ -504,12 +504,12 @@ mod tests {
                 },
             ],
             text: "ab".to_string(),
-            x_offset: 2.0_f32.pt(),
+            x_offset: 2.0_f32.as_pt(),
             link: None,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![LineItem::Text(run)],
         }];
         super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(20.0)));
@@ -530,17 +530,17 @@ mod tests {
         // x_offset=3, width=7 → end=10
         let ib = InlineBoxItem {
             node_id: None,
-            width: 7.0_f32.pt(),
-            height: 5.0_f32.pt(),
-            x_offset: 3.0_f32.pt(),
+            width: 7.0_f32.as_pt(),
+            height: 5.0_f32.as_pt(),
+            x_offset: 3.0_f32.as_pt(),
             computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
             visible: true,
         };
         let mut lines = vec![ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![LineItem::InlineBox(ib)],
         }];
         super::inject_inline_pseudo_images(&mut lines, None, Some(make_image(5.0)));
@@ -584,14 +584,14 @@ mod tests {
         // item3: Image x=1 w=8 → end=9
         // fold(f32::max) must yield 13
         let mut lines = vec![ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![
                 LineItem::Image(InlineImage {
                     data: Arc::new(vec![]),
                     format: ImageFormat::Png,
-                    width: 5.0_f32.pt(),
-                    height: 10.0_f32.pt(),
+                    width: 5.0_f32.as_pt(),
+                    height: 10.0_f32.as_pt(),
                     x_offset: crate::units::Pt::ZERO,
                     vertical_align: VerticalAlign::Baseline,
                     opacity: 1.0,
@@ -601,9 +601,9 @@ mod tests {
                 }),
                 LineItem::InlineBox(InlineBoxItem {
                     node_id: None,
-                    width: 10.0_f32.pt(),
-                    height: 5.0_f32.pt(),
-                    x_offset: 3.0_f32.pt(),
+                    width: 10.0_f32.as_pt(),
+                    height: 5.0_f32.as_pt(),
+                    x_offset: 3.0_f32.as_pt(),
                     computed_y: crate::units::Pt::ZERO,
                     link: None,
                     opacity: 1.0,
@@ -612,9 +612,9 @@ mod tests {
                 LineItem::Image(InlineImage {
                     data: Arc::new(vec![]),
                     format: ImageFormat::Png,
-                    width: 8.0_f32.pt(),
-                    height: 10.0_f32.pt(),
-                    x_offset: 1.0_f32.pt(),
+                    width: 8.0_f32.as_pt(),
+                    height: 10.0_f32.as_pt(),
+                    x_offset: 1.0_f32.as_pt(),
                     vertical_align: VerticalAlign::Baseline,
                     opacity: 1.0,
                     visible: true,

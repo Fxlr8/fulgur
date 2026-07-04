@@ -11,7 +11,8 @@
 //! been removed (P2a, fulgur-2map.8); these newtypes are still not
 //! re-exported at the crate root.
 //!
-//! - Construct with [`F32Units::px`] / [`F32Units::pt`] (e.g. `frag.x.px()`).
+//! - Construct with [`F32Units::as_px`] / [`F32Units::as_pt`] (e.g.
+//!   `frag.x.as_px()`).
 //! - Convert with [`Px::in_pt`] / [`Pt::in_px`] — the only place [`PX_TO_PT`]
 //!   is used.
 //! - Arithmetic is same-unit only; mixing units is a compile error.
@@ -22,12 +23,12 @@
 //!
 //! ```compile_fail
 //! use fulgur::units::F32Units;
-//! let _ = 1.0_f32.px() + 1.0_f32.pt();
+//! let _ = 1.0_f32.as_px() + 1.0_f32.as_pt();
 //! ```
 //!
 //! ```compile_fail
 //! use fulgur::units::F32Units;
-//! let _ = 1.0_f32.pt() + 1.0_f32.px();
+//! let _ = 1.0_f32.as_pt() + 1.0_f32.as_px();
 //! ```
 //!
 //! # Reading the vocabulary in a diff
@@ -37,26 +38,26 @@
 //! can still tell a raw external `f32` from an already-typed value. Read the
 //! **first** conversion applied to a value:
 //!
-//! - `x.px()` / `x.pt()` — `x` is a raw `f32` (from an external crate such as
-//!   usvg / taffy / stylo, or a literal) being *tagged* with its unit.
-//!   [`F32Units`] is implemented for `f32` **only**, so a visible `.px()` /
-//!   `.pt()` is a compiler-enforced proof that its receiver was untyped.
+//! - `x.as_px()` / `x.as_pt()` — `x` is a raw `f32` (from an external crate
+//!   such as usvg / taffy / stylo, or a literal) being *tagged* with its unit.
+//!   [`F32Units`] is implemented for `f32` **only**, so a visible `.as_px()` /
+//!   `.as_pt()` is a compiler-enforced proof that its receiver was untyped.
 //! - `x.in_pt()` / `x.in_px()` — `x` is already a [`Px`] / [`Pt`] being
 //!   *converted*.
 //! - `x.to_f32()` — a [`Px`] / [`Pt`] being *dropped* back to raw `f32` at an
 //!   f32 sink.
 //!
-//! So `size.width().px().in_pt()` reads as "raw f32 (px) → [`Px`] → [`Pt`]":
-//! the leading `.px()` is what proves `size.width()` is an untyped external
+//! So `size.width().as_px().in_pt()` reads as "raw f32 (px) → [`Px`] → [`Pt`]":
+//! the leading `.as_px()` is what proves `size.width()` is an untyped external
 //! `f32`. A trailing `.in_pt()` only converts the freshly-tagged [`Px`] and
-//! says nothing about the origin — always read the *first* hop. `.px()` /
-//! `.pt()` can never appear on an already-typed value ([`Px`] / [`Pt`] carry no
-//! such method and no `Deref` to `f32`):
+//! says nothing about the origin — always read the *first* hop. `.as_px()` /
+//! `.as_pt()` can never appear on an already-typed value ([`Px`] / [`Pt`] carry
+//! no such method and no `Deref` to `f32`):
 //!
 //! ```compile_fail
 //! use fulgur::units::F32Units;
-//! // `.px()` exists on `f32` only — never on an already-typed `Pt`.
-//! let _ = 1.0_f32.pt().px();
+//! // `.as_px()` exists on `f32` only — never on an already-typed `Pt`.
+//! let _ = 1.0_f32.as_pt().as_px();
 //! ```
 
 /// 1 CSS px = 0.75 PDF pt. The single source of this constant in the crate.
@@ -164,7 +165,7 @@ impl_unit_arith!(Px);
 impl_unit_arith!(Pt);
 
 impl Px {
-    /// The zero length. Use instead of `0.0_f32.px()` for sign comparisons
+    /// The zero length. Use instead of `0.0_f32.as_px()` for sign comparisons
     /// (`x > Px::ZERO`); the private field means `Px(0.0)` is not
     /// constructible outside this module. (`Px` has no `max`/`min` yet —
     /// add them, mirroring `Pt`, when a clamp idiom first needs them.)
@@ -184,7 +185,7 @@ impl Px {
 }
 
 impl Pt {
-    /// The zero length. Use instead of `0.0_f32.pt()` for clamp idioms
+    /// The zero length. Use instead of `0.0_f32.as_pt()` for clamp idioms
     /// (`x.max(Pt::ZERO)`); the private field means `Pt(0.0)` is not
     /// constructible outside this module.
     pub const ZERO: Pt = Pt(0.0);
@@ -222,22 +223,28 @@ impl Pt {
     }
 }
 
-/// Constructor sugar so `value.px()` / `value.pt()` reads naturally and the
-/// newtype field can stay private.
+/// Constructor sugar so `value.as_px()` / `value.as_pt()` reads naturally and
+/// the newtype field can stay private.
+///
+/// Takes `self` by value, not `&self`: `f32` is `Copy` (borrowing a 4-byte
+/// scalar buys nothing) and by-value keeps `F32Units::as_px` usable as a
+/// `fn(f32) -> Px` in `iter.map(F32Units::as_px)`. That trips clippy's
+/// `as_*`-should-borrow convention, which does not fit a Copy-scalar tag.
+#[allow(clippy::wrong_self_convention)]
 pub trait F32Units {
     /// Tag this `f32` as CSS pixels.
-    fn px(self) -> Px;
+    fn as_px(self) -> Px;
     /// Tag this `f32` as PDF points.
-    fn pt(self) -> Pt;
+    fn as_pt(self) -> Pt;
 }
 
 impl F32Units for f32 {
     #[inline]
-    fn px(self) -> Px {
+    fn as_px(self) -> Px {
         Px(self)
     }
     #[inline]
-    fn pt(self) -> Pt {
+    fn as_pt(self) -> Pt {
         Pt(self)
     }
 }
@@ -296,17 +303,17 @@ mod tests {
 
     #[test]
     fn abs_mirrors_f32() {
-        assert_eq!((-3.5_f32).pt().abs(), 3.5_f32.pt());
-        assert_eq!(2.0_f32.pt().abs(), 2.0_f32.pt());
+        assert_eq!((-3.5_f32).as_pt().abs(), 3.5_f32.as_pt());
+        assert_eq!(2.0_f32.as_pt().abs(), 2.0_f32.as_pt());
         // Byte-identical to the raw f32 op it replaces.
         let v = -7.25_f32;
-        assert_eq!(v.pt().abs().to_f32(), v.abs());
+        assert_eq!(v.as_pt().abs().to_f32(), v.abs());
     }
 
     #[test]
     fn ctor_sugar_and_escape() {
-        assert_eq!(4.0_f32.px(), Px(4.0));
-        assert_eq!(3.0_f32.pt(), Pt(3.0));
+        assert_eq!(4.0_f32.as_px(), Px(4.0));
+        assert_eq!(3.0_f32.as_pt(), Pt(3.0));
         assert_eq!(Pt(3.0).to_f32(), 3.0);
         assert_eq!(Px(4.0).to_f32(), 4.0);
     }

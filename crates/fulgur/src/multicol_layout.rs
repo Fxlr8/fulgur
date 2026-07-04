@@ -710,8 +710,8 @@ pub fn compute_multicol_layout(
     // border-box origin) can use `group.x_offset + col_x_math` and
     // `group.y_offset` directly without reapplying the container's padding.
     for group in group_geometries.iter_mut() {
-        group.x_offset = inset_left.px();
-        group.y_offset += inset_top.px();
+        group.x_offset = inset_left.as_px();
+        group.y_offset += inset_top.as_px();
     }
 
     // Stash the per-container geometry for downstream consumers (Task 4's
@@ -860,15 +860,15 @@ fn layout_self_inline_root_container(
             *first = original_h;
         }
         let geometry = ColumnGroupGeometry {
-            x_offset: inset_left.px(),
-            y_offset: inset_top.px(),
-            col_w: col_w.px(),
-            gap: gap.px(),
+            x_offset: inset_left.as_px(),
+            y_offset: inset_top.as_px(),
+            col_w: col_w.as_px(),
+            gap: gap.as_px(),
             n,
             col_heights: col_heights
                 .iter()
                 .copied()
-                .map(crate::units::F32Units::px)
+                .map(crate::units::F32Units::as_px)
                 .collect(),
             paragraph_splits: Vec::new(),
         };
@@ -945,12 +945,12 @@ fn layout_self_inline_root_container(
             // border-box frame in the post-loop fixup; here we apply the
             // shift ourselves on the geometry below before returning.
             origin: Point {
-                x: col_x.px(),
-                y: 0.0_f32.px(),
+                x: col_x.as_px(),
+                y: 0.0_f32.as_px(),
             },
             size: Size {
-                width: col_w.px(),
-                height: (*slice_h).px(),
+                width: col_w.as_px(),
+                height: (*slice_h).as_px(),
             },
         });
     }
@@ -976,15 +976,15 @@ fn layout_self_inline_root_container(
     //    (mirrors the post-loop shift that the segment path applies in
     //    `compute_multicol_layout`).
     let geometry = ColumnGroupGeometry {
-        x_offset: inset_left.px(),
-        y_offset: inset_top.px(),
-        col_w: col_w.px(),
-        gap: gap.px(),
+        x_offset: inset_left.as_px(),
+        y_offset: inset_top.as_px(),
+        col_w: col_w.as_px(),
+        gap: gap.as_px(),
         n,
         col_heights: col_heights
             .iter()
             .copied()
-            .map(crate::units::F32Units::px)
+            .map(crate::units::F32Units::as_px)
             .collect(),
         paragraph_splits,
     };
@@ -1247,12 +1247,12 @@ fn layout_column_group(
                     // applied in `compute_multicol_layout` updates these
                     // alongside the rest of the geometry.
                     origin: Point {
-                        x: col_x.px(),
-                        y: col_y.px(),
+                        x: col_x.as_px(),
+                        y: col_y.as_px(),
                     },
                     size: taffy::Size {
-                        width: size.width.px(),
-                        height: size.height.px(),
+                        width: size.width.as_px(),
+                        height: size.height.as_px(),
                     },
                 });
             }
@@ -1341,15 +1341,15 @@ fn layout_column_group(
         // frame; `compute_multicol_layout` shifts them into the border-box
         // frame after every segment is placed (see the inset loop that runs
         // over `group_geometries` in that function).
-        x_offset: 0.0_f32.px(),
-        y_offset: y_offset.px(),
-        col_w: col_w.px(),
-        gap: gap.px(),
+        x_offset: 0.0_f32.as_px(),
+        y_offset: y_offset.as_px(),
+        col_w: col_w.as_px(),
+        gap: gap.as_px(),
         n,
         col_heights: col_heights
             .iter()
             .copied()
-            .map(crate::units::F32Units::px)
+            .map(crate::units::F32Units::as_px)
             .collect(),
         paragraph_splits,
     };

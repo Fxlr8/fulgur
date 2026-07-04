@@ -79,11 +79,11 @@ pub(super) fn try_convert(
 
         let line_height = {
             use ::style::values::computed::font::LineHeight;
-            let font_size_pt = styles.clone_font_size().used_size().px().px().in_pt();
+            let font_size_pt = styles.clone_font_size().used_size().px().as_px().in_pt();
             match styles.clone_line_height() {
                 LineHeight::Normal => font_size_pt * DEFAULT_LINE_HEIGHT_RATIO,
                 LineHeight::Number(num) => font_size_pt * num.0,
-                LineHeight::Length(value) => value.0.px().px().in_pt(),
+                LineHeight::Length(value) => value.0.px().as_px().in_pt(),
             }
         };
 
@@ -131,18 +131,18 @@ pub(super) fn try_convert(
         let content_box = compute_content_box(node, &style);
 
         let (font_size_pt, line_height) = if let Some(styles) = node.primary_styles() {
-            let fs = styles.clone_font_size().used_size().px().px().in_pt();
+            let fs = styles.clone_font_size().used_size().px().as_px().in_pt();
             let lh = {
                 use ::style::values::computed::font::LineHeight;
                 match styles.clone_line_height() {
                     LineHeight::Normal => fs * DEFAULT_LINE_HEIGHT_RATIO,
                     LineHeight::Number(num) => fs * num.0,
-                    LineHeight::Length(value) => value.0.px().px().in_pt(),
+                    LineHeight::Length(value) => value.0.px().as_px().in_pt(),
                 }
             };
             (fs, lh)
         } else {
-            let fs = 12.0_f32.px().in_pt();
+            let fs = 12.0_f32.as_px().in_pt();
             (fs, fs * DEFAULT_LINE_HEIGHT_RATIO)
         };
 
@@ -470,8 +470,8 @@ mod tests {
 
     fn make_line(items: Vec<LineItem>) -> ShapedLine {
         ShapedLine {
-            height: 12.0_f32.pt(),
-            baseline: 9.0_f32.pt(),
+            height: 12.0_f32.as_pt(),
+            baseline: 9.0_f32.as_pt(),
             items,
         }
     }
@@ -488,9 +488,9 @@ mod tests {
     fn inline_box(width: f32, x_offset: f32) -> LineItem {
         LineItem::InlineBox(InlineBoxItem {
             node_id: None,
-            width: width.pt(),
-            height: 10.0_f32.pt(),
-            x_offset: x_offset.pt(),
+            width: width.as_pt(),
+            height: 10.0_f32.as_pt(),
+            x_offset: x_offset.as_pt(),
             computed_y: crate::units::Pt::ZERO,
             link: None,
             opacity: 1.0,
@@ -595,8 +595,8 @@ mod tests {
         let image_marker = LineItem::Image(InlineImage {
             data: Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 8.0_f32.pt(),
-            height: 8.0_f32.pt(),
+            width: 8.0_f32.as_pt(),
+            height: 8.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: VerticalAlign::Baseline,
             opacity: 1.0,
@@ -630,7 +630,7 @@ mod tests {
         let text_marker = LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0_f32.pt(),
+            font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![
@@ -747,12 +747,12 @@ mod tests {
         LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0_f32.pt(),
+            font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![],
             text: String::new(),
-            x_offset: x_offset.pt(),
+            x_offset: x_offset.as_pt(),
             link: None,
         })
     }
@@ -761,9 +761,9 @@ mod tests {
         LineItem::Image(InlineImage {
             data: Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: width.pt(),
-            height: 10.0_f32.pt(),
-            x_offset: x_offset.pt(),
+            width: width.as_pt(),
+            height: 10.0_f32.as_pt(),
+            x_offset: x_offset.as_pt(),
             vertical_align: VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
@@ -888,7 +888,7 @@ mod tests {
         let zero_glyph_marker = LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0_f32.pt(),
+            font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![],

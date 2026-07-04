@@ -306,10 +306,10 @@ fn maybe_apply_abs_pseudo_inset_correction(
     entry.fragments.clear();
     entry.fragments.push(crate::pagination_layout::Fragment {
         page_index: parent_frag.page_index,
-        x: new_x_px.px(),
-        y: new_y_px.px(),
-        width: pseudo_w_px.px(),
-        height: pseudo_h_px.px(),
+        x: new_x_px.as_px(),
+        y: new_y_px.as_px(),
+        width: pseudo_w_px.as_px(),
+        height: pseudo_h_px.as_px(),
     });
 }
 

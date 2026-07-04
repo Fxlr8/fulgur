@@ -79,7 +79,7 @@ pub struct ColumnRuleSpec {
 impl Default for ColumnRuleSpec {
     fn default() -> Self {
         Self {
-            width: 1.0_f32.pt(),
+            width: 1.0_f32.as_pt(),
             style: ColumnRuleStyle::None,
             color: [0, 0, 0, 255],
         }
@@ -568,7 +568,7 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
         } else if name.eq_ignore_ascii_case("column-rule-width") {
             if let Ok(w) = input.parse_entirely(parse_length) {
                 let mut spec = self.props.rule.unwrap_or_default();
-                spec.width = w.pt();
+                spec.width = w.as_pt();
                 self.props.rule = Some(spec);
             }
         } else if name.eq_ignore_ascii_case("column-rule-style") {
@@ -707,7 +707,7 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
 
     let mut spec = ColumnRuleSpec::default();
     if let Some(w) = width {
-        spec.width = w.pt();
+        spec.width = w.as_pt();
     }
     if let Some(s) = style {
         spec.style = s;

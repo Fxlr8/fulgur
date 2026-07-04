@@ -108,8 +108,8 @@ fn collect_table_cells(
             continue;
         }
 
-        let cw = child_node.final_layout.size.width.px().in_pt();
-        let ch = child_node.final_layout.size.height.px().in_pt();
+        let cw = child_node.final_layout.size.width.as_px().in_pt();
+        let ch = child_node.final_layout.size.height.as_px().in_pt();
 
         let child_effective_is_empty = child_node
             .layout_children
