@@ -475,8 +475,8 @@ fn draw_v2_page(
             && let Some(anchor) = drawables.bookmark_anchors.get(&node_id)
             && let Some(c) = canvas.bookmark_collector.as_deref_mut()
         {
-            let y_pt = margin_top_pt + first_frag.y.in_pt().to_f32();
-            c.record(anchor.level, anchor.label.clone(), y_pt.as_pt());
+            let y_pt = margin_top_pt.as_pt() + first_frag.y.in_pt();
+            c.record(anchor.level, anchor.label.clone(), y_pt);
         }
 
         if transformed_descendants.contains(&node_id) {
@@ -1234,8 +1234,8 @@ fn paint_multicol_paragraph_slices(
         .to_f32();
     let cutoff = target_frag.height.in_pt().to_f32();
 
-    let container_x_pt = margin_left_pt + target_frag.x.in_pt().to_f32();
-    let container_y_pt = margin_top_pt + target_frag.y.in_pt().to_f32();
+    let container_x_pt = margin_left_pt.as_pt() + target_frag.x.in_pt();
+    let container_y_pt = margin_top_pt.as_pt() + target_frag.y.in_pt();
 
     // Single-fragment containers (the common case) keep the original
     // behaviour: paint every slice at `container_origin + origin_pt`,
@@ -1281,15 +1281,9 @@ fn paint_multicol_paragraph_slices(
                     continue;
                 }
             }
-            let abs_x = container_x_pt + slice.origin_pt.0.to_f32();
-            let abs_y = container_y_pt + slice_top;
-            crate::paragraph::draw_shaped_lines(
-                canvas,
-                &slice.lines,
-                abs_x.as_pt(),
-                abs_y.as_pt(),
-                None,
-            );
+            let abs_x = container_x_pt + slice.origin_pt.0;
+            let abs_y = container_y_pt + slice_top.as_pt();
+            crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x, abs_y, None);
         }
     });
     if use_run_tagging {
