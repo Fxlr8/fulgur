@@ -113,13 +113,13 @@ pub fn render_v2(
             // applied, and only on page 0 (continuation pages are already
             // page-content-area-relative after the fragmenter resets cursor_y).
             let body_y_off = if page_idx == 0 {
-                drawables.body_offset_pt.1.to_f32()
+                drawables.body_offset_pt.1
             } else {
-                0.0
+                crate::units::Pt::ZERO
             };
-            let x_pt = resolved_margin.left + first_frag.x.in_pt().to_f32();
-            let y_pt = resolved_margin.top + body_y_off + first_frag.y.in_pt().to_f32();
-            dest_registry.record(id.as_str(), x_pt.as_pt(), y_pt.as_pt());
+            let x_pt = resolved_margin.left.as_pt() + first_frag.x.in_pt();
+            let y_pt = resolved_margin.top.as_pt() + body_y_off + first_frag.y.in_pt();
+            dest_registry.record(id.as_str(), x_pt, y_pt);
         }
     }
 
