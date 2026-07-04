@@ -3076,13 +3076,7 @@ fn draw_list_item_marker(
 
     match &entry.marker {
         ListItemMarker::Text { lines, width } if !lines.is_empty() => {
-            crate::paragraph::draw_shaped_lines(
-                canvas,
-                lines,
-                (x - width.to_f32()).as_pt(),
-                y.as_pt(),
-                None,
-            );
+            crate::paragraph::draw_shaped_lines(canvas, lines, x.as_pt() - *width, y.as_pt(), None);
         }
         ListItemMarker::Image {
             marker,
