@@ -211,10 +211,10 @@ pub fn run_pass(doc: &mut BaseDocument, page_height_px: f32) -> PaginationGeomet
 /// fit the remaining strip rather than splitting it.
 pub fn run_pass_with_break_styles<'a>(
     doc: &'a mut BaseDocument,
-    page_height_px: f32,
+    page_height_px: crate::units::Px,
     column_styles: &'a crate::column_css::ColumnStyleTable,
 ) -> PaginationGeometryTable {
-    run_pass_inner(doc, page_height_px, Some(column_styles), None)
+    run_pass_inner(doc, page_height_px.to_f32(), Some(column_styles), None)
 }
 
 /// fulgur-s67g Phase 2.2 variant: extends
@@ -4365,7 +4365,6 @@ mod tests {
     #[test]
     fn string_set_carry_across_page_break() {
         use crate::blitz_adapter;
-        use crate::convert::pt_to_px;
         use crate::gcpm::parser::parse_gcpm;
         use std::ops::DerefMut;
         use std::sync::Arc;
@@ -4399,7 +4398,8 @@ h2 { string-set: chapter-title content(text); }
         let store = pass.into_store();
         blitz_adapter::resolve(&mut doc);
         let column_styles = blitz_adapter::extract_column_style_table(&doc);
-        let geometry = run_pass_with_break_styles(doc.deref_mut(), pt_to_px(720.0), &column_styles);
+        let geometry =
+            run_pass_with_break_styles(doc.deref_mut(), 720.0_f32.as_pt().in_px(), &column_styles);
 
         let mut by_node: std::collections::BTreeMap<usize, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
@@ -5304,7 +5304,7 @@ h2 { string-set: chapter-title content(text); }
         let direct_geom = {
             let mut doc = parse(html, 600.0);
             let table = blitz_adapter::extract_column_style_table(&doc);
-            super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table)
+            super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table)
         };
 
         let taffy_geom = {
@@ -5358,7 +5358,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         // Filter to fragments whose width is exactly the cell width
         // (100) — that's only the two cards. Grid container has
@@ -5405,7 +5405,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut candidates: Vec<_> = geom
             .values()
@@ -5452,7 +5452,7 @@ h2 { string-set: chapter-title content(text); }
             .size
             .height = f32::INFINITY;
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 150.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 150.0_f32.as_px(), &table);
         // Load-bearing assertion: without the guard the injected `+inf`
         // reaches a Fragment height and poisons `cursor_y`, so emitted
         // fragments carry non-finite `y` / `height`. The guard zeroes it,
@@ -5492,7 +5492,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut candidates: Vec<_> = geom
             .values()
@@ -5527,7 +5527,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut cells: Vec<_> = geom
             .values()
@@ -5567,7 +5567,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut cells: Vec<_> = geom
             .values()
@@ -5607,7 +5607,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut page_one_cells: Vec<_> = geom
             .values()
@@ -5643,7 +5643,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 250.0_f32.as_px(), &table);
 
         let mut page_one_cells: Vec<_> = geom
             .values()
@@ -5690,7 +5690,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         // 100×50 の inner div fragment 4 個を集める。
         let mut inner: Vec<(u32, f32, f32)> = geom
@@ -5760,7 +5760,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()
@@ -5847,7 +5847,7 @@ h2 { string-set: chapter-title content(text); }
         // 600 viewport, 400 page strip (small enough to overflow).
         let mut doc = parse(&html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
         let pages = super::implied_page_count(&geom);
         assert!(
             pages >= 2,
@@ -5880,7 +5880,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
 
         // Find every fragment with height ≈ 100 on page 1; B is the
         // only such fragment (outer's page-1 fragment height is the
@@ -5917,7 +5917,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         let second_on_page1: Vec<&Fragment> = geom
             .values()
@@ -6074,7 +6074,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0_f32.as_px(), &table);
         // Page count must be ≥ 2 — without yb27 the trailing inline
         // text never reaches a new page (single fragment, page 0 only).
         let max_page = geom
@@ -6121,7 +6121,7 @@ h2 { string-set: chapter-title content(text); }
         // even when the section itself has no page-0 entry.
         let section_id =
             find_node_by_local_name(&doc, "section").expect("fixture must contain a <section>");
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 200.0_f32.as_px(), &table);
         let section_geom = geom.get(&section_id).unwrap_or_else(|| {
             panic!("oc51: <section> (node_id={section_id}) missing from geometry; geom={geom:?}")
         });
@@ -6310,7 +6310,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 400.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         // collect all 60px-tall, 100px-wide fragments (the two leaf cells)
         let mut frags: Vec<(u32, f32, f32)> = geom
@@ -6349,7 +6349,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 400.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         let mut frags: Vec<(u32, f32, f32)> = geom
             .values()
@@ -6404,7 +6404,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 400.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         // inner divs: 40px tall, 100px wide
         let mut inner: Vec<(u32, f32, f32)> = geom
@@ -6458,7 +6458,7 @@ h2 { string-set: chapter-title content(text); }
         "#;
         let mut doc = parse(html, 400.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
-        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0, &table);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
         let mut inner: Vec<(u32, f32, f32)> = geom
             .values()

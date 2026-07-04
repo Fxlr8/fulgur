@@ -2,6 +2,7 @@ use crate::asset::AssetBundle;
 use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
+use crate::units::F32Units;
 use krilla::SerializeSettings;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
@@ -869,7 +870,7 @@ impl Engine {
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
         let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
-            crate::convert::pt_to_px(self.config.content_height()),
+            self.config.content_height().as_pt().in_px(),
             &column_styles,
         );
 
@@ -934,7 +935,7 @@ impl Engine {
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
         let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
-            crate::convert::pt_to_px(self.config.content_height()),
+            self.config.content_height().as_pt().in_px(),
             &column_styles,
         );
 

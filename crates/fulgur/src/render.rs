@@ -3700,7 +3700,7 @@ impl<'a> MarginBoxRenderer<'a> {
                 let empty_column_styles = crate::column_css::ColumnStyleTable::new();
                 let geometry = crate::pagination_layout::run_pass_with_break_styles(
                     &mut render_doc,
-                    rect.height.in_px().to_f32(),
+                    rect.height.in_px(),
                     &empty_column_styles,
                 );
                 let dummy_store = RunningElementStore::new();
