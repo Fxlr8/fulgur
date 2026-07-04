@@ -36,23 +36,35 @@ pub(crate) const MAX_DOM_DEPTH: usize = 512;
 /// `MAX_TILES` defensive bounds.
 pub(crate) const MAX_PAGES: u32 = 10_000;
 
-/// Upper bound on the bytes materialized for a single resolved counter
-/// chain (`counters(name, sep, style)`), applied inside
+/// Upper bound on the **output bytes** materialized for a single resolved
+/// counter chain (`counters(name, sep, style)`), applied inside
 /// [`gcpm::counter::format_counter_chain`] so it covers every call site
-/// (`::before` / `::after` resolution, margin-box snapshots, and
-/// `target-counters()`).
+/// (`::before` / `::after` resolution, margin-box, and `target-counters()`).
 ///
-/// `counters()` joins the full active counter chain with an
-/// attacker-controlled separator. Sibling `counter-reset` instances share
-/// the originating element's parent scope (CSS Lists 3 §4.4 following-sibling
-/// scope — spec-correct), so the chain for the i-th sibling has ≈ i entries.
-/// A single resolution is therefore `separator_len * chain_len`, either of
-/// which scales with untrusted input — a single multi-gigabyte allocation
-/// spike. Capping the materialized output bounds that spike; real documents
-/// (deepest legitimate `counters()`, e.g. nested `<ol>`) stay in the tens of
-/// bytes, far below this ceiling. Sibling of the total-output
-/// [`MAX_GENERATED_CSS_BYTES`] budget, which bounds N-element accumulation.
+/// `counters()` joins the active counter chain with an attacker-controlled
+/// separator, so a single resolution is `separator_len * chain_len`. This caps
+/// the *separator* axis: even a multi-kilobyte separator cannot push one
+/// `counters()` output past this ceiling. The orthogonal *length* axis is
+/// bounded by [`MAX_COUNTER_CHAIN_ENTRIES`]. Real documents (deepest legitimate
+/// `counters()`, e.g. nested `<ol>`) stay in the tens of bytes, far below this.
+/// Sibling of the total-output [`MAX_GENERATED_CSS_BYTES`] budget.
 pub(crate) const MAX_COUNTER_CHAIN_BYTES: usize = 4 * 1024;
+
+/// Upper bound on the **number of entries** kept for a single counter chain
+/// (its length), applied when a chain is cloned for later resolution
+/// (`CounterState::chain` / `chain_snapshot`).
+///
+/// A chain grows one entry per in-scope `counter-reset`. The *nesting*
+/// contribution is already bounded by [`MAX_DOM_DEPTH`] — the counter walk
+/// stops recursing there, so no reset below that depth is even processed —
+/// which is why this cap is tied to it: any chain longer than
+/// `MAX_DOM_DEPTH` can only come from following-sibling `counter-reset`
+/// accumulation (unbounded breadth, i.e. adversarial), and that surplus cannot
+/// affect a realistic document. Bounding the stored length keeps the retained
+/// per-node snapshots from being O(N²) and is the *length* companion to the
+/// *separator*-axis [`MAX_COUNTER_CHAIN_BYTES`]; the two are independent knobs
+/// on `separator_len * chain_len`.
+pub(crate) const MAX_COUNTER_CHAIN_ENTRIES: usize = MAX_DOM_DEPTH;
 
 /// Total-output budget for the generated CSS that
 /// [`blitz_adapter::CounterPass`] injects for resolved pseudo-element
@@ -95,10 +107,11 @@ pub(crate) const MAX_OUTLINE_LABEL_BYTES: usize = 8 * 1024 * 1024;
 /// the chain length ≈ the sibling index, so storing it at N nodes is O(N²)
 /// memory — a resource-exhaustion sink independent of any output budget
 /// (`MAX_GENERATED_CSS_BYTES` / `MAX_OUTLINE_LABEL_BYTES` bound output bytes,
-/// not this retained storage). Per-chain length is separately clamped to
-/// [`MAX_COUNTER_CHAIN_BYTES`] entries inside `chain_snapshot` (lossless w.r.t.
-/// the byte-capped output, since a value beyond that many entries cannot
-/// appear in the truncated result); this budget then bounds the aggregate
+/// not this retained storage). Per-node length is separately clamped to
+/// [`MAX_COUNTER_CHAIN_ENTRIES`] inside `chain_snapshot` (lossless for realistic
+/// counter state — nesting depth is bounded by [`MAX_DOM_DEPTH`], and anything
+/// longer is adversarial sibling accumulation); this budget then bounds the
+/// aggregate
 /// across all nodes, mirroring the additive-not-multiplicative rationale of
 /// [`MAX_PAGES`]. ~8M values ≈ 32 MiB — far above any realistic document.
 pub(crate) const MAX_COUNTER_SNAPSHOT_ENTRIES: usize = 8 * 1024 * 1024;

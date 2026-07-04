@@ -812,7 +812,7 @@ impl CounterState {
     /// Chain of values for `name`, from outermost to innermost.
     /// Empty if no instance exists.
     ///
-    /// Clamped to [`crate::MAX_COUNTER_CHAIN_BYTES`] entries: the only consumer
+    /// Clamped to [`crate::MAX_COUNTER_CHAIN_ENTRIES`] entries: the only consumer
     /// is `format_counter_chain`, whose output is byte-capped at the same
     /// ceiling, so a longer chain cannot affect the result — and the clamp
     /// avoids a transient O(depth) clone under sibling `counter-reset`
@@ -822,7 +822,7 @@ impl CounterState {
             .get(name)
             .map(|s| {
                 s.iter()
-                    .take(crate::MAX_COUNTER_CHAIN_BYTES)
+                    .take(crate::MAX_COUNTER_CHAIN_ENTRIES)
                     .map(|i| i.value)
                     .collect()
             })
@@ -835,7 +835,7 @@ impl CounterState {
     ///
     /// The snapshot is retained per node, so its size is bounded on two axes:
     /// each chain keeps at most its outermost entries, and the **total** across
-    /// all names is capped at [`crate::MAX_COUNTER_CHAIN_BYTES`] entries — a
+    /// all names is capped at [`crate::MAX_COUNTER_CHAIN_ENTRIES`] entries — a
     /// single node with many distinct deep counters would otherwise clone
     /// `names × depth` values. Keeping the outermost is what
     /// `format_counter_chain` consumes first; the clamp is lossless w.r.t.
@@ -843,7 +843,7 @@ impl CounterState {
     /// output is already byte-capped at the same ceiling, and `counter()`'s
     /// innermost value is preserved for any chain shorter than the clamp).
     pub fn chain_snapshot(&self) -> BTreeMap<String, Vec<i32>> {
-        let mut remaining = crate::MAX_COUNTER_CHAIN_BYTES;
+        let mut remaining = crate::MAX_COUNTER_CHAIN_ENTRIES;
         let mut out = BTreeMap::new();
         for (k, v) in &self.stacks {
             if remaining == 0 {
@@ -1750,15 +1750,15 @@ mod tests {
     #[test]
     fn test_chain_clamps_length() {
         // `chain()` feeds `format_counter_chain` (byte-capped), so its result
-        // must be clamped to `MAX_COUNTER_CHAIN_BYTES` entries — an unclamped
+        // must be clamped to `MAX_COUNTER_CHAIN_ENTRIES` entries — an unclamped
         // full-depth clone is a transient O(depth) allocation under sibling
         // `counter-reset` flooding.
         let mut s = CounterState::new();
-        for _ in 0..(crate::MAX_COUNTER_CHAIN_BYTES + 100) {
+        for _ in 0..(crate::MAX_COUNTER_CHAIN_ENTRIES + 100) {
             s.reset_in_scope("x", 0, 1);
         }
         assert!(
-            s.chain("x").len() <= crate::MAX_COUNTER_CHAIN_BYTES,
+            s.chain("x").len() <= crate::MAX_COUNTER_CHAIN_ENTRIES,
             "chain length {} exceeded clamp",
             s.chain("x").len()
         );
@@ -1781,9 +1781,9 @@ mod tests {
         let snap = s.chain_snapshot();
         let total: usize = snap.values().map(|v| v.len()).sum();
         assert!(
-            total <= crate::MAX_COUNTER_CHAIN_BYTES,
+            total <= crate::MAX_COUNTER_CHAIN_ENTRIES,
             "per-node snapshot total {total} exceeded cap {}",
-            crate::MAX_COUNTER_CHAIN_BYTES
+            crate::MAX_COUNTER_CHAIN_ENTRIES
         );
     }
 

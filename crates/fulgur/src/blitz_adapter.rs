@@ -2280,7 +2280,7 @@ impl CounterPass {
         if self.record_node_snapshots
             && self.snapshot_entries.get() < crate::MAX_COUNTER_SNAPSHOT_ENTRIES
         {
-            // `chain_snapshot` clamps each chain to `MAX_COUNTER_CHAIN_BYTES`
+            // `chain_snapshot` clamps each chain to `MAX_COUNTER_CHAIN_ENTRIES`
             // entries; this budget bounds the *aggregate* across nodes, since
             // storing even a clamped snapshot at every one of N nodes is still
             // input-proportional in N. Once reached, later nodes record
@@ -4034,18 +4034,18 @@ mod tests {
         );
     }
 
-    /// DoS hardening (snapshot storage): `chain_snapshot` clones the full
-    /// active chain per node, so N sibling `counter-reset`s would store a
-    /// length-i chain at the i-th node — O(N²) memory. A value beyond
-    /// `MAX_COUNTER_CHAIN_BYTES` entries cannot appear in the byte-capped
-    /// output, so per-node chain length is clamped to that ceiling (lossless
-    /// for any realistic chain, which is far shorter).
+    /// DoS hardening (snapshot storage): `chain_snapshot` clones the active
+    /// chain per node, so N sibling `counter-reset`s would store a length-i
+    /// chain at the i-th node — O(N²) memory. Per-node chain length is clamped
+    /// to `MAX_COUNTER_CHAIN_ENTRIES` (a chain longer than that can only come
+    /// from adversarial sibling accumulation, never realistic nesting, which
+    /// is bounded by `MAX_DOM_DEPTH`).
     #[test]
     fn counter_pass_snapshot_clamps_per_node_chain_length() {
         use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
 
         // More siblings than the clamp so the deepest chain is truncated.
-        const SIBLINGS: usize = crate::MAX_COUNTER_CHAIN_BYTES + 500;
+        const SIBLINGS: usize = crate::MAX_COUNTER_CHAIN_ENTRIES + 500;
         let mut html = String::from("<html><body>");
         for _ in 0..SIBLINGS {
             html.push_str("<div></div>");
@@ -4072,9 +4072,9 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(
-            max_chain <= crate::MAX_COUNTER_CHAIN_BYTES,
+            max_chain <= crate::MAX_COUNTER_CHAIN_ENTRIES,
             "per-node stored chain length {max_chain} exceeded clamp {}",
-            crate::MAX_COUNTER_CHAIN_BYTES
+            crate::MAX_COUNTER_CHAIN_ENTRIES
         );
     }
 
@@ -4086,9 +4086,13 @@ mod tests {
     fn counter_pass_snapshot_bounds_total_stored_entries() {
         use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
 
-        // Σ(1..=4096) ≈ 8.4M already exceeds the 8M budget, so a few thousand
-        // siblings past the clamp are enough to engage it.
-        const SIBLINGS: usize = crate::MAX_COUNTER_CHAIN_BYTES + 1000;
+        // Enough siblings that the per-node-clamped chains (≤
+        // MAX_COUNTER_CHAIN_ENTRIES each) sum past the aggregate budget, so the
+        // budget guard must engage. `budget / per_node + ramp` + margin.
+        const SIBLINGS: usize = crate::MAX_COUNTER_SNAPSHOT_ENTRIES
+            / crate::MAX_COUNTER_CHAIN_ENTRIES
+            + crate::MAX_COUNTER_CHAIN_ENTRIES
+            + 500;
         let mut html = String::from("<html><body>");
         for _ in 0..SIBLINGS {
             html.push_str("<div></div>");
@@ -4113,7 +4117,7 @@ mod tests {
             .flat_map(|m| m.values())
             .map(|chain| chain.len())
             .sum();
-        let slack = crate::MAX_COUNTER_CHAIN_BYTES;
+        let slack = crate::MAX_COUNTER_CHAIN_ENTRIES;
         assert!(
             total <= crate::MAX_COUNTER_SNAPSHOT_ENTRIES + slack,
             "total stored snapshot entries {total} exceeded budget {}",
