@@ -108,8 +108,8 @@ fn collect_table_cells(
             continue;
         }
 
-        let cw = px_to_pt(child_node.final_layout.size.width);
-        let ch = px_to_pt(child_node.final_layout.size.height);
+        let cw = child_node.final_layout.size.width.px().in_pt();
+        let ch = child_node.final_layout.size.height.px().in_pt();
 
         let child_effective_is_empty = child_node
             .layout_children
@@ -117,13 +117,13 @@ fn collect_table_cells(
             .as_deref()
             .unwrap_or(&child_node.children)
             .is_empty();
-        if ch == 0.0 && cw == 0.0 && !child_effective_is_empty {
+        if ch == Pt::ZERO && cw == Pt::ZERO && !child_effective_is_empty {
             let child_is_header = is_header || is_table_section(child_node, "thead");
             collect_table_cells(doc, child_id, child_is_header, ctx, depth + 1, out);
             continue;
         }
 
-        if ch == 0.0 && cw == 0.0 {
+        if ch == Pt::ZERO && cw == Pt::ZERO {
             continue;
         }
 

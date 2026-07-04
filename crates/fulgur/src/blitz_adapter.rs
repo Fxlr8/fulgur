@@ -1215,6 +1215,7 @@ fn extract_url_from_stylo_image(image: &style::values::computed::image::Image) -
 /// map it to fulgur's `VerticalAlign` enum.
 pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::VerticalAlign {
     use crate::paragraph::VerticalAlign;
+    use crate::units::F32Units;
     let Some(styles) = node.primary_styles() else {
         return VerticalAlign::Baseline;
     };
@@ -1244,7 +1245,7 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
                 // components the basis-0 resolve silently drops them —
                 // acceptable because calc() on vertical-align is rare.
                 let px = lp.resolve(style::values::computed::Length::new(0.0)).px();
-                VerticalAlign::Length(crate::convert::px_to_pt(px))
+                VerticalAlign::Length(px.px().in_pt())
             }
         }
     }
@@ -5141,7 +5142,10 @@ mod tests {
         let va = extract_vertical_align(doc.get_node(id).unwrap());
         match va {
             VerticalAlign::Length(v) => {
-                assert!((v - 6.0).abs() < 0.01, "expected 6pt (8px × 0.75), got {v}");
+                assert!(
+                    (v.to_f32() - 6.0).abs() < 0.01,
+                    "expected 6pt (8px × 0.75), got {v:?}"
+                );
             }
             other => panic!("expected VerticalAlign::Length(6.0), got {other:?}"),
         }
