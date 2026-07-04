@@ -182,6 +182,7 @@ serialization into the core crate.
 use fulgur::engine::{Engine, LayoutOutput};
 use fulgur::config::PageSize;
 
+let html = "<h1>Hello</h1>";
 let engine = Engine::builder().page_size(PageSize::A4).build();
 let out: LayoutOutput = engine.layout(html)?;
 
