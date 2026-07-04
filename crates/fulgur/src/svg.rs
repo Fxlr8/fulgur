@@ -103,7 +103,13 @@ mod tests {
                     tag_collector: None,
                     link_run_node_id: None,
                 };
-                svg.draw(&mut canvas, 10.0.pt(), 20.0.pt(), 400.0.pt(), 400.0.pt());
+                svg.draw(
+                    &mut canvas,
+                    10.0.as_pt(),
+                    20.0.as_pt(),
+                    400.0.as_pt(),
+                    400.0.as_pt(),
+                );
             }
         }
         let _ = doc.finish();

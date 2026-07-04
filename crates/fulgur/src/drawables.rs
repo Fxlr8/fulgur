@@ -523,9 +523,9 @@ mod tests {
         let entry = ListItemEntry {
             marker: ListItemMarker::Text {
                 lines: Vec::new(),
-                width: 0.0_f32.pt(),
+                width: 0.0_f32.as_pt(),
             },
-            marker_line_height: 12.0_f32.pt(),
+            marker_line_height: 12.0_f32.as_pt(),
             opacity: 1.0,
             visible: true,
         };

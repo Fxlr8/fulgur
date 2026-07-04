@@ -67,9 +67,11 @@ impl DestinationRegistry {
         let (tx, ty) = self
             .current_transform()
             .transform_point(x.to_f32(), y.to_f32());
-        self.entries
-            .entry(id.to_string())
-            .or_insert((self.current_page_idx, tx.pt(), ty.pt()));
+        self.entries.entry(id.to_string()).or_insert((
+            self.current_page_idx,
+            tx.as_pt(),
+            ty.as_pt(),
+        ));
     }
 
     /// Look up a recorded anchor. Returns `(page_idx, x, y)`.
@@ -1615,15 +1617,15 @@ mod dp_unit_tests {
     fn destination_registry_push_pop_transform_affects_record() {
         let mut reg = DestinationRegistry::new();
         reg.set_current_page(3);
-        reg.push_transform(Affine2D::translation(10.0_f32.pt(), 20.0_f32.pt()));
-        reg.record("anchor", 5.0.pt(), 7.0.pt());
+        reg.push_transform(Affine2D::translation(10.0_f32.as_pt(), 20.0_f32.as_pt()));
+        reg.record("anchor", 5.0.as_pt(), 7.0.as_pt());
         let (page, x, y) = reg.get("anchor").expect("recorded");
         assert_eq!(page, 3);
         assert!((x.to_f32() - 15.0).abs() < 1e-4);
         assert!((y.to_f32() - 27.0).abs() < 1e-4);
         reg.pop_transform();
         // After pop, subsequent records use identity.
-        reg.record("anchor2", 1.0.pt(), 2.0.pt());
+        reg.record("anchor2", 1.0.as_pt(), 2.0.as_pt());
         let (_, x2, y2) = reg.get("anchor2").expect("recorded");
         assert!((x2.to_f32() - 1.0).abs() < 1e-4);
         assert!((y2.to_f32() - 2.0).abs() < 1e-4);
@@ -1648,10 +1650,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 10.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 10.0.as_pt(),
             },
         );
 
@@ -1671,19 +1673,19 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 0.0.pt(),
-                height: 10.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 0.0.as_pt(),
+                height: 10.0.as_pt(),
             },
         );
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 0.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 0.0.as_pt(),
             },
         );
         assert!(collector.occurrences().is_empty());
@@ -1698,10 +1700,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 10.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 10.0.as_pt(),
             },
         );
         collector.pop_transform();
@@ -1725,7 +1727,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Visible,
-            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.pt()),
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.as_pt()),
             ..Default::default()
         };
         // y axis non-clip → expanded to ±INFINITE (line 988).
@@ -1737,8 +1739,8 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Clip,
-            border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.pt()),
-            border_radii: [[8.0, 8.0]; 4].map(|p| p.map(|v| v.pt())),
+            border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
+            border_radii: [[8.0, 8.0]; 4].map(|p| p.map(|v| v.as_pt())),
             ..Default::default()
         };
         // both axes clipped + has_radius → rounded path branch (lines 999-1000).
@@ -1750,7 +1752,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Clip,
-            border_widths: [50.0, 50.0, 50.0, 50.0].map(|v| v.pt()),
+            border_widths: [50.0, 50.0, 50.0, 50.0].map(|v| v.as_pt()),
             ..Default::default()
         };
         // border-widths exceed the box → cw / ch ≤ 0 → returns None.
@@ -1873,21 +1875,21 @@ mod dp_unit_tests {
 
     #[test]
     fn clamp_marker_size_zero_height_returns_zero_zero() {
-        let (w, h) = clamp_marker_size(20.0.pt(), 0.0.pt(), 12.0.pt());
+        let (w, h) = clamp_marker_size(20.0.as_pt(), 0.0.as_pt(), 12.0.as_pt());
         assert_eq!(w, crate::units::Pt::ZERO);
         assert_eq!(h, crate::units::Pt::ZERO);
     }
 
     #[test]
     fn clamp_marker_size_negative_height_returns_zero_zero() {
-        let (w, h) = clamp_marker_size(20.0.pt(), (-5.0).pt(), 12.0.pt());
+        let (w, h) = clamp_marker_size(20.0.as_pt(), (-5.0).as_pt(), 12.0.as_pt());
         assert_eq!(w, crate::units::Pt::ZERO);
         assert_eq!(h, crate::units::Pt::ZERO);
     }
 
     #[test]
     fn clamp_marker_size_within_line_height_passes_through() {
-        let (w, h) = clamp_marker_size(20.0.pt(), 10.0.pt(), 12.0.pt());
+        let (w, h) = clamp_marker_size(20.0.as_pt(), 10.0.as_pt(), 12.0.as_pt());
         assert_eq!(w.to_f32(), 20.0);
         assert_eq!(h.to_f32(), 10.0);
     }
@@ -1895,7 +1897,7 @@ mod dp_unit_tests {
     #[test]
     fn clamp_marker_size_oversized_scales_down_preserving_aspect() {
         // intrinsic 40×20, line_height 10 → scale = 0.5 → (20, 10).
-        let (w, h) = clamp_marker_size(40.0.pt(), 20.0.pt(), 10.0.pt());
+        let (w, h) = clamp_marker_size(40.0.as_pt(), 20.0.as_pt(), 10.0.as_pt());
         assert!((w.to_f32() - 20.0).abs() < 1e-5);
         assert!((h.to_f32() - 10.0).abs() < 1e-5);
     }
@@ -1909,7 +1911,7 @@ mod dp_unit_tests {
 
     #[test]
     fn affine2d_translation_is_not_identity() {
-        assert!(!Affine2D::translation(1.0_f32.pt(), 0.0_f32.pt()).is_identity());
+        assert!(!Affine2D::translation(1.0_f32.as_pt(), 0.0_f32.as_pt()).is_identity());
     }
 
     #[test]
@@ -1944,8 +1946,8 @@ mod dp_unit_tests {
 
     #[test]
     fn affine2d_mul_two_translations_add() {
-        let t1 = Affine2D::translation(3.0_f32.pt(), 4.0_f32.pt());
-        let t2 = Affine2D::translation(1.0_f32.pt(), (-2.0_f32).pt());
+        let t1 = Affine2D::translation(3.0_f32.as_pt(), 4.0_f32.as_pt());
+        let t2 = Affine2D::translation(1.0_f32.as_pt(), (-2.0_f32).as_pt());
         let composed = t1 * t2;
         let composed_e = composed.e.to_f32();
         let composed_f = composed.f.to_f32();
@@ -1956,7 +1958,7 @@ mod dp_unit_tests {
     #[test]
     fn affine2d_mul_scale_then_translate() {
         let s = Affine2D::scale(2.0, 3.0);
-        let t = Affine2D::translation(10.0_f32.pt(), 5.0_f32.pt());
+        let t = Affine2D::translation(10.0_f32.as_pt(), 5.0_f32.as_pt());
         // (s * t) * p = s * (t * p): translate first, then scale
         let composed = s * t;
         let (x, y) = composed.transform_point(1.0, 1.0);
@@ -1968,10 +1970,10 @@ mod dp_unit_tests {
     #[test]
     fn affine2d_transform_rect_identity_is_noop() {
         let r = Rect {
-            x: 2.0.pt(),
-            y: 3.0.pt(),
-            width: 4.0.pt(),
-            height: 5.0.pt(),
+            x: 2.0.as_pt(),
+            y: 3.0.as_pt(),
+            width: 4.0.as_pt(),
+            height: 5.0.as_pt(),
         };
         let q = Affine2D::IDENTITY.transform_rect(&r);
         // bottom-left, bottom-right, top-right, top-left in Y-down coords
@@ -1988,12 +1990,12 @@ mod dp_unit_tests {
     #[test]
     fn affine2d_transform_rect_translation_shifts_all_corners() {
         let r = Rect {
-            x: 0.0.pt(),
-            y: 0.0.pt(),
-            width: 10.0.pt(),
-            height: 5.0.pt(),
+            x: 0.0.as_pt(),
+            y: 0.0.as_pt(),
+            width: 10.0.as_pt(),
+            height: 5.0.as_pt(),
         };
-        let t = Affine2D::translation(2.0_f32.pt(), 3.0_f32.pt());
+        let t = Affine2D::translation(2.0_f32.as_pt(), 3.0_f32.as_pt());
         let q = t.transform_rect(&r);
         for pt in &q.points {
             assert!(pt[0] >= 2.0 - 1e-5 && pt[0] <= 12.0 + 1e-5, "x={}", pt[0]);
@@ -2039,7 +2041,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_has_radius_true_when_any_nonzero() {
         let mut s = BlockStyle::default();
-        s.border_radii[2] = [0.0, 5.0].map(|v| v.pt());
+        s.border_radii[2] = [0.0, 5.0].map(|v| v.as_pt());
         assert!(s.has_radius());
     }
 
@@ -2055,7 +2057,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_has_visual_style_border_width() {
         let s = BlockStyle {
-            border_widths: [0.0, 1.0, 0.0, 0.0].map(|v| v.pt()),
+            border_widths: [0.0, 1.0, 0.0, 0.0].map(|v| v.as_pt()),
             ..Default::default()
         };
         assert!(s.has_visual_style());
@@ -2064,7 +2066,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_has_visual_style_padding() {
         let s = BlockStyle {
-            padding: [0.0, 0.0, 0.0, 3.0].map(|v| v.pt()),
+            padding: [0.0, 0.0, 0.0, 3.0].map(|v| v.as_pt()),
             ..Default::default()
         };
         assert!(s.has_visual_style());
@@ -2087,8 +2089,8 @@ mod dp_unit_tests {
     #[test]
     fn block_style_content_inset_sums_left_border_and_left_padding() {
         let s = BlockStyle {
-            border_widths: [5.0, 0.0, 0.0, 3.0].map(|v| v.pt()), // top, right, bottom, left
-            padding: [7.0, 0.0, 0.0, 2.0].map(|v| v.pt()),       // top, right, bottom, left
+            border_widths: [5.0, 0.0, 0.0, 3.0].map(|v| v.as_pt()), // top, right, bottom, left
+            padding: [7.0, 0.0, 0.0, 2.0].map(|v| v.as_pt()),       // top, right, bottom, left
             ..Default::default()
         };
         let (left, top) = s.content_inset();
@@ -2125,7 +2127,7 @@ mod dp_unit_tests {
     #[test]
     fn block_style_needs_block_wrapper_from_radius_alone() {
         let s = BlockStyle {
-            border_radii: [[5.0, 5.0]; 4].map(|p| p.map(|v| v.pt())),
+            border_radii: [[5.0, 5.0]; 4].map(|p| p.map(|v| v.as_pt())),
             ..Default::default()
         };
         assert!(s.needs_block_wrapper());
@@ -2151,9 +2153,9 @@ mod dp_unit_tests {
     fn bookmark_collector_records_on_correct_page() {
         let mut bc = BookmarkCollector::new();
         bc.set_current_page(2);
-        bc.record(1, "Chapter One".to_string(), 100.0.pt());
+        bc.record(1, "Chapter One".to_string(), 100.0.as_pt());
         bc.set_current_page(5);
-        bc.record(2, "Section 5.1".to_string(), 42.0.pt());
+        bc.record(2, "Section 5.1".to_string(), 42.0.as_pt());
 
         let entries = bc.into_entries();
         assert_eq!(entries.len(), 2);
@@ -2202,20 +2204,20 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 5.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 5.0.as_pt(),
             },
         );
         collector.set_current_page(2);
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 20.0.pt(),
-                height: 5.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 20.0.as_pt(),
+                height: 5.0.as_pt(),
             },
         );
 
@@ -2246,20 +2248,20 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 5.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 5.0.as_pt(),
             },
         );
         collector.set_current_page(1);
         collector.push_rect(
             &link,
             Rect {
-                x: 5.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 5.0.pt(),
+                x: 5.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 5.0.as_pt(),
             },
         );
 
@@ -2273,9 +2275,9 @@ mod dp_unit_tests {
     fn destination_registry_first_write_wins_for_duplicate_ids() {
         let mut reg = DestinationRegistry::new();
         reg.set_current_page(0);
-        reg.record("anchor", 10.0.pt(), 20.0.pt());
+        reg.record("anchor", 10.0.as_pt(), 20.0.as_pt());
         reg.set_current_page(1);
-        reg.record("anchor", 99.0.pt(), 99.0.pt()); // duplicate — should be ignored
+        reg.record("anchor", 99.0.as_pt(), 99.0.as_pt()); // duplicate — should be ignored
         let (page, x, y) = reg.get("anchor").expect("recorded");
         assert_eq!(page, 0, "first write should win");
         assert!((x.to_f32() - 10.0).abs() < 1e-5);
@@ -2289,7 +2291,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Clip,
-            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.pt()),
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.as_pt()),
             ..Default::default()
         };
         assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
@@ -2302,7 +2304,7 @@ mod dp_unit_tests {
         let style = BlockStyle {
             overflow_x: Overflow::Clip,
             overflow_y: Overflow::Clip,
-            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.pt()),
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.as_pt()),
             ..Default::default()
         };
         assert!(compute_overflow_clip_path(&style, 0.0, 0.0, 100.0, 100.0).is_some());
@@ -2365,10 +2367,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 0.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 10.0.pt(),
+                x: 0.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 10.0.as_pt(),
             },
         );
 
@@ -2383,10 +2385,10 @@ mod dp_unit_tests {
         collector.push_rect(
             &link,
             Rect {
-                x: 20.0.pt(),
-                y: 0.0.pt(),
-                width: 10.0.pt(),
-                height: 10.0.pt(),
+                x: 20.0.as_pt(),
+                y: 0.0.as_pt(),
+                width: 10.0.as_pt(),
+                height: 10.0.as_pt(),
             },
         );
 
@@ -2432,9 +2434,9 @@ mod dp_unit_tests {
         // → rounded-rect stroke path (lines 1441-1458 in draw_block_border).
         let style = BlockStyle {
             border_color: [0, 0, 0, 255],
-            border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.pt()),
+            border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Solid; 4],
-            border_radii: [[4.0, 4.0]; 4].map(|p| p.map(|v| v.pt())),
+            border_radii: [[4.0, 4.0]; 4].map(|p| p.map(|v| v.as_pt())),
             ..Default::default()
         };
         with_canvas_smoke(|canvas| {
@@ -2449,7 +2451,7 @@ mod dp_unit_tests {
         //   stroke_inset_rect (1307-1308) and colored_stroke (1323-1324).
         let style = BlockStyle {
             border_color: [0, 0, 100, 255],
-            border_widths: [6.0, 6.0, 6.0, 6.0].map(|v| v.pt()),
+            border_widths: [6.0, 6.0, 6.0, 6.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Double; 4],
             ..Default::default()
         };
@@ -2465,7 +2467,7 @@ mod dp_unit_tests {
         // apply_border_style(Solid) + stroke_line.
         let style = BlockStyle {
             border_color: [200, 100, 0, 255],
-            border_widths: [2.0, 4.0, 2.0, 4.0].map(|v| v.pt()),
+            border_widths: [2.0, 4.0, 2.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Solid; 4],
             ..Default::default()
         };
@@ -2481,7 +2483,7 @@ mod dp_unit_tests {
         // draw_border_line Groove arm (lines 1369-1397).
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Groove; 4],
             ..Default::default()
         };
@@ -2494,7 +2496,7 @@ mod dp_unit_tests {
     fn draw_block_border_ridge_per_side_smoke() {
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Ridge; 4],
             ..Default::default()
         };
@@ -2508,7 +2510,7 @@ mod dp_unit_tests {
         // draw_border_line Inset arm (lines 1399-1408).
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Inset; 4],
             ..Default::default()
         };
@@ -2521,7 +2523,7 @@ mod dp_unit_tests {
     fn draw_block_border_outset_per_side_smoke() {
         let style = BlockStyle {
             border_color: [128, 128, 128, 255],
-            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.pt()),
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
             border_styles: [BorderStyleValue::Outset; 4],
             ..Default::default()
         };
@@ -2536,7 +2538,7 @@ mod dp_unit_tests {
         // draw_border_line Double arm (lines 1354-1367).
         let style = BlockStyle {
             border_color: [0, 0, 0, 255],
-            border_widths: [6.0, 2.0, 2.0, 2.0].map(|v| v.pt()),
+            border_widths: [6.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
             border_styles: [
                 BorderStyleValue::Double,
                 BorderStyleValue::Solid,

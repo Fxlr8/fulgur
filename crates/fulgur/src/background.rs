@@ -2304,8 +2304,8 @@ mod tests {
     // Helper: BlockStyle with given border widths and padding, all else default.
     fn make_style(border_widths: [f32; 4], padding: [f32; 4]) -> BlockStyle {
         BlockStyle {
-            border_widths: border_widths.map(|v| v.pt()),
-            padding: padding.map(|v| v.pt()),
+            border_widths: border_widths.map(|v| v.as_pt()),
+            padding: padding.map(|v| v.as_pt()),
             ..BlockStyle::default()
         }
     }
@@ -4970,8 +4970,8 @@ mod rect_computation_tests {
 
     fn style(border: [f32; 4], padding: [f32; 4]) -> BlockStyle {
         BlockStyle {
-            border_widths: border.map(|v| v.pt()),
-            padding: padding.map(|v| v.pt()),
+            border_widths: border.map(|v| v.as_pt()),
+            padding: padding.map(|v| v.as_pt()),
             ..BlockStyle::default()
         }
     }
@@ -5058,8 +5058,8 @@ mod inner_radii_tests {
 
     fn style(border: [f32; 4], padding: [f32; 4]) -> BlockStyle {
         BlockStyle {
-            border_widths: border.map(|v| v.pt()),
-            padding: padding.map(|v| v.pt()),
+            border_widths: border.map(|v| v.as_pt()),
+            padding: padding.map(|v| v.as_pt()),
             ..BlockStyle::default()
         }
     }

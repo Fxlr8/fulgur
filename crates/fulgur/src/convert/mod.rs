@@ -72,17 +72,17 @@ pub(crate) fn pt_to_px(v: f32) -> f32 {
 #[inline]
 fn layout_in_pt(layout: &taffy::Layout) -> (Pt, Pt, Pt, Pt) {
     (
-        layout.location.x.px().in_pt(),
-        layout.location.y.px().in_pt(),
-        layout.size.width.px().in_pt(),
-        layout.size.height.px().in_pt(),
+        layout.location.x.as_px().in_pt(),
+        layout.location.y.as_px().in_pt(),
+        layout.size.width.as_px().in_pt(),
+        layout.size.height.as_px().in_pt(),
     )
 }
 
 /// Convert a Taffy `Size<f32>` (CSS px) to PDF pt as `(width, height)`.
 #[inline]
 fn size_in_pt(size: taffy::Size<f32>) -> (Pt, Pt) {
-    (size.width.px().in_pt(), size.height.px().in_pt())
+    (size.width.as_px().in_pt(), size.height.as_px().in_pt())
 }
 
 /// Default CSS line-height multiplier when the actual computed value is
@@ -743,9 +743,9 @@ fn convert_multicol_paragraph_slices(
         if group.paragraph_splits.is_empty() {
             continue;
         }
-        let group_x_pt = group.x_offset.in_pt().to_f32();
-        let group_y_pt = group.y_offset.in_pt().to_f32();
-        let col_w_pt = group.col_w.in_pt().to_f32();
+        let group_x_pt = group.x_offset.in_pt();
+        let group_y_pt = group.y_offset.in_pt();
+        let col_w_pt = group.col_w.in_pt();
 
         for split in &group.paragraph_splits {
             let source_id = split.source_node_id;
@@ -860,16 +860,14 @@ fn convert_multicol_paragraph_slices(
                 .collect();
                 inline_root::recalculate_paragraph_line_boxes(&mut lines);
 
-                // `group_*_pt`/`col_w_pt` are pt-valued f32 (hoisted above from
-                // `Px::in_pt().to_f32()`); the `col_slice` geometry is `Px`, so
-                // `.in_pt().to_f32()` brings it to the same pt-space f32. We sum
-                // in f32 (identical fold to the pre-migration code) and re-tag
-                // the result with `.pt()` — no scale change, byte-neutral.
+                // `group_*_pt`/`col_w_pt` (Pt, hoisted above) plus the `Px`
+                // `col_slice` geometry, summed in Pt space. Same fold as the
+                // pre-migration f32 code — byte-neutral.
                 let origin_pt = (
-                    (group_x_pt + col_slice.origin.x.in_pt().to_f32()).pt(),
-                    (group_y_pt + col_slice.origin.y.in_pt().to_f32()).pt(),
+                    group_x_pt + col_slice.origin.x.in_pt(),
+                    group_y_pt + col_slice.origin.y.in_pt(),
                 );
-                let size_pt = (col_w_pt.pt(), col_slice.size.height.in_pt().to_f32().pt());
+                let size_pt = (col_w_pt, col_slice.size.height.in_pt());
 
                 slices.push(crate::drawables::ParagraphSlice {
                     origin_pt,
@@ -924,7 +922,7 @@ fn shape_paragraph_glyph_runs(
                 let font_index = font_ref.index;
                 let font_arc = ctx.get_or_insert_font(font_ref);
                 let font_size_parley = run.font_size();
-                let font_size = font_size_parley.px().in_pt();
+                let font_size = font_size_parley.as_px().in_pt();
 
                 let brush = &glyph_run.style().brush;
                 let color = get_text_color(doc, brush.id);
@@ -967,7 +965,7 @@ fn shape_paragraph_glyph_runs(
 
                 if !glyphs.is_empty() {
                     let run_text = text.to_string();
-                    let run_x_offset = glyph_run.offset().px().in_pt();
+                    let run_x_offset = glyph_run.offset().as_px().in_pt();
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
@@ -985,10 +983,10 @@ fn shape_paragraph_glyph_runs(
             // `convert_multicol_paragraph_slices`'s scope note.
         }
 
-        let line_height = metrics.line_height.px().in_pt();
+        let line_height = metrics.line_height.as_px().in_pt();
         shaped_lines.push(ShapedLine {
             height: line_height,
-            baseline: metrics.baseline.px().in_pt(),
+            baseline: metrics.baseline.as_px().in_pt(),
             items,
         });
     }
@@ -1576,20 +1574,20 @@ mod utility_fn_tests {
             ..taffy::Layout::new()
         };
         let (x, y, w, h) = layout_in_pt(&layout);
-        assert_eq!(x, 3.0_f32.pt());
-        assert_eq!(y, 6.0_f32.pt());
-        assert_eq!(w, 75.0_f32.pt());
-        assert_eq!(h, 150.0_f32.pt());
+        assert_eq!(x, 3.0_f32.as_pt());
+        assert_eq!(y, 6.0_f32.as_pt());
+        assert_eq!(w, 75.0_f32.as_pt());
+        assert_eq!(h, 150.0_f32.as_pt());
     }
 
     #[test]
     fn layout_in_pt_zero_layout_stays_zero() {
         let layout = taffy::Layout::new();
         let (x, y, w, h) = layout_in_pt(&layout);
-        assert_eq!(x, 0.0_f32.pt());
-        assert_eq!(y, 0.0_f32.pt());
-        assert_eq!(w, 0.0_f32.pt());
-        assert_eq!(h, 0.0_f32.pt());
+        assert_eq!(x, 0.0_f32.as_pt());
+        assert_eq!(y, 0.0_f32.as_pt());
+        assert_eq!(w, 0.0_f32.as_pt());
+        assert_eq!(h, 0.0_f32.as_pt());
     }
 
     // --- size_in_pt ---
@@ -1602,8 +1600,8 @@ mod utility_fn_tests {
             height: 120.0,
         };
         let (w, h) = size_in_pt(size);
-        assert_eq!(w, 60.0_f32.pt());
-        assert_eq!(h, 90.0_f32.pt());
+        assert_eq!(w, 60.0_f32.as_pt());
+        assert_eq!(h, 90.0_f32.as_pt());
     }
 
     #[test]
@@ -1613,8 +1611,8 @@ mod utility_fn_tests {
             height: 0.0,
         };
         let (w, h) = size_in_pt(size);
-        assert_eq!(w, 0.0_f32.pt());
-        assert_eq!(h, 0.0_f32.pt());
+        assert_eq!(w, 0.0_f32.as_pt());
+        assert_eq!(h, 0.0_f32.as_pt());
     }
 
     // --- px_to_pt / pt_to_px roundtrip ---

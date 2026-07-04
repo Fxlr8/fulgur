@@ -118,12 +118,12 @@ pub(super) fn make_image_entry(
         // (`resolve_pseudo_size` returns `None` for `auto`) reaches the
         // `(None, None)` arm of `resolve_image_dimensions`, which returns
         // intrinsic decoded *device px* — that path is production-reachable,
-        // not test-only. Tagging `.pt()` preserves the existing f32
+        // not test-only. Tagging `.as_pt()` preserves the existing f32
         // verbatim (byte-neutral); whether that device-px fallback should be
         // `px_to_pt`-scaled is a pre-existing unit-provenance question
         // tracked in fulgur-t82j, out of scope for this migration.
-        width: w.pt(),
-        height: h.pt(),
+        width: w.as_pt(),
+        height: h.as_pt(),
         opacity,
         visible,
     }
@@ -226,8 +226,8 @@ fn convert_svg(
         node.id,
         crate::drawables::SvgEntry {
             tree,
-            width: content_w.pt(),
-            height: content_h.pt(),
+            width: content_w.as_pt(),
+            height: content_h.as_pt(),
             opacity,
             visible,
         },

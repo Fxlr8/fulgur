@@ -5,16 +5,16 @@ use crate::units::F32Units;
 
 pub(super) fn apply_to(style: &mut BlockStyle, layout: &taffy::Layout) {
     style.border_widths = [
-        layout.border.top.px().in_pt(),
-        layout.border.right.px().in_pt(),
-        layout.border.bottom.px().in_pt(),
-        layout.border.left.px().in_pt(),
+        layout.border.top.as_px().in_pt(),
+        layout.border.right.as_px().in_pt(),
+        layout.border.bottom.as_px().in_pt(),
+        layout.border.left.as_px().in_pt(),
     ];
     style.padding = [
-        layout.padding.top.px().in_pt(),
-        layout.padding.right.px().in_pt(),
-        layout.padding.bottom.px().in_pt(),
-        layout.padding.left.px().in_pt(),
+        layout.padding.top.as_px().in_pt(),
+        layout.padding.right.as_px().in_pt(),
+        layout.padding.bottom.as_px().in_pt(),
+        layout.padding.left.as_px().in_pt(),
     ];
 }
 

@@ -1,7 +1,7 @@
 //! border-color, border-radius, border-style extraction.
 //!
 //! border_radii basis is CSS px (Stylo length-percentage operates in CSS px),
-//! converted to pt via `.px().in_pt()` before storage. See coordinate-system.md.
+//! converted to pt via `.as_px().in_pt()` before storage. See coordinate-system.md.
 
 use super::{StyleContext, absolute_to_rgba};
 use crate::draw_primitives::{BlockStyle, BorderStyleValue};
@@ -61,7 +61,7 @@ fn resolve_radius(
     let radius_css_px: f32 =
         r.0.resolve(style::values::computed::Length::new(basis))
             .px();
-    radius_css_px.px().in_pt()
+    radius_css_px.as_px().in_pt()
 }
 
 fn map_border_style(bs: style::values::specified::BorderStyle) -> BorderStyleValue {

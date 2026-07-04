@@ -36,8 +36,8 @@ fn size_raster_marker(
     line_height: crate::units::Pt,
 ) -> Option<(crate::units::Pt, crate::units::Pt)> {
     let (iw, ih) = ImageRender::decode_dimensions(data, format)?;
-    let intrinsic_w = (iw as f32).px().in_pt();
-    let intrinsic_h = (ih as f32).px().in_pt();
+    let intrinsic_w = (iw as f32).as_px().in_pt();
+    let intrinsic_h = (ih as f32).as_px().in_pt();
     Some(crate::draw_primitives::clamp_marker_size(
         intrinsic_w,
         intrinsic_h,
@@ -88,8 +88,8 @@ pub(super) fn resolve_list_marker(
         AssetKind::Svg => {
             let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
             let size = tree.size();
-            let intrinsic_w = size.width().px().in_pt();
-            let intrinsic_h = size.height().px().in_pt();
+            let intrinsic_w = size.width().as_px().in_pt();
+            let intrinsic_h = size.height().as_px().in_pt();
             let (width, height) =
                 crate::draw_primitives::clamp_marker_size(intrinsic_w, intrinsic_h, line_height);
             let entry = crate::drawables::SvgEntry {
@@ -183,7 +183,7 @@ pub(super) fn extract_marker_lines(
         if line_height_pt == crate::units::Pt::ZERO {
             // Marker-row height returned from this fn (a distinct value from the
             // per-line `ShapedLine.height` below, though both are `Pt`).
-            line_height_pt = metrics.line_height.px().in_pt();
+            line_height_pt = metrics.line_height.as_px().in_pt();
         }
         let mut items = Vec::new();
         let mut line_width = crate::units::Pt::ZERO;
@@ -201,7 +201,7 @@ pub(super) fn extract_marker_lines(
                 // conversion. Glyph ratios stay unitless by dividing by
                 // the original parley value.
                 let font_size_parley = run.font_size();
-                let font_size = font_size_parley.px().in_pt();
+                let font_size = font_size_parley.as_px().in_pt();
 
                 let brush = &glyph_run.style().brush;
                 let color = get_text_color(doc, brush.id);
@@ -231,7 +231,7 @@ pub(super) fn extract_marker_lines(
                         )
                     });
                     run_glyph_offset += 1;
-                    line_width += g.advance.px().in_pt();
+                    line_width += g.advance.as_px().in_pt();
                     glyphs.push(ShapedGlyph {
                         id: g.id,
                         x_advance: g.advance / font_size_parley,
@@ -250,7 +250,7 @@ pub(super) fn extract_marker_lines(
                         decoration: Default::default(),
                         glyphs,
                         text: marker_text.clone(),
-                        x_offset: glyph_run.offset().px().in_pt(),
+                        x_offset: glyph_run.offset().as_px().in_pt(),
                         link: None,
                     }));
                 }
@@ -259,8 +259,8 @@ pub(super) fn extract_marker_lines(
 
         max_width = max_width.max(line_width);
         shaped_lines.push(ShapedLine {
-            height: metrics.line_height.px().in_pt(),
-            baseline: metrics.baseline.px().in_pt(),
+            height: metrics.line_height.as_px().in_pt(),
+            baseline: metrics.baseline.as_px().in_pt(),
             items,
         });
     }
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn size_raster_marker_valid_png_within_line_height_passes_through() {
         // 1×1 px PNG → intrinsic 0.75×0.75 pt; line_height=12 → no downscale.
-        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 12.0.pt());
+        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 12.0.as_pt());
         assert!(result.is_some());
         let (w, h) = result.unwrap();
         let (w, h) = (w.to_f32(), h.to_f32());
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn size_raster_marker_invalid_bytes_returns_none() {
         let bad = Arc::new(vec![0u8; 8]);
-        let result = size_raster_marker(&bad, ImageFormat::Png, 12.0.pt());
+        let result = size_raster_marker(&bad, ImageFormat::Png, 12.0.as_pt());
         assert!(result.is_none());
     }
 
@@ -441,7 +441,7 @@ mod tests {
     fn size_raster_marker_small_line_height_scales_down() {
         // Intrinsic 0.75×0.75 pt, line_height=0.5 → scale=0.5/0.75≈0.667
         // → result height clamped to line_height, width scaled proportionally.
-        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 0.5.pt());
+        let result = size_raster_marker(&sample_png_arc(), ImageFormat::Png, 0.5.as_pt());
         assert!(result.is_some());
         let (w, h) = result.unwrap();
         let (w, h) = (w.to_f32(), h.to_f32());
@@ -505,7 +505,7 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::clone(&font_data),
             font_index: 0,
-            font_size: 12.0.pt(),
+            font_size: 12.0.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![ShapedGlyph {
@@ -520,8 +520,8 @@ mod tests {
             link: None,
         };
         let line = ShapedLine {
-            height: 12.0.pt(),
-            baseline: 9.0.pt(),
+            height: 12.0.as_pt(),
+            baseline: 9.0.as_pt(),
             items: vec![LineItem::Text(glyph_run)],
         };
         let mut drawables = Drawables::new();
@@ -549,8 +549,13 @@ mod tests {
     #[test]
     fn shape_marker_with_skrifa_invalid_font_returns_none() {
         let bad_font = Arc::new(vec![0u8; 16]);
-        let result =
-            shape_marker_with_skrifa(&Marker::Char('•'), &bad_font, 0, 12.0.pt(), [0, 0, 0, 255]);
+        let result = shape_marker_with_skrifa(
+            &Marker::Char('•'),
+            &bad_font,
+            0,
+            12.0.as_pt(),
+            [0, 0, 0, 255],
+        );
         assert!(result.is_none());
     }
 
@@ -562,7 +567,7 @@ mod tests {
             &Marker::Char('•'),
             &font_data,
             0,
-            12.0.pt(),
+            12.0.as_pt(),
             [255, 0, 0, 255],
         );
         assert!(result.is_some());
@@ -583,7 +588,7 @@ mod tests {
             &Marker::String("1. ".to_string()),
             &font_data,
             0,
-            10.0.pt(),
+            10.0.as_pt(),
             [0, 0, 0, 255],
         );
         assert!(result.is_some());
@@ -601,7 +606,7 @@ mod tests {
             &Marker::String("A".to_string()),
             &font_data,
             0,
-            12.0.pt(),
+            12.0.as_pt(),
             [0, 0, 0, 255],
         );
         let run = result.unwrap();
@@ -622,7 +627,7 @@ mod tests {
             &Marker::String("AB".to_string()),
             &font_data,
             0,
-            12.0.pt(),
+            12.0.as_pt(),
             [0, 0, 0, 255],
         );
         let run = result.unwrap();

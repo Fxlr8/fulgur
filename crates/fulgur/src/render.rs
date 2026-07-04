@@ -113,13 +113,13 @@ pub fn render_v2(
             // applied, and only on page 0 (continuation pages are already
             // page-content-area-relative after the fragmenter resets cursor_y).
             let body_y_off = if page_idx == 0 {
-                drawables.body_offset_pt.1.to_f32()
+                drawables.body_offset_pt.1
             } else {
-                0.0
+                crate::units::Pt::ZERO
             };
-            let x_pt = resolved_margin.left + first_frag.x.in_pt().to_f32();
-            let y_pt = resolved_margin.top + body_y_off + first_frag.y.in_pt().to_f32();
-            dest_registry.record(id.as_str(), x_pt.pt(), y_pt.pt());
+            let x_pt = resolved_margin.left.as_pt() + first_frag.x.in_pt();
+            let y_pt = resolved_margin.top.as_pt() + body_y_off + first_frag.y.in_pt();
+            dest_registry.record(id.as_str(), x_pt, y_pt);
         }
     }
 
@@ -475,8 +475,8 @@ fn draw_v2_page(
             && let Some(anchor) = drawables.bookmark_anchors.get(&node_id)
             && let Some(c) = canvas.bookmark_collector.as_deref_mut()
         {
-            let y_pt = margin_top_pt + first_frag.y.in_pt().to_f32();
-            c.record(anchor.level, anchor.label.clone(), y_pt.pt());
+            let y_pt = margin_top_pt.as_pt() + first_frag.y.in_pt();
+            c.record(anchor.level, anchor.label.clone(), y_pt);
         }
 
         if transformed_descendants.contains(&node_id) {
@@ -1234,8 +1234,8 @@ fn paint_multicol_paragraph_slices(
         .to_f32();
     let cutoff = target_frag.height.in_pt().to_f32();
 
-    let container_x_pt = margin_left_pt + target_frag.x.in_pt().to_f32();
-    let container_y_pt = margin_top_pt + target_frag.y.in_pt().to_f32();
+    let container_x_pt = margin_left_pt.as_pt() + target_frag.x.in_pt();
+    let container_y_pt = margin_top_pt.as_pt() + target_frag.y.in_pt();
 
     // Single-fragment containers (the common case) keep the original
     // behaviour: paint every slice at `container_origin + origin_pt`,
@@ -1281,9 +1281,9 @@ fn paint_multicol_paragraph_slices(
                     continue;
                 }
             }
-            let abs_x = container_x_pt + slice.origin_pt.0.to_f32();
-            let abs_y = container_y_pt + slice_top;
-            crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x.pt(), abs_y.pt(), None);
+            let abs_x = container_x_pt + slice.origin_pt.0;
+            let abs_y = container_y_pt + slice_top.as_pt();
+            crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x, abs_y, None);
         }
     });
     if use_run_tagging {
@@ -1325,9 +1325,9 @@ fn draw_under_transform(
     let ox = x_pt + tx.origin.x.to_f32();
     let oy = y_pt + tx.origin.y.to_f32();
     use crate::draw_primitives::Affine2D;
-    let full = Affine2D::translation(ox.pt(), oy.pt())
+    let full = Affine2D::translation(ox.as_pt(), oy.as_pt())
         * tx.matrix
-        * Affine2D::translation((-ox).pt(), (-oy).pt());
+        * Affine2D::translation((-ox).as_pt(), (-oy).as_pt());
 
     if let Some(lc) = canvas.link_collector.as_deref_mut() {
         lc.push_transform(full);
@@ -2314,8 +2314,8 @@ fn paint_multicol_rule_for_page(
         .in_pt();
     let cutoff = target_frag.height.in_pt();
 
-    let x_base = margin_left_pt.pt() + target_frag.x.in_pt();
-    let y_base = margin_top_pt.pt() + target_frag.y.in_pt();
+    let x_base = margin_left_pt.as_pt() + target_frag.x.in_pt();
+    let y_base = margin_top_pt.as_pt() + target_frag.y.in_pt();
 
     for group in &entry.groups {
         if group.n < 2 || group.col_heights.len() != group.n as usize {
@@ -3076,13 +3076,7 @@ fn draw_list_item_marker(
 
     match &entry.marker {
         ListItemMarker::Text { lines, width } if !lines.is_empty() => {
-            crate::paragraph::draw_shaped_lines(
-                canvas,
-                lines,
-                (x - width.to_f32()).pt(),
-                y.pt(),
-                None,
-            );
+            crate::paragraph::draw_shaped_lines(canvas, lines, x.as_pt() - *width, y.as_pt(), None);
         }
         ListItemMarker::Image {
             marker,
@@ -3090,7 +3084,7 @@ fn draw_list_item_marker(
             height,
         } => {
             let marker_x = x - width.to_f32();
-            let marker_y = (y.pt() + (entry.marker_line_height - *height) / 2.0).to_f32();
+            let marker_y = (y.as_pt() + (entry.marker_line_height - *height) / 2.0).to_f32();
             match marker {
                 ImageMarker::Raster(img) => draw_image_v2(canvas, img, marker_x, marker_y),
                 ImageMarker::Svg(svg) => draw_svg_v2(canvas, svg, marker_x, marker_y),
@@ -3212,7 +3206,7 @@ fn draw_paragraph_inner_paint(
         margin_left_pt,
         margin_top_pt,
     });
-    crate::paragraph::draw_shaped_lines(canvas, &slice, x.pt(), y.pt(), inline_box_ctx);
+    crate::paragraph::draw_shaped_lines(canvas, &slice, x.as_pt(), y.as_pt(), inline_box_ctx);
 }
 
 /// Phase 4 PR 3 follow-up (PR #302 Devin): mirror
@@ -3244,7 +3238,7 @@ fn paragraph_lines_for_page(
         .sum::<crate::units::Px>()
         .in_pt();
 
-    let eps = 0.01_f32.pt();
+    let eps = 0.01_f32.as_pt();
     let mut line_top = crate::units::Pt::ZERO;
     let mut start_idx = 0usize;
     while start_idx < all_lines.len() {
@@ -4275,7 +4269,7 @@ mod tests {
         crate::paragraph::ShapedGlyphRun {
             font_data: std::sync::Arc::new(vec![]),
             font_index: 0,
-            font_size: 12.0_f32.pt(),
+            font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: crate::paragraph::TextDecoration::default(),
             glyphs: vec![],
@@ -4287,8 +4281,8 @@ mod tests {
 
     fn make_shaped_line(items: Vec<crate::paragraph::LineItem>) -> crate::paragraph::ShapedLine {
         crate::paragraph::ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items,
         }
     }
@@ -4334,8 +4328,8 @@ mod tests {
     fn para_has_link_runs_inline_box_returns_false() {
         let item = crate::paragraph::InlineBoxItem {
             node_id: None,
-            width: 10.0_f32.pt(),
-            height: 10.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             computed_y: crate::units::Pt::ZERO,
             link: None,
@@ -4358,8 +4352,8 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: std::sync::Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 20.0_f32.pt(),
-            height: 20.0_f32.pt(),
+            width: 20.0_f32.as_pt(),
+            height: 20.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
@@ -4377,8 +4371,8 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: std::sync::Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 10.0_f32.pt(),
-            height: 10.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
@@ -4444,8 +4438,8 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: std::sync::Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 10.0_f32.pt(),
-            height: 10.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
@@ -4455,8 +4449,8 @@ mod tests {
         };
         let inline_box = crate::paragraph::InlineBoxItem {
             node_id: None,
-            width: 10.0_f32.pt(),
-            height: 10.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             computed_y: crate::units::Pt::ZERO,
             link: None,
@@ -4477,17 +4471,17 @@ mod tests {
     fn make_fragment(page_index: u32, height: f32) -> crate::pagination_layout::Fragment {
         crate::pagination_layout::Fragment {
             page_index,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 100.0_f32.px(),
-            height: height.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: height.as_px(),
         }
     }
 
     fn make_line(height_pt: f32, baseline_pt: f32) -> crate::paragraph::ShapedLine {
         crate::paragraph::ShapedLine {
-            height: height_pt.pt(),
-            baseline: baseline_pt.pt(),
+            height: height_pt.as_pt(),
+            baseline: baseline_pt.as_pt(),
             items: vec![],
         }
     }
@@ -4619,7 +4613,10 @@ mod tests {
         d.transforms.insert(
             10,
             crate::drawables::TransformEntry {
-                matrix: crate::draw_primitives::Affine2D::translation(0.0_f32.pt(), 0.0_f32.pt()),
+                matrix: crate::draw_primitives::Affine2D::translation(
+                    0.0_f32.as_pt(),
+                    0.0_f32.as_pt(),
+                ),
                 origin: crate::draw_primitives::Point2::new(
                     crate::units::Pt::ZERO,
                     crate::units::Pt::ZERO,
@@ -4699,8 +4696,8 @@ mod tests {
                 visible: true,
                 id: None,
                 layout_size: None,
-                width: 200.0_f32.pt(),
-                cached_height: 100.0_f32.pt(),
+                width: 200.0_f32.as_pt(),
+                cached_height: 100.0_f32.as_pt(),
                 clip_descendants: vec![41, 42],
             },
         );
@@ -4750,8 +4747,8 @@ mod tests {
             visible: true,
             id: None,
             layout_size,
-            width: width.pt(),
-            cached_height: cached_height.pt(),
+            width: width.as_pt(),
+            cached_height: cached_height.as_pt(),
             clip_descendants: vec![],
         }
     }
@@ -4759,10 +4756,10 @@ mod tests {
     fn make_frag_with_height(height: f32) -> crate::pagination_layout::Fragment {
         crate::pagination_layout::Fragment {
             page_index: 0,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 0.0_f32.px(),
-            height: height.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 0.0_f32.as_px(),
+            height: height.as_px(),
         }
     }
 
@@ -4772,8 +4769,8 @@ mod tests {
         // ignoring entry.width, entry.cached_height, and frag.height.
         use crate::units::F32Units;
         let sz = crate::draw_primitives::Size {
-            width: 120.0_f32.pt(),
-            height: 80.0_f32.pt(),
+            width: 120.0_f32.as_pt(),
+            height: 80.0_f32.as_pt(),
         };
         let entry = make_table_entry_for_size(Some(sz), 200.0, 50.0);
         let frag = make_frag_with_height(99.0);
@@ -5094,19 +5091,19 @@ mod tests {
         let img = crate::paragraph::InlineImage {
             data: Arc::new(vec![]),
             format: crate::image::ImageFormat::Png,
-            width: 10.0_f32.pt(),
-            height: 8.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 8.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             vertical_align: crate::paragraph::VerticalAlign::Baseline,
             opacity: 1.0,
             visible: true,
-            computed_y: 15.0_f32.pt(),
+            computed_y: 15.0_f32.as_pt(),
             link: None,
         };
         let line0 = make_line(12.0, 9.0); // page 0: no items
         let line1 = crate::paragraph::ShapedLine {
-            height: 12.0_f32.pt(),
-            baseline: 21.0_f32.pt(),
+            height: 12.0_f32.as_pt(),
+            baseline: 21.0_f32.as_pt(),
             items: vec![crate::paragraph::LineItem::Image(img)],
         };
         let fragments = vec![
@@ -5166,8 +5163,8 @@ mod tests {
         d.semantics.insert(node_id, make_h1_semantic_entry(None));
         let ib = crate::paragraph::InlineBoxItem {
             node_id: None,
-            width: 50.0_f32.pt(),
-            height: 20.0_f32.pt(),
+            width: 50.0_f32.as_pt(),
+            height: 20.0_f32.as_pt(),
             x_offset: crate::units::Pt::ZERO,
             computed_y: crate::units::Pt::ZERO,
             link: None,
@@ -5175,8 +5172,8 @@ mod tests {
             visible: true,
         };
         let line = crate::paragraph::ShapedLine {
-            height: 16.0_f32.pt(),
-            baseline: 12.0_f32.pt(),
+            height: 16.0_f32.as_pt(),
+            baseline: 12.0_f32.as_pt(),
             items: vec![crate::paragraph::LineItem::InlineBox(ib)],
         };
         d.paragraphs.insert(node_id, make_para(vec![line]));
@@ -5207,8 +5204,8 @@ mod tests {
                 visible: true,
                 id: None,
                 layout_size: None,
-                width: 100.0_f32.pt(),
-                cached_height: 50.0_f32.pt(),
+                width: 100.0_f32.as_pt(),
+                cached_height: 50.0_f32.as_pt(),
                 clip_descendants: vec![],
             },
         );
@@ -5224,7 +5221,7 @@ mod tests {
     ) -> crate::column_css::ColumnRuleSpec {
         use crate::units::F32Units;
         crate::column_css::ColumnRuleSpec {
-            width: width.pt(),
+            width: width.as_pt(),
             style,
             color: [0, 0, 0, 255],
         }
@@ -5353,8 +5350,8 @@ mod tests {
         crate::drawables::ImageEntry {
             image_data: Arc::new(data),
             format,
-            width: 10.0_f32.pt(),
-            height: 10.0_f32.pt(),
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
             opacity: 1.0,
             visible: true,
         }

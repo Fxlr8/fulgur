@@ -35,9 +35,9 @@ fn entry_from(html: &str) -> TransformEntry {
 fn effective_matrix(entry: &TransformEntry, draw_x: f32, draw_y: f32) -> Affine2D {
     let ox = draw_x + entry.origin.x.to_f32();
     let oy = draw_y + entry.origin.y.to_f32();
-    Affine2D::translation(ox.pt(), oy.pt())
+    Affine2D::translation(ox.as_pt(), oy.as_pt())
         * entry.matrix
-        * Affine2D::translation((-ox).pt(), (-oy).pt())
+        * Affine2D::translation((-ox).as_pt(), (-oy).as_pt())
 }
 
 fn approx(actual: f32, expected: f32, tol: f32, label: &str) {
@@ -169,8 +169,8 @@ fn matrix_preserved_with_origin_zero() {
             b: 2.0,
             c: 3.0,
             d: 4.0,
-            e: 3.75_f32.pt(),
-            f: 4.5_f32.pt(),
+            e: 3.75_f32.as_pt(),
+            f: 4.5_f32.as_pt(),
         }
     );
 }

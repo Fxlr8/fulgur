@@ -30,23 +30,25 @@ text, so a reviewer or coding agent reading a bare diff — with no IDE to peek
 types — can still tell a raw external `f32` from an already-typed value. Read the
 **first** conversion applied to a value:
 
-- `x.px()` / `x.pt()` — `x` is a raw `f32` (from an external crate such as
+- `x.as_px()` / `x.as_pt()` — `x` is a raw `f32` (from an external crate such as
   usvg / taffy / stylo, or a literal) being *tagged* with its unit. `F32Units`
-  is implemented for `f32` **only**, so a visible `.px()` / `.pt()` is a
-  compiler-enforced proof that its receiver was untyped (`Pt.px()` does not
-  compile — no such method, no `Deref` to `f32`).
+  is implemented for `f32` **only**, so a visible `.as_px()` / `.as_pt()` is a
+  compiler-enforced proof that its receiver was untyped (`Pt.as_px()` does not
+  compile — no such method, no `Deref` to `f32`). The `as_` prefix
+  disambiguates from Stylo's `CSSPixelLength::px()`, which extracts an `f32`
+  from a computed `Length` and legitimately keeps its bare `.px()` name.
 - `x.in_pt()` / `x.in_px()` — `x` is already a `Px` / `Pt` being *converted*
   (the only place `PX_TO_PT` is applied).
 - `x.to_f32()` — a `Px` / `Pt` being *dropped* back to raw `f32` at an f32 sink
   (FFI boundary, or a still-unmigrated f32 consumer).
 
-So `size.width().px().in_pt()` reads as "raw f32 (px) → `Px` → `Pt`": the leading
-`.px()` is what proves `size.width()` is an untyped external `f32`. A trailing
-`.in_pt()` only converts the freshly-tagged `Px` and says nothing about the
-origin — always read the *first* hop.
+So `size.width().as_px().in_pt()` reads as "raw f32 (px) → `Px` → `Pt`": the
+leading `.as_px()` is what proves `size.width()` is an untyped external `f32`. A
+trailing `.in_pt()` only converts the freshly-tagged `Px` and says nothing about
+the origin — always read the *first* hop.
 
 The authoritative version of this key, with a `compile_fail` doctest proving
-`.px()` can never be called on a `Pt`, lives in the `crate::units` module
+`.as_px()` can never be called on a `Pt`, lives in the `crate::units` module
 docstring (`crates/fulgur/src/units.rs`).
 
 ## Blitz boundary conversion rules (most important)

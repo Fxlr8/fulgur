@@ -1245,7 +1245,7 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
                 // components the basis-0 resolve silently drops them —
                 // acceptable because calc() on vertical-align is rare.
                 let px = lp.resolve(style::values::computed::Length::new(0.0)).px();
-                VerticalAlign::Length(px.px().in_pt())
+                VerticalAlign::Length(px.as_px().in_pt())
             }
         }
     }
@@ -2952,9 +2952,9 @@ fn resolve_length_component(
     use style::values::computed::Length;
     let resolved = lp.resolve(Length::new(basis_pt)).px();
     if lp.has_percentage() {
-        resolved.pt()
+        resolved.as_pt()
     } else {
-        resolved.px().in_pt()
+        resolved.as_px().in_pt()
     }
 }
 
@@ -2974,8 +2974,8 @@ fn op_to_matrix(
             b: m.b,
             c: m.c,
             d: m.d,
-            e: m.e.px().in_pt(),
-            f: m.f.px().in_pt(),
+            e: m.e.as_px().in_pt(),
+            f: m.f.as_px().in_pt(),
         },
         Translate(x, y) => Affine2D::translation(
             resolve_length_component(x, w),

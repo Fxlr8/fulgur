@@ -449,10 +449,10 @@ impl<'a> PaginationLayoutTree<'a> {
             .fragments
             .push(Fragment {
                 page_index: 0,
-                x: body_x.px(),
-                y: 0.0_f32.px(),
-                width: body_w.px(),
-                height: body_layout.size.height.px(),
+                x: body_x.as_px(),
+                y: 0.0_f32.as_px(),
+                width: body_w.as_px(),
+                height: body_layout.size.height.as_px(),
             });
 
         // Prefer body's `layout_children` — same rationale as
@@ -561,10 +561,10 @@ impl<'a> PaginationLayoutTree<'a> {
                         .fragments
                         .push(Fragment {
                             page_index,
-                            x: (body_x + layout.location.x).px(),
-                            y: cursor_y.px(),
-                            width: 0.0_f32.px(),
-                            height: 0.0_f32.px(),
+                            x: (body_x + layout.location.x).as_px(),
+                            y: cursor_y.as_px(),
+                            width: 0.0_f32.as_px(),
+                            height: 0.0_f32.as_px(),
                         });
                     emitted += 1;
                 }
@@ -650,10 +650,10 @@ impl<'a> PaginationLayoutTree<'a> {
                         .fragments
                         .push(Fragment {
                             page_index,
-                            x: (body_x + layout.location.x).px(),
-                            y: cursor_y.px(),
-                            width: child_w.px(),
-                            height: 0.0_f32.px(),
+                            x: (body_x + layout.location.x).as_px(),
+                            y: cursor_y.as_px(),
+                            width: child_w.as_px(),
+                            height: 0.0_f32.as_px(),
                         });
                     emitted += 1;
                 }
@@ -961,10 +961,10 @@ impl<'a> PaginationLayoutTree<'a> {
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: frag_x.px(),
-                        y: cursor_y.px(),
-                        width: child_w.px(),
-                        height: first_slice_h.px(),
+                        x: frag_x.as_px(),
+                        y: cursor_y.as_px(),
+                        width: child_w.as_px(),
+                        height: first_slice_h.as_px(),
                     });
                 record_subtree_descendants(
                     &mut self.geometry,
@@ -1013,10 +1013,10 @@ impl<'a> PaginationLayoutTree<'a> {
                             .fragments
                             .push(Fragment {
                                 page_index,
-                                x: frag_x.px(),
-                                y: 0.0_f32.px(),
-                                width: child_w.px(),
-                                height: last_slice_h.px(),
+                                x: frag_x.as_px(),
+                                y: 0.0_f32.as_px(),
+                                width: child_w.as_px(),
+                                height: last_slice_h.as_px(),
                             });
                     }
                     remaining -= last_slice_h;
@@ -1060,10 +1060,10 @@ impl<'a> PaginationLayoutTree<'a> {
 
             let frag = Fragment {
                 page_index,
-                x: frag_x.px(),
-                y: cursor_y.px(),
-                width: child_w.px(),
-                height: child_h.px(),
+                x: frag_x.as_px(),
+                y: cursor_y.as_px(),
+                width: child_w.as_px(),
+                height: child_h.as_px(),
             };
             self.geometry
                 .entry(child_id)
@@ -1288,10 +1288,10 @@ fn record_subtree_descendants(
             .fragments
             .push(Fragment {
                 page_index,
-                x: child_x.px(),
-                y: child_y.px(),
-                width: w.px(),
-                height: h.px(),
+                x: child_x.as_px(),
+                y: child_y.as_px(),
+                width: w.as_px(),
+                height: h.as_px(),
             });
         record_subtree_descendants(
             geometry,
@@ -1652,10 +1652,10 @@ fn fragment_block_subtree(
             .fragments
             .push(Fragment {
                 page_index: page_in,
-                x: parent_x_in_body.px(),
-                y: cursor_in.px(),
-                width: parent_w.px(),
-                height: h.px(),
+                x: parent_x_in_body.as_px(),
+                y: cursor_in.as_px(),
+                width: parent_w.as_px(),
+                height: h.as_px(),
             });
         return (page_in, cursor_in + h);
     }
@@ -1899,10 +1899,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body.px(),
-                        y: page_start_y.px(),
-                        width: parent_w.px(),
-                        height: (cursor_y - page_start_y).px(),
+                        x: parent_x_in_body.as_px(),
+                        y: page_start_y.as_px(),
+                        width: parent_w.as_px(),
+                        height: (cursor_y - page_start_y).as_px(),
                     });
                 page_index += 1;
                 cursor_y = 0.0;
@@ -1919,10 +1919,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: (parent_x_in_body + layout.location.x).px(),
-                        y: cursor_y.px(),
-                        width: child_w.px(),
-                        height: 0.0_f32.px(),
+                        x: (parent_x_in_body + layout.location.x).as_px(),
+                        y: cursor_y.as_px(),
+                        width: child_w.as_px(),
+                        height: 0.0_f32.as_px(),
                     });
             }
             // Honour `break-after: page` for zero-height elements
@@ -1935,10 +1935,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body.px(),
-                        y: page_start_y.px(),
-                        width: parent_w.px(),
-                        height: (cursor_y - page_start_y).px(),
+                        x: parent_x_in_body.as_px(),
+                        y: page_start_y.as_px(),
+                        width: parent_w.as_px(),
+                        height: (cursor_y - page_start_y).as_px(),
                     });
                 page_index += 1;
                 cursor_y = 0.0;
@@ -1980,10 +1980,10 @@ fn fragment_block_subtree(
                 .fragments
                 .push(Fragment {
                     page_index,
-                    x: parent_x_in_body.px(),
-                    y: page_start_y.px(),
-                    width: parent_w.px(),
-                    height: (cursor_y - page_start_y).px(),
+                    x: parent_x_in_body.as_px(),
+                    y: page_start_y.as_px(),
+                    width: parent_w.as_px(),
+                    height: (cursor_y - page_start_y).as_px(),
                 });
             page_index += 1;
             cursor_y = 0.0;
@@ -2114,10 +2114,10 @@ fn fragment_block_subtree(
                                 .fragments
                                 .push(Fragment {
                                     page_index: pre_recursion_page,
-                                    x: parent_x_in_body.px(),
-                                    y: page_start_y.px(),
-                                    width: parent_w.px(),
-                                    height: prev_height.px(),
+                                    x: parent_x_in_body.as_px(),
+                                    y: page_start_y.as_px(),
+                                    width: parent_w.as_px(),
+                                    height: prev_height.as_px(),
                                 });
                         }
                     }
@@ -2133,10 +2133,10 @@ fn fragment_block_subtree(
                                 .fragments
                                 .push(Fragment {
                                     page_index: p,
-                                    x: parent_x_in_body.px(),
-                                    y: 0.0_f32.px(),
-                                    width: parent_w.px(),
-                                    height: page_height_px.px(),
+                                    x: parent_x_in_body.as_px(),
+                                    y: 0.0_f32.as_px(),
+                                    width: parent_w.as_px(),
+                                    height: page_height_px.as_px(),
                                 });
                         }
                     }
@@ -2162,10 +2162,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body.px(),
-                        y: page_start_y.px(),
-                        width: parent_w.px(),
-                        height: (cursor_y - page_start_y).px(),
+                        x: parent_x_in_body.as_px(),
+                        y: page_start_y.as_px(),
+                        width: parent_w.as_px(),
+                        height: (cursor_y - page_start_y).as_px(),
                     });
                 page_index += 1;
                 cursor_y = 0.0;
@@ -2205,10 +2205,10 @@ fn fragment_block_subtree(
                     .fragments
                     .push(Fragment {
                         page_index,
-                        x: parent_x_in_body.px(),
-                        y: page_start_y.px(),
-                        width: parent_w.px(),
-                        height: (cursor_y - page_start_y).px(),
+                        x: parent_x_in_body.as_px(),
+                        y: page_start_y.as_px(),
+                        width: parent_w.as_px(),
+                        height: (cursor_y - page_start_y).as_px(),
                     });
             }
             page_index += 1;
@@ -2232,10 +2232,10 @@ fn fragment_block_subtree(
             .fragments
             .push(Fragment {
                 page_index,
-                x: child_x_in_body.px(),
-                y: child_page_y.px(),
-                width: child_w.px(),
-                height: child_h.px(),
+                x: child_x_in_body.as_px(),
+                y: child_page_y.as_px(),
+                width: child_w.as_px(),
+                height: child_h.as_px(),
             });
         record_subtree_descendants(
             geometry,
@@ -2262,10 +2262,10 @@ fn fragment_block_subtree(
                 .fragments
                 .push(Fragment {
                     page_index,
-                    x: parent_x_in_body.px(),
-                    y: page_start_y.px(),
-                    width: parent_w.px(),
-                    height: (cursor_y - page_start_y).px(),
+                    x: parent_x_in_body.as_px(),
+                    y: page_start_y.as_px(),
+                    width: parent_w.as_px(),
+                    height: (cursor_y - page_start_y).as_px(),
                 });
             page_index += 1;
             cursor_y = 0.0;
@@ -2309,10 +2309,10 @@ fn fragment_block_subtree(
         .fragments
         .push(Fragment {
             page_index,
-            x: parent_x_in_body.px(),
-            y: page_start_y.px(),
-            width: parent_w.px(),
-            height: (cursor_y - page_start_y).px(),
+            x: parent_x_in_body.as_px(),
+            y: page_start_y.as_px(),
+            width: parent_w.as_px(),
+            height: (cursor_y - page_start_y).as_px(),
         });
 
     (page_index, cursor_y)
@@ -2440,10 +2440,10 @@ fn fragment_inline_root(
             let frag_h = prev_line_bottom - frag_top_local;
             let frag = Fragment {
                 page_index,
-                x: paragraph_x.px(),
-                y: paragraph_top_in_body.px(),
-                width: width.px(),
-                height: frag_h.px(),
+                x: paragraph_x.as_px(),
+                y: paragraph_top_in_body.as_px(),
+                width: width.as_px(),
+                height: frag_h.as_px(),
             };
             geometry.entry(child_id).or_default().fragments.push(frag);
             emitted += 1;
@@ -2460,10 +2460,10 @@ fn fragment_inline_root(
     let frag_h = last_bottom_local - frag_top_local;
     let frag = Fragment {
         page_index,
-        x: paragraph_x.px(),
-        y: paragraph_top_in_body.px(),
-        width: width.px(),
-        height: frag_h.px(),
+        x: paragraph_x.as_px(),
+        y: paragraph_top_in_body.as_px(),
+        width: width.as_px(),
+        height: frag_h.as_px(),
     };
     geometry.entry(child_id).or_default().fragments.push(frag);
     emitted += 1;
@@ -2767,10 +2767,10 @@ pub fn append_position_fixed_fragments(
         for page_index in 0..pages {
             entry.fragments.push(Fragment {
                 page_index,
-                x: x.px(),
-                y: y.px(),
-                width: w.px(),
-                height: h.px(),
+                x: x.as_px(),
+                y: y.as_px(),
+                width: w.as_px(),
+                height: h.as_px(),
             });
         }
 
@@ -2843,10 +2843,10 @@ fn record_fixed_subtree_descendants(
         for page_index in 0..pages.max(1) {
             entry.fragments.push(Fragment {
                 page_index,
-                x: stored_x.px(),
-                y: stored_y.px(),
-                width: w.px(),
-                height: h.px(),
+                x: stored_x.as_px(),
+                y: stored_y.as_px(),
+                width: w.as_px(),
+                height: h.as_px(),
             });
         }
 
@@ -3290,10 +3290,10 @@ fn record_subtree_fragments_at_offset(
                     };
                     entry.fragments.push(Fragment {
                         page_index,
-                        x: stored_x.px(),
-                        y: stored_y.px(),
-                        width: w.px(),
-                        height: stored_h.px(),
+                        x: stored_x.as_px(),
+                        y: stored_y.as_px(),
+                        width: w.as_px(),
+                        height: stored_h.as_px(),
                     });
                 }
                 descendant_total_pages = descendant_total_pages.max(last_page.saturating_add(1));
@@ -4514,24 +4514,24 @@ h2 { string-set: chapter-title content(text); }
         let mut geom = PaginationGeometryTable::new();
         geom.entry(10).or_default().fragments.push(Fragment {
             page_index: 0,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 100.0_f32.px(),
-            height: 50.0_f32.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
         });
         geom.entry(20).or_default().fragments.push(Fragment {
             page_index: 0,
-            x: 0.0_f32.px(),
-            y: 50.0_f32.px(),
-            width: 100.0_f32.px(),
-            height: 50.0_f32.px(),
+            x: 0.0_f32.as_px(),
+            y: 50.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
         });
         geom.entry(30).or_default().fragments.push(Fragment {
             page_index: 1,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 100.0_f32.px(),
-            height: 50.0_f32.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 50.0_f32.as_px(),
         });
 
         let mut markers: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
@@ -4572,17 +4572,17 @@ h2 { string-set: chapter-title content(text); }
         let mut geom = PaginationGeometryTable::new();
         geom.entry(42).or_default().fragments.push(Fragment {
             page_index: 0,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 100.0_f32.px(),
-            height: 800.0_f32.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 800.0_f32.as_px(),
         });
         geom.entry(42).or_default().fragments.push(Fragment {
             page_index: 1,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 100.0_f32.px(),
-            height: 200.0_f32.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 100.0_f32.as_px(),
+            height: 200.0_f32.as_px(),
         });
 
         let mut markers: BTreeMap<usize, Vec<(String, String)>> = BTreeMap::new();
@@ -5142,7 +5142,9 @@ h2 { string-set: chapter-title content(text); }
 
         let has_later_text_fragment = geom.values().any(|g| {
             g.fragments.iter().any(|f| {
-                f.page_index == 1 && f.height > crate::units::Px::ZERO && f.height < 100.0_f32.px()
+                f.page_index == 1
+                    && f.height > crate::units::Px::ZERO
+                    && f.height < 100.0_f32.as_px()
             })
         });
 
@@ -5944,10 +5946,10 @@ h2 { string-set: chapter-title content(text); }
         let mut geom = PaginationGeometryTable::new();
         geom.entry(1).or_default().fragments.push(Fragment {
             page_index: 2,
-            x: 0.0_f32.px(),
-            y: 0.0_f32.px(),
-            width: 1.0_f32.px(),
-            height: 1.0_f32.px(),
+            x: 0.0_f32.as_px(),
+            y: 0.0_f32.as_px(),
+            width: 1.0_f32.as_px(),
+            height: 1.0_f32.as_px(),
         });
         assert_eq!(super::implied_page_count(&geom), 3);
     }
