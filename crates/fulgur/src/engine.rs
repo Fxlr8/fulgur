@@ -1603,4 +1603,210 @@ mod tests {
         // `<a>` inherits page 2 (0-based index) from its `<p>` parent.
         assert_eq!(map.get(&2).map(String::as_str), Some("#sec"));
     }
+
+    // ── collapse_ws_keep_edges: pure-function unit tests ──────────────────
+
+    #[test]
+    fn collapse_ws_empty_string_returns_empty() {
+        assert_eq!(collapse_ws_keep_edges(""), "");
+    }
+
+    #[test]
+    fn collapse_ws_all_whitespace_returns_single_space() {
+        // All-whitespace input: leading is true, core is empty → single space.
+        assert_eq!(collapse_ws_keep_edges("   "), " ");
+    }
+
+    #[test]
+    fn collapse_ws_only_newlines_returns_single_space() {
+        assert_eq!(collapse_ws_keep_edges("\n\t "), " ");
+    }
+
+    #[test]
+    fn collapse_ws_leading_space_preserved() {
+        // Leading whitespace is present and non-empty core → prefix space.
+        assert_eq!(collapse_ws_keep_edges(" hello"), " hello");
+    }
+
+    #[test]
+    fn collapse_ws_trailing_space_preserved() {
+        assert_eq!(collapse_ws_keep_edges("hello "), "hello ");
+    }
+
+    #[test]
+    fn collapse_ws_both_edges_and_internal_collapse() {
+        // Leading, trailing and multiple internal spaces all handled.
+        assert_eq!(collapse_ws_keep_edges(" hello   world "), " hello world ");
+    }
+
+    #[test]
+    fn collapse_ws_internal_only_collapses_no_edge_space() {
+        assert_eq!(collapse_ws_keep_edges("foo  bar"), "foo bar");
+    }
+
+    #[test]
+    fn collapse_ws_separator_pattern_preserved() {
+        // Typical CSS attr/string separator: `attr(tag) ": "`.
+        // Leading and trailing spaces survive, internal is already single.
+        assert_eq!(collapse_ws_keep_edges(" TAG: "), " TAG: ");
+    }
+
+    // ── render_batch: public API smoke test ───────────────────────────────
+
+    #[test]
+    fn render_batch_returns_one_result_per_input() {
+        let engine = Engine::builder().build();
+        let htmls: &[&str] = &[
+            "<html><body><p>first</p></body></html>",
+            "<html><body><p>second</p></body></html>",
+        ];
+        let results = engine.render_batch(htmls);
+        assert_eq!(results.len(), 2);
+        for r in results {
+            let pdf = r.expect("render_batch item should succeed");
+            assert!(pdf.starts_with(b"%PDF"), "each item should be a PDF");
+        }
+    }
+
+    #[test]
+    fn render_batch_empty_slice_returns_empty_vec() {
+        let engine = Engine::builder().build();
+        let htmls: &[&str] = &[];
+        let results = engine.render_batch(htmls);
+        assert!(results.is_empty());
+    }
+
+    // ── Builder: system_fonts and serialize_settings ──────────────────────
+
+    #[test]
+    fn system_fonts_false_still_produces_pdf() {
+        // system_fonts(false) disables Blitz system-font loading; a plain
+        // document with no explicit fonts should still render to a valid PDF.
+        let pdf = Engine::builder()
+            .system_fonts(false)
+            .build()
+            .render("<html><body><p>test</p></body></html>")
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn serialize_settings_builder_produces_pdf() {
+        let settings = SerializeSettings::default();
+        let pdf = Engine::builder()
+            .serialize_settings(settings)
+            .build()
+            .render("<html><body><p>test</p></body></html>")
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── Builder: build() with assets + base_path triggers base_url setup ──
+
+    #[test]
+    fn build_with_assets_and_base_path_sets_base_url() {
+        // When both assets and base_path are provided, build() calls
+        // canonical_directory_url and propagates it to the bundle.
+        let mut bundle = AssetBundle::default();
+        bundle.add_css("p { color: red; }");
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::builder()
+            .assets(bundle)
+            .base_path(dir.path())
+            .build();
+        assert_eq!(engine.base_path(), Some(dir.path()));
+        assert!(engine.assets().is_some());
+    }
+
+    // ── @page landscape via CSS (resolved_landscape branch) ───���───────────
+
+    #[test]
+    fn render_page_with_css_landscape_size_produces_pdf() {
+        // `@page { size: A4 landscape; }` triggers the `resolved_landscape =
+        // true` branch in render_pass (line 182).
+        let html = "<!doctype html><html><head><style>\
+            @page { size: A4 landscape; }\
+            </style></head><body><p>landscape</p></body></html>";
+        let pdf = Engine::builder().build().render(html).unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── GCPM: running elements (lines 246-248) ────────────────────────────
+
+    #[test]
+    fn render_with_running_elements_css() {
+        // `position: running(name)` triggers the RunningElementPass branch
+        // (engine.rs:246-248).
+        let mut assets = AssetBundle::new();
+        assets.add_css(
+            ".hdr { position: running(pageHdr); }\
+             @page { @top-center { content: element(pageHdr); } }",
+        );
+        let html = "<body><div class=\"hdr\">Header</div><p>Content</p></body>";
+        let pdf = Engine::builder()
+            .assets(assets)
+            .build()
+            .render(html)
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ���─ GCPM: string-set with snapshot recording (lines 272-279) ─────────
+
+    #[test]
+    fn render_with_string_set_css() {
+        // `string-set: name content()` triggers the StringSetPass branch
+        // (engine.rs:272-279).
+        let mut assets = AssetBundle::new();
+        assets.add_css(
+            "h1 { string-set: chap content(text); }\
+             @page { @top-center { content: string(chap); } }",
+        );
+        let html = "<body><h1>Chapter One</h1><p>Body text.</p></body>";
+        let pdf = Engine::builder()
+            .assets(assets)
+            .build()
+            .render(html)
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── GCPM: target-counter triggers 2-pass render (lines 87, 93) ────────
+
+    #[test]
+    fn render_target_counter_in_margin_box_triggers_two_pass() {
+        // `target-counter()` inside a @page margin box sets
+        // `has_target_refs = true`, which causes `needs_pass_two = true` and
+        // drives the render() method through its pass-2 branch (lines 87/93).
+        let mut assets = AssetBundle::new();
+        assets.add_css("@page { @bottom-center { content: target-counter(attr(href), page); } }");
+        let html = "<body>\
+            <p><a href=\"#sec\">jump to section</a></p>\
+            <h2 id=\"sec\">Section</h2>\
+            </body>";
+        let pdf = Engine::builder()
+            .assets(assets)
+            .build()
+            .render(html)
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── GCPM: static-content mappings (lines 330-335) ────────────────────
+
+    #[test]
+    fn render_with_static_content_mapping_css() {
+        // Multi-value plain-string content: list triggers static_content_mappings
+        // (engine.rs:330-335). All items must be String(_) and len > 1; mixing in
+        // counter() would classify it as dynamic and route to CounterPass instead.
+        let mut assets = AssetBundle::new();
+        assets.add_css("h1::before { content: \"Ch. \" \"1\"; }");
+        let html = "<body><h1>Title</h1><p>Text</p></body>";
+        let pdf = Engine::builder()
+            .assets(assets)
+            .build()
+            .render(html)
+            .unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
