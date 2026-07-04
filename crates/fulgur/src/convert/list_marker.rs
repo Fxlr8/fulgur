@@ -182,7 +182,7 @@ pub(super) fn extract_marker_lines(
         let metrics = line.metrics();
         if line_height_pt == crate::units::Pt::ZERO {
             // Marker-row height returned from this fn (a distinct value from the
-            // per-line `ShapedLine.height` below, though both are now `Pt`).
+            // per-line `ShapedLine.height` below, though both are `Pt`).
             line_height_pt = metrics.line_height.px().in_pt();
         }
         let mut items = Vec::new();

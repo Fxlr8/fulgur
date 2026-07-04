@@ -142,10 +142,8 @@ pub(super) fn try_convert(
             };
             (fs, lh)
         } else {
-            (
-                12.0_f32.px().in_pt(),
-                12.0_f32.px().in_pt() * DEFAULT_LINE_HEIGHT_RATIO,
-            )
+            let fs = 12.0_f32.px().in_pt();
+            (fs, fs * DEFAULT_LINE_HEIGHT_RATIO)
         };
 
         let color = get_text_color(doc, node_id);
