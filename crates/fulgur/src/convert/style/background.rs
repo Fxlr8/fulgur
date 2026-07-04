@@ -1,12 +1,13 @@
 //! background-color and background-image-layers extraction.
 
 use super::{StyleContext, absolute_to_rgba};
-use crate::convert::{extract_asset_name, px_to_pt};
+use crate::convert::extract_asset_name;
 use crate::draw_primitives::{
     BackgroundLayer, BgBox, BgClip, BgImageContent, BgLengthPercentage, BgRepeat, BgSize,
     BlockStyle,
 };
 use crate::image::ImageRender;
+use crate::units::{F32Units, Pt};
 use std::sync::Arc;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
@@ -343,8 +344,8 @@ fn resolve_radial_gradient(
 
     let (out_shape, out_size) = match shape {
         EndingShape::Circle(Circle::Radius(r)) => {
-            // r: NonNegativeLength = NonNegative<Length>。.0.px() で CSS px、px_to_pt() で pt 化。
-            let len_pt = px_to_pt(r.0.px());
+            // r: NonNegativeLength = NonNegative<Length>。.0.px() で CSS px、.as_px().in_pt() で pt 化。
+            let len_pt = r.0.px().as_px().in_pt();
             (
                 RadialGradientShape::Circle,
                 RadialGradientSize::Explicit {
@@ -531,7 +532,11 @@ fn convert_lp_to_bg(lp: &style::values::computed::LengthPercentage) -> BgLengthP
     if let Some(pct) = lp.to_percentage() {
         BgLengthPercentage::Percentage(pct.0)
     } else {
-        BgLengthPercentage::Length(lp.to_length().map(|l| px_to_pt(l.px())).unwrap_or(0.0))
+        BgLengthPercentage::Length(
+            lp.to_length()
+                .map(|l| l.px().as_px().in_pt())
+                .unwrap_or(Pt::ZERO),
+        )
     }
 }
 
@@ -545,7 +550,7 @@ fn try_convert_lp_to_bg(
         Some(BgLengthPercentage::Percentage(pct.0))
     } else {
         lp.to_length()
-            .map(|l| BgLengthPercentage::Length(px_to_pt(l.px())))
+            .map(|l| BgLengthPercentage::Length(l.px().as_px().in_pt()))
     }
 }
 
