@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.0] - 2026-07-04
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(cli): accept custom WxH dimensions in --size by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/552
+### Bug Fixes
+* fix(pagination): revert MAX_PAGES to 10k and collapse pathological childless tall blocks by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/553
+* fix(cli): make --size authoritative over CSS @page orientation by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/556
+* fix(gcpm): inject static pseudo content per selector to remove render DoS by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/557
+
+## New Contributors
+* @fulgur-release-bot[bot] made their first contribution in https://github.com/fulgur-rs/fulgur/pull/545
+* @claude[bot] made their first contribution in https://github.com/fulgur-rs/fulgur/pull/554
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.22.0...v0.23.0
+
 ## [0.22.0] - 2026-07-03
 
 <!-- Release notes generated using configuration in .github/release.yml at v0.22.0 -->
@@ -1677,5 +1694,3 @@ All notable changes to this project will be documented in this file.
 ### Release
 
 - v0.1.1
-
-
