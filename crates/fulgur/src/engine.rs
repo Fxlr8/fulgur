@@ -1714,7 +1714,7 @@ mod tests {
             .assets(bundle)
             .base_path(dir.path())
             .build();
-        // Observable: the engine has an AssetBundle set.
+        assert_eq!(engine.base_path(), Some(dir.path()));
         assert!(engine.assets().is_some());
     }
 
