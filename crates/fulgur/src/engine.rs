@@ -45,6 +45,7 @@ struct RenderPassOutput {
 /// Unit contract: `drawables` coordinates are PDF pt; `geometry` fragments are
 /// CSS px (`units::Px`). See the crate `units` module and
 /// `.claude/rules/coordinate-system.md`.
+#[derive(Debug, Clone)]
 pub struct LayoutOutput {
     pub drawables: crate::drawables::Drawables,
     pub geometry: crate::pagination_layout::PaginationGeometryTable,
@@ -90,6 +91,16 @@ impl Engine {
 
     pub fn assets(&self) -> Option<&AssetBundle> {
         self.assets.as_ref()
+    }
+
+    /// Font byte-blobs registered on the [`AssetBundle`], or an empty slice
+    /// when no assets are set. Shared by every layout / render entry point so
+    /// they all parse against the identical font set.
+    fn fonts(&self) -> &[std::sync::Arc<Vec<u8>>] {
+        self.assets
+            .as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Render HTML string to PDF bytes.
@@ -157,11 +168,7 @@ impl Engine {
         let mut gcpm = crate::gcpm::parser::parse_gcpm(&combined_css);
         let css_to_inject = gcpm.cleaned_css.clone();
 
-        let fonts = self
-            .assets
-            .as_ref()
-            .map(|a| a.fonts.as_slice())
-            .unwrap_or(&[]);
+        let fonts = self.fonts();
 
         // Parse the HTML and resolve every <link rel="stylesheet"> /
         // @import file inside `base_path` in one shot. The returned
@@ -676,11 +683,7 @@ impl Engine {
 
         // Re-derive fonts / system_fonts from `&self` — byte-identical to the
         // value `layout_to_drawables` used for parsing.
-        let fonts = self
-            .assets
-            .as_ref()
-            .map(|a| a.fonts.as_slice())
-            .unwrap_or(&[]);
+        let fonts = self.fonts();
 
         let pdf = crate::render::render_v2(
             &self.config,
@@ -808,11 +811,7 @@ impl Engine {
     /// constructs that do not touch GCPM.
     #[doc(hidden)]
     pub fn build_drawables_for_testing_no_gcpm(&self, html: &str) -> crate::drawables::Drawables {
-        let fonts = self
-            .assets
-            .as_ref()
-            .map(|a| a.fonts.as_slice())
-            .unwrap_or(&[]);
+        let fonts = self.fonts();
 
         let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
@@ -877,11 +876,7 @@ impl Engine {
         crate::drawables::Drawables,
         crate::pagination_layout::PaginationGeometryTable,
     ) {
-        let fonts = self
-            .assets
-            .as_ref()
-            .map(|a| a.fonts.as_slice())
-            .unwrap_or(&[]);
+        let fonts = self.fonts();
 
         let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
@@ -968,9 +963,10 @@ impl Engine {
         // those corrections from tests that drive
         // `pseudo_absolute_content_url::
         // absolute_pseudo_with_right_bottom_offsets_by_image_size`.
-        // The production `render` path already passes
-        // `&convert_ctx.pagination_geometry` to `render_v2` after
-        // convert, so this matches the production read order.
+        // The production path already reads `convert_ctx.pagination_geometry`
+        // after convert — `layout_to_drawables` `mem::take`s it into a
+        // `pagination_geometry` local (the same value) that `render_pass` then
+        // hands to `render_v2` — so this matches the production read order.
         (drawables, convert_ctx.pagination_geometry)
     }
 }
@@ -1837,7 +1833,7 @@ mod tests {
     #[test]
     fn render_page_with_css_landscape_size_produces_pdf() {
         // `@page { size: A4 landscape; }` triggers the `resolved_landscape =
-        // true` branch in render_pass (line 182).
+        // true` branch in `layout_to_drawables`.
         let html = "<!doctype html><html><head><style>\
             @page { size: A4 landscape; }\
             </style></head><body><p>landscape</p></body></html>";

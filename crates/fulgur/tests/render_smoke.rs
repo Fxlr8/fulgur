@@ -5186,4 +5186,29 @@ fn layout_two_pass_target_counter_returns_drawables_and_geometry() {
         !out.drawables.paragraphs.is_empty(),
         "the paragraphs should produce draw payloads after 2-pass layout"
     );
+
+    // Pass-2-SPECIFIC guard: `target-counter(attr(href), page)` in the
+    // `a::after` resolves against the pass-1 `AnchorMap`. The `#a` heading
+    // lands on page 2 (`page-break-before: always`), so the resolved pseudo
+    // content is " (p.2)". On a regression to single-pass this stays a
+    // fixed-width placeholder (never the literal resolved page number), so
+    // this assert fails — which the non-empty checks above cannot detect.
+    // Reads the pre-raster run text (`ShapedGlyphRun::text`), so it is
+    // font-independent (no glyph inspection).
+    let resolved_text: String = out
+        .drawables
+        .paragraphs
+        .values()
+        .flat_map(|entry| &entry.lines)
+        .flat_map(|line| &line.items)
+        .filter_map(|item| match item {
+            fulgur::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        resolved_text.contains("(p.2)"),
+        "pass-2 target-counter should resolve to the real page number \"(p.2)\"; \
+         got run text: {resolved_text:?}"
+    );
 }
