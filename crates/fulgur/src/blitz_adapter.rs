@@ -2397,6 +2397,13 @@ impl CounterPass {
         let state = self.state.borrow();
         let mut out = String::new();
         for item in items {
+            // Per-call materialization cap: a content list may hold an
+            // unbounded number of (individually capped) `counters()` items, so
+            // bound their sum before the per-element generated-CSS budget is
+            // consulted (fulgur-rtts / GHSA-395p-pj7r-jm42).
+            if out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES {
+                break;
+            }
             match item {
                 ContentItem::String(s) => out.push_str(s),
                 ContentItem::Counter { name, style } => {
@@ -2732,6 +2739,12 @@ fn resolve_label(
 ) -> String {
     let mut out = String::new();
     for item in items {
+        // Per-call materialization cap (see `resolve_content` / fulgur-rtts):
+        // a label list may hold unbounded (individually capped) `counters()`
+        // items; bound their sum before the per-label outline budget applies.
+        if out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES {
+            break;
+        }
         match item {
             ContentItem::String(s) => out.push_str(s),
             ContentItem::ContentText => {
@@ -4268,6 +4281,63 @@ mod tests {
         );
     }
 
+    /// DoS hardening (single-element multi-item list): a `content` list may
+    /// hold an unbounded number of `counters()` items. Each item is
+    /// individually capped, but their sum is materialized into one string
+    /// before the per-element generated-CSS budget is consulted, so a single
+    /// element could otherwise allocate `item_count × MAX_COUNTER_CHAIN_BYTES`.
+    /// `MAX_RESOLVED_CONTENT_BYTES` caps that per-call materialization.
+    #[test]
+    fn counter_pass_bounds_single_element_multi_item_content() {
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle,
+            ParsedSelector, PseudoElement,
+        };
+
+        // Two nested `counter-reset:x` so the target's chain is length 2 and a
+        // long separator makes each `counters()` item hit the per-chain cap.
+        let html = r#"<html><body><div><div class="t"></div></div></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let counter_mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        // One element, but its content list holds many `counters()` items.
+        const ITEMS: usize = 500;
+        let mut content = Vec::new();
+        for _ in 0..ITEMS {
+            content.push(ContentItem::Counters {
+                name: "x".into(),
+                separator: "x".repeat(4096),
+                style: CounterStyle::Decimal,
+            });
+        }
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("t".into()),
+            pseudo: PseudoElement::Before,
+            content,
+        }];
+
+        let pass = CounterPass::new(counter_mappings, content_mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let css = pass.generated_css();
+
+        // One element → one rule; its content must not exceed the per-call cap
+        // (plus one final item and the rule-wrapper overhead).
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 256;
+        assert!(
+            css.len() <= crate::MAX_RESOLVED_CONTENT_BYTES + slack,
+            "single-element generated CSS {} exceeded per-call cap {}",
+            css.len(),
+            crate::MAX_RESOLVED_CONTENT_BYTES
+        );
+    }
+
     /// DoS hardening: many sibling `counter-reset` elements each emitting a
     /// `counters(x, <long separator>)` `::before` rule must not grow the
     /// generated CSS without bound. Sibling resets share the parent scope
@@ -4765,6 +4835,65 @@ mod tests {
         let results = pass.into_results();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.label, "1.2");
+    }
+
+    /// DoS hardening (bookmark sink, single-label multi-item list): a
+    /// `bookmark-label` list may hold an unbounded number of `counters()`
+    /// items, materialized into one label string before the per-label outline
+    /// budget is consulted. `MAX_RESOLVED_CONTENT_BYTES` caps that per-call
+    /// materialization.
+    #[test]
+    fn bookmark_pass_bounds_single_label_multi_item_content() {
+        use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
+        use crate::gcpm::{ContentItem, CounterStyle};
+
+        let html = r#"<html><body><h1 id="t">Title</h1></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        fn find_h1(doc: &HtmlDocument, id: usize) -> Option<usize> {
+            let node = doc.get_node(id)?;
+            if node
+                .element_data()
+                .is_some_and(|el| el.name.local.as_ref() == "h1")
+            {
+                return Some(id);
+            }
+            node.children.iter().find_map(|&c| find_h1(doc, c))
+        }
+        let h1_id = find_h1(&doc, doc.root_element().id).expect("h1 node");
+
+        // Length-2 chain so the (long) separator appears in each item.
+        let mut counter_snapshots = BTreeMap::new();
+        let mut chain = BTreeMap::new();
+        chain.insert("x".to_string(), vec![1, 1]);
+        counter_snapshots.insert(h1_id, chain);
+
+        const ITEMS: usize = 500;
+        let mut label = Vec::new();
+        for _ in 0..ITEMS {
+            label.push(ContentItem::Counters {
+                name: "x".into(),
+                separator: "x".repeat(4096),
+                style: CounterStyle::Decimal,
+            });
+        }
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(label),
+        }];
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snapshots, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+
+        assert_eq!(results.len(), 1);
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 256;
+        assert!(
+            results[0].1.label.len() <= crate::MAX_RESOLVED_CONTENT_BYTES + slack,
+            "single label {} exceeded per-call cap {}",
+            results[0].1.label.len(),
+            crate::MAX_RESOLVED_CONTENT_BYTES
+        );
     }
 
     /// DoS hardening (bookmark sink): `bookmark-label: counters(x, <long sep>)`

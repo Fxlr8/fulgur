@@ -103,6 +103,22 @@ pub(crate) const MAX_OUTLINE_LABEL_BYTES: usize = 8 * 1024 * 1024;
 /// [`MAX_PAGES`]. ~8M values ≈ 32 MiB — far above any realistic document.
 pub(crate) const MAX_COUNTER_SNAPSHOT_ENTRIES: usize = 8 * 1024 * 1024;
 
+/// Per-call cap on the bytes materialized while resolving a single content /
+/// label list (`::before` / `::after`, `bookmark-label`, margin-box running
+/// content) into one string.
+///
+/// [`MAX_COUNTER_CHAIN_BYTES`] bounds a *single* `counters()` / `counter()` /
+/// `target-counters()` item, but a content list may hold an unbounded number
+/// of such items (`content: counters(x) counters(x) …` — the parser caps
+/// neither item count nor list length). The aggregate output budgets
+/// ([`MAX_GENERATED_CSS_BYTES`], [`MAX_OUTLINE_LABEL_BYTES`]) are checked once
+/// per element *before* the list is resolved, so a single element could
+/// otherwise materialize `item_count × MAX_COUNTER_CHAIN_BYTES` in one
+/// allocation and overshoot them. This bounds that per-call materialization.
+/// Kept generous — no realistic single element resolves anywhere near this —
+/// so only adversarial multi-item lists are clipped.
+pub(crate) const MAX_RESOLVED_CONTENT_BYTES: usize = 1024 * 1024;
+
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;
