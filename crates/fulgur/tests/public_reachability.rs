@@ -17,3 +17,22 @@ fn column_css_public_types_are_externally_nameable() {
     };
     assert_eq!(props.fill, Some(ColumnFill::Balance));
 }
+
+/// Regression guard for fulgur-2map.10 (P3b): `LayoutOutput`'s field types
+/// (`Drawables`, `PaginationGeometryTable`) must stay nameable via external
+/// `fulgur::…` paths. `LayoutOutput.geometry` exposes `PaginationGeometryTable`
+/// (→ `PaginationGeometry` → `Fragment` → `units::Px`) publicly for the first
+/// time; if any of that chain is ever privatized, this fails to compile.
+#[test]
+fn layout_output_field_types_are_externally_nameable() {
+    use fulgur::pagination_layout::PaginationGeometryTable;
+    use fulgur::{Engine, LayoutOutput};
+
+    let out: LayoutOutput = Engine::builder()
+        .build()
+        .layout("<p>x</p>")
+        .expect("layout");
+    let _geometry: &PaginationGeometryTable = &out.geometry;
+    let _drawables: &fulgur::drawables::Drawables = &out.drawables;
+    assert!(!out.geometry.is_empty());
+}

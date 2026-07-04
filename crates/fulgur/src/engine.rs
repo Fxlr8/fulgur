@@ -36,6 +36,37 @@ struct RenderPassOutput {
     needs_pass_two: bool,
 }
 
+/// Renderer-agnostic layout result produced by [`Engine::layout`].
+///
+/// Carries the parse → style → layout → `Drawables` output that both PDF
+/// rendering and out-of-core consumers (image rasterization, OCR label
+/// generation) build on, without pulling PDF serialization into core.
+///
+/// Unit contract: `drawables` coordinates are PDF pt; `geometry` fragments are
+/// CSS px (`units::Px`). See the crate `units` module and
+/// `.claude/rules/coordinate-system.md`.
+pub struct LayoutOutput {
+    pub drawables: crate::drawables::Drawables,
+    pub geometry: crate::pagination_layout::PaginationGeometryTable,
+}
+
+/// Full per-pass output of [`Engine::layout_to_drawables`] — a superset of the
+/// public [`LayoutOutput`] holding every side-channel `render::render_v2`
+/// needs. `fonts` / `system_fonts` are intentionally absent: both are re-derived
+/// from `&self` at the render call site, byte-identically to the old inline path.
+struct LayoutArtifacts {
+    drawables: crate::drawables::Drawables,
+    pagination_geometry: crate::pagination_layout::PaginationGeometryTable,
+    gcpm: crate::gcpm::GcpmContext,
+    running_store: crate::gcpm::running::RunningElementStore,
+    string_set_for_render: HashMap<usize, Vec<(String, String)>>,
+    counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
+    html_title: Option<String>,
+    implicit_href_map: BTreeMap<usize, String>,
+    collected_anchor_map: AnchorMap,
+    needs_pass_two: bool,
+}
+
 impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
@@ -103,7 +134,11 @@ impl Engine {
     /// empty strings.
     ///
     /// See [`RenderPassOutput`] for the returned fields.
-    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
+    fn layout_to_drawables(
+        &self,
+        html: &str,
+        anchor_map: Option<&AnchorMap>,
+    ) -> Result<LayoutArtifacts> {
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self
@@ -597,9 +632,53 @@ impl Engine {
 
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
         let html_title = crate::blitz_adapter::extract_html_title(&doc);
+        // Reclaim the post-convert geometry without partially moving
+        // `convert_ctx`, then drop it so its `&running_store` borrow ends and
+        // `running_store` can be moved into the artifacts.
+        let pagination_geometry = std::mem::take(&mut convert_ctx.pagination_geometry);
+        drop(convert_ctx);
+        Ok(LayoutArtifacts {
+            drawables,
+            pagination_geometry,
+            gcpm,
+            running_store,
+            string_set_for_render,
+            counter_ops_for_render,
+            html_title,
+            implicit_href_map,
+            collected_anchor_map,
+            needs_pass_two: needs_anchor_map_for_pass_two,
+        })
+    }
+
+    /// Single render pass: lay out via [`layout_to_drawables`], then serialize
+    /// the pages via the unchanged [`render::render_v2`]. `render`'s 2-pass
+    /// loop is untouched. See [`RenderPassOutput`] for the returned fields.
+    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
+        let LayoutArtifacts {
+            drawables,
+            pagination_geometry,
+            gcpm,
+            running_store,
+            string_set_for_render,
+            counter_ops_for_render,
+            html_title,
+            implicit_href_map,
+            collected_anchor_map,
+            needs_pass_two,
+        } = self.layout_to_drawables(html, anchor_map)?;
+
+        // Re-derive fonts / system_fonts from `&self` — byte-identical to the
+        // value `layout_to_drawables` used for parsing.
+        let fonts = self
+            .assets
+            .as_ref()
+            .map(|a| a.fonts.as_slice())
+            .unwrap_or(&[]);
+
         let pdf = crate::render::render_v2(
             &self.config,
-            &convert_ctx.pagination_geometry,
+            &pagination_geometry,
             &drawables,
             &gcpm,
             &running_store,
@@ -615,7 +694,7 @@ impl Engine {
         Ok(RenderPassOutput {
             pdf,
             anchor_map: collected_anchor_map,
-            needs_pass_two: needs_anchor_map_for_pass_two,
+            needs_pass_two,
         })
     }
 
@@ -624,6 +703,35 @@ impl Engine {
         let pdf = self.render(html)?;
         std::fs::write(path, pdf)?;
         Ok(())
+    }
+
+    /// Lay out `html` and return the renderer-agnostic per-node draw payloads
+    /// (`drawables`) plus the pagination geometry, without serializing a PDF.
+    ///
+    /// Page shape (canvas size, margins, orientation) comes from the builder
+    /// configuration, exactly as [`render`](Engine::render) uses it. Documents
+    /// with `target-counter()` / `target-counters()` / `target-text()` run the
+    /// same internal 2-pass resolution as `render`, so the returned `drawables`
+    /// carry resolved cross-reference values, not fixed-width placeholders.
+    ///
+    /// This is the shared layout path behind `render`; a downstream image
+    /// rasterizer or OCR-label generator can consume [`LayoutOutput`] without
+    /// pulling PDF serialization into core.
+    pub fn layout(&self, html: &str) -> Result<LayoutOutput> {
+        // Pass 1, mirroring `render`'s 2-pass loop.
+        let pass1 = self.layout_to_drawables(html, None)?;
+        if !pass1.needs_pass_two {
+            return Ok(LayoutOutput {
+                drawables: pass1.drawables,
+                geometry: pass1.pagination_geometry,
+            });
+        }
+        // Pass 2: re-lay-out with the pass-1 AnchorMap so `target-*` resolve.
+        let pass2 = self.layout_to_drawables(html, Some(&pass1.collected_anchor_map))?;
+        Ok(LayoutOutput {
+            drawables: pass2.drawables,
+            geometry: pass2.pagination_geometry,
+        })
     }
 
     /// Render a template with data to PDF bytes.

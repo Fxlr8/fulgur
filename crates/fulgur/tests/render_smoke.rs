@@ -5143,3 +5143,47 @@ fn render_v2_smoke_break_after_recursing_child_emits_parent_fragment() {
     </body></html>"#;
     assert_paginates(html, "recursing break-after must paginate");
 }
+
+/// Smoke: public `Engine::layout()` single-pass path. A plain document
+/// (no `target-*`) takes the `!needs_pass_two` early return. Asserts the
+/// renderer-agnostic layout output carries drawables + geometry, so an
+/// out-of-core consumer (image / OCR) has something to compose.
+#[test]
+fn layout_single_pass_returns_drawables_and_geometry() {
+    let out = Engine::builder()
+        .build()
+        .layout("<html><body><p>hello layout</p></body></html>")
+        .expect("layout single-pass");
+    assert!(!out.geometry.is_empty(), "geometry should record fragments");
+    assert!(
+        !out.drawables.paragraphs.is_empty(),
+        "the <p> should produce a paragraph draw payload"
+    );
+}
+
+/// Smoke: public `Engine::layout()` 2-pass path. A `target-counter()` in
+/// `::after` forces `needs_pass_two`, so `layout()` falls through the early
+/// return and re-lays out with the pass-1 `AnchorMap`. Covers the else-arm
+/// of the branch for codecov/patch (the single-pass test covers the `return`).
+#[test]
+fn layout_two_pass_target_counter_returns_drawables_and_geometry() {
+    let html = r##"<!doctype html>
+<html><head><style>
+  a::after { content: " (p." target-counter(attr(href), page) ")"; }
+  h2 { page-break-before: always; }
+</style></head>
+<body>
+  <a href="#a">Chapter A</a>
+  <h2 id="a">Chapter A</h2>
+  <p>aaa</p>
+</body></html>"##;
+    let out = Engine::builder()
+        .build()
+        .layout(html)
+        .expect("layout 2-pass");
+    assert!(!out.geometry.is_empty(), "geometry should record fragments");
+    assert!(
+        !out.drawables.paragraphs.is_empty(),
+        "the paragraphs should produce draw payloads after 2-pass layout"
+    );
+}
