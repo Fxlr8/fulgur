@@ -125,15 +125,21 @@ impl Engine {
         Ok(pdf2)
     }
 
-    /// Single render pass. When `anchor_map` is `Some`, the supplied map
-    /// is wired into [`CounterPass`] so `target-counter()` /
-    /// `target-counters()` / `target-text()` inside `::before` / `::after`
-    /// resolve against pass-1 anchor data, and is passed through to
-    /// `render::render_v2` so margin-box `target-*` resolvers can do the
-    /// same. When `None`, those resolvers fall back to placeholders /
-    /// empty strings.
+    /// Run the full parse → style → layout → convert pipeline for a single
+    /// pass and return the resolved [`LayoutArtifacts`] (drawables, pagination
+    /// geometry, and the side-channel data `render::render_v2` needs) —
+    /// **without** serializing a PDF.
     ///
-    /// See [`RenderPassOutput`] for the returned fields.
+    /// When `anchor_map` is `Some`, the supplied pass-1 map is wired into
+    /// [`CounterPass`] so `target-counter()` / `target-counters()` /
+    /// `target-text()` inside `::before` / `::after` resolve against pass-1
+    /// anchor data, and is carried in the returned artifacts so margin-box
+    /// `target-*` resolvers in `render::render_v2` can do the same. When
+    /// `None`, those resolvers fall back to placeholders / empty strings.
+    ///
+    /// This is the single shared layout path: both `render_pass` (which
+    /// serializes the result to PDF) and the public [`layout`](Engine::layout)
+    /// build on it. See [`LayoutArtifacts`] for the returned fields.
     fn layout_to_drawables(
         &self,
         html: &str,
