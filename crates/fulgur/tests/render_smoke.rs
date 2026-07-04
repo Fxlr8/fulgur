@@ -39,6 +39,23 @@ fn page_count(pdf: &[u8]) -> usize {
     count
 }
 
+/// Concatenate every `ShapedGlyphRun` string across a paragraph's shaped
+/// lines — enough to identify a paragraph by its text content in the flat
+/// `Drawables.paragraphs` map, or to assert resolved pseudo-content text.
+/// Reads the pre-raster run text (`ShapedGlyphRun::text`), so it is
+/// font-independent (no glyph inspection).
+fn paragraph_run_text(entry: &fulgur::drawables::ParagraphEntry) -> String {
+    entry
+        .lines
+        .iter()
+        .flat_map(|line| line.items.iter())
+        .filter_map(|item| match item {
+            fulgur::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Render `html` through the v2 pipeline and assert it produced a valid
 /// PDF that paginated (`>= 2` pages). `what` labels the failure case.
 fn assert_paginates(html: &str, what: &str) {
@@ -680,7 +697,6 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     // produces multiple wrapped lines; with the relayout, the fixed
     // subtree is reshaped against the page area and the sentence fits
     // on one line.
-    use fulgur::paragraph::LineItem;
 
     // The fixed paragraph carries a unique sentence so we can identify
     // it in the flat `Drawables.paragraphs` map by text content. The
@@ -707,18 +723,7 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     let fixed_para = drawables
         .paragraphs
         .values()
-        .find(|p| {
-            let combined: String = p
-                .lines
-                .iter()
-                .flat_map(|l| l.items.iter())
-                .filter_map(|it| match it {
-                    LineItem::Text(run) => Some(run.text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            combined.contains(FIXED_TEXT)
-        })
+        .find(|&p| paragraph_run_text(p).contains(FIXED_TEXT))
         .expect("fixed paragraph must appear in Drawables.paragraphs");
 
     assert_eq!(
@@ -5195,20 +5200,19 @@ fn layout_two_pass_target_counter_returns_drawables_and_geometry() {
     // this assert fails — which the non-empty checks above cannot detect.
     // Reads the pre-raster run text (`ShapedGlyphRun::text`), so it is
     // font-independent (no glyph inspection).
-    let resolved_text: String = out
+    let resolved = out
         .drawables
         .paragraphs
         .values()
-        .flat_map(|entry| &entry.lines)
-        .flat_map(|line| &line.items)
-        .filter_map(|item| match item {
-            fulgur::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
-            _ => None,
-        })
-        .collect();
+        .any(|p| paragraph_run_text(p).contains("(p.2)"));
     assert!(
-        resolved_text.contains("(p.2)"),
+        resolved,
         "pass-2 target-counter should resolve to the real page number \"(p.2)\"; \
-         got run text: {resolved_text:?}"
+         got paragraph texts: {:?}",
+        out.drawables
+            .paragraphs
+            .values()
+            .map(paragraph_run_text)
+            .collect::<Vec<_>>()
     );
 }

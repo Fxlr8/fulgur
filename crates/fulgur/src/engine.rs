@@ -727,19 +727,18 @@ impl Engine {
     /// rasterizer or OCR-label generator can consume [`LayoutOutput`] without
     /// pulling PDF serialization into core.
     pub fn layout(&self, html: &str) -> Result<LayoutOutput> {
-        // Pass 1, mirroring `render`'s 2-pass loop.
+        // Mirror `render`'s 2-pass loop: pass 1 always runs; when it reports
+        // `target-*` cross-references, pass 2 re-lays-out with the pass-1
+        // AnchorMap so those resolve. Project the final artifacts once.
         let pass1 = self.layout_to_drawables(html, None)?;
-        if !pass1.needs_pass_two {
-            return Ok(LayoutOutput {
-                drawables: pass1.drawables,
-                geometry: pass1.pagination_geometry,
-            });
-        }
-        // Pass 2: re-lay-out with the pass-1 AnchorMap so `target-*` resolve.
-        let pass2 = self.layout_to_drawables(html, Some(&pass1.collected_anchor_map))?;
+        let artifacts = if pass1.needs_pass_two {
+            self.layout_to_drawables(html, Some(&pass1.collected_anchor_map))?
+        } else {
+            pass1
+        };
         Ok(LayoutOutput {
-            drawables: pass2.drawables,
-            geometry: pass2.pagination_geometry,
+            drawables: artifacts.drawables,
+            geometry: artifacts.pagination_geometry,
         })
     }
 
