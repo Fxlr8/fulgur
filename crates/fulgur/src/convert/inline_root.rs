@@ -86,7 +86,7 @@ pub(super) fn try_convert(
 
         // Inside list-style-image marker injection.
         if !paragraph.lines.is_empty() {
-            let first_line_height = paragraph.lines[0].height.to_f32();
+            let first_line_height = paragraph.lines[0].height;
             if let Some(inline_img) =
                 list_marker::resolve_inside_image_marker(node, first_line_height, ctx.assets)
             {
