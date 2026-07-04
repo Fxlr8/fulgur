@@ -1759,7 +1759,7 @@ mod tests {
         // (engine.rs:272-279).
         let mut assets = AssetBundle::new();
         assets.add_css(
-            "h1 { string-set: chap content(); }\
+            "h1 { string-set: chap content(text); }\
              @page { @top-center { content: string(chap); } }",
         );
         let html = "<body><h1>Chapter One</h1><p>Body text.</p></body>";
@@ -1796,10 +1796,11 @@ mod tests {
 
     #[test]
     fn render_with_static_content_mapping_css() {
-        // Multi-value `content:` list in a pseudo-element triggers the
-        // static_content_mappings branch (engine.rs:330-335).
+        // Multi-value plain-string content: list triggers static_content_mappings
+        // (engine.rs:330-335). All items must be String(_) and len > 1; mixing in
+        // counter() would classify it as dynamic and route to CounterPass instead.
         let mut assets = AssetBundle::new();
-        assets.add_css("h1::before { content: \"Ch. \" counter(page); }");
+        assets.add_css("h1::before { content: \"Ch. \" \"1\"; }");
         let html = "<body><h1>Title</h1><p>Text</p></body>";
         let pdf = Engine::builder()
             .assets(assets)
