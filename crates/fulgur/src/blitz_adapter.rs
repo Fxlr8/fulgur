@@ -2512,6 +2512,11 @@ pub struct BookmarkInfo {
 pub struct BookmarkPass {
     mappings: Vec<BookmarkMapping>,
     results: RefCell<Vec<(usize, BookmarkInfo)>>,
+    /// Running total of resolved-label bytes pushed to `results`, used to
+    /// enforce the [`crate::MAX_OUTLINE_LABEL_BYTES`] total-output budget so a
+    /// `counters()`-amplified `bookmark-label` cannot grow the outline without
+    /// bound (see the budget check in `resolve_node`).
+    emitted_label_bytes: std::cell::Cell<usize>,
     /// Per-node counter-state snapshots produced by `CounterPass`.
     /// Each value is the full nesting chain (outer-to-inner) per CSS
     /// Lists 3 §4.5; `counter()` takes the innermost (`last()`) value.
@@ -2548,6 +2553,7 @@ impl BookmarkPass {
         Self {
             mappings,
             results: RefCell::new(Vec::new()),
+            emitted_label_bytes: std::cell::Cell::new(0),
             counter_snapshots,
             string_snapshots,
         }
@@ -2629,6 +2635,16 @@ impl BookmarkPass {
             None => return,
         };
 
+        // Total-output budget: once the accumulated outline labels reach the
+        // cap, stop emitting further entries. `counters()` labels can be up to
+        // `MAX_COUNTER_CHAIN_BYTES` each from a tiny element, so the outline is
+        // an N-element amplification sink distinct from the generated CSS.
+        // Checked before resolution so the per-label materialization work is
+        // skipped too.
+        if self.emitted_label_bytes.get() >= crate::MAX_OUTLINE_LABEL_BYTES {
+            return;
+        }
+
         // Label fallback: if no `bookmark-label` was declared, use the
         // element's text content (equivalent to `content()`).
         let resolved_label = match label {
@@ -2651,6 +2667,8 @@ impl BookmarkPass {
             return;
         }
 
+        self.emitted_label_bytes
+            .set(self.emitted_label_bytes.get() + resolved_label.len());
         self.results.borrow_mut().push((
             node_id,
             BookmarkInfo {
@@ -4639,6 +4657,82 @@ mod tests {
         let results = pass.into_results();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.label, "1.2");
+    }
+
+    /// DoS hardening (bookmark sink): `bookmark-label: counters(x, <long sep>)`
+    /// resolves to an up-to-`MAX_COUNTER_CHAIN_BYTES` label from a few bytes of
+    /// element, so many sibling entries would accumulate an unbounded outline
+    /// even though each single label is capped. The total-output
+    /// `MAX_OUTLINE_LABEL_BYTES` budget must bound the aggregate — the outline
+    /// is a separate sink from the generated CSS, which `MAX_GENERATED_CSS_BYTES`
+    /// does not cover.
+    #[test]
+    fn bookmark_pass_bounds_total_label_bytes_under_sibling_flood() {
+        use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
+        use crate::gcpm::{ContentItem, CounterStyle};
+
+        const SIBLINGS: usize = 2500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        fn collect_divs(doc: &HtmlDocument, id: usize, out: &mut Vec<usize>) {
+            if let Some(node) = doc.get_node(id) {
+                if node
+                    .element_data()
+                    .is_some_and(|el| el.name.local.as_ref() == "div")
+                {
+                    out.push(id);
+                }
+                for &c in &node.children {
+                    collect_divs(doc, c, out);
+                }
+            }
+        }
+        let mut div_ids = Vec::new();
+        collect_divs(&doc, doc.root_element().id, &mut div_ids);
+        assert_eq!(div_ids.len(), SIBLINGS);
+
+        // Give every div a 2-entry chain so the resolved label (with a long
+        // separator) hits the per-label cap.
+        let mut counter_snapshots = BTreeMap::new();
+        for &id in &div_ids {
+            let mut chain = BTreeMap::new();
+            chain.insert("x".to_string(), vec![1, 1]);
+            counter_snapshots.insert(id, chain);
+        }
+
+        let separator = "x".repeat(4096);
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("div".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![ContentItem::Counters {
+                name: "x".into(),
+                separator,
+                style: CounterStyle::Decimal,
+            }]),
+        }];
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snapshots, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+
+        let total: usize = results.iter().map(|(_, b)| b.label.len()).sum();
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 64;
+        assert!(
+            total <= crate::MAX_OUTLINE_LABEL_BYTES + slack,
+            "total outline label bytes {} exceeded budget {}",
+            total,
+            crate::MAX_OUTLINE_LABEL_BYTES
+        );
+        assert!(
+            results.len() < SIBLINGS,
+            "budget did not engage: {} entries for {SIBLINGS} siblings",
+            results.len()
+        );
     }
 
     #[test]

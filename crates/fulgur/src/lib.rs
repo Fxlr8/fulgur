@@ -70,6 +70,21 @@ pub(crate) const MAX_COUNTER_CHAIN_BYTES: usize = 4 * 1024;
 /// counter-bearing pseudo-elements to reach it).
 pub(crate) const MAX_GENERATED_CSS_BYTES: usize = 8 * 1024 * 1024;
 
+/// Total-output budget for the resolved `bookmark-label` strings that
+/// [`blitz_adapter::BookmarkPass`] accumulates into the PDF outline. Once the
+/// aggregate resolved-label size reaches this bound, further outline entries
+/// are skipped.
+///
+/// `bookmark-label: counters(name, sep)` resolves through the same
+/// [`MAX_COUNTER_CHAIN_BYTES`]-capped path, so a single label can be up to
+/// that cap while its originating element is only a few bytes — a per-element
+/// amplification that plain text labels (whose bytes come from the input)
+/// cannot produce. The outline is a separate sink from the generated CSS, so
+/// [`MAX_GENERATED_CSS_BYTES`] does not bound it; this budget caps the
+/// N-element accumulation there, mirroring that guard. Kept generous so no
+/// realistic document (headings / figures with short labels) is clipped.
+pub(crate) const MAX_OUTLINE_LABEL_BYTES: usize = 8 * 1024 * 1024;
+
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;
