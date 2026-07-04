@@ -991,10 +991,20 @@ impl<'a> PaginationLayoutTree<'a> {
                 // content-bearing block, or a childless band that fits
                 // within the cap, is not collapsed and takes the
                 // truncate-and-warn path below unchanged.
+                //
+                // fulgur-c8re (security): a replaced element (`<img>` /
+                // `<svg>`) is NOT special-cased out of this collapse. It only
+                // reaches this branch when it is taller than `MAX_PAGES` pages
+                // (~10M px) — a range no legitimate single image occupies — so
+                // collapsing a non-painting one (unresolved `src`,
+                // `visibility:hidden`, undecodable format, empty `<svg>`) to a
+                // single clipped page loses nothing real, while gating on tag
+                // name alone (the removed `is_replaced_content`) let such a
+                // node amplify a few bytes of HTML into ~`MAX_PAGES` blank
+                // pages (a validated high-severity DoS).
                 let collapse_childless = self.page_height_px > 0.0
                     && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
-                    && !subtree_has_rendered_content(self.doc, child_id, 0)
-                    && !is_replaced_content(self.doc, child_id);
+                    && !subtree_has_rendered_content(self.doc, child_id, 0);
                 // fulgur-2m6w: cap the per-page-strip slicing at
                 // `MAX_PAGES`. `child_h` is attacker-controlled CSS
                 // (`height` / `vh`), so without this bound a few bytes of
@@ -1119,19 +1129,6 @@ impl<'a> PaginationLayoutTree<'a> {
 
         emitted
     }
-}
-
-/// fulgur-ezst (Codex P2 on PR #553): true if `node_id` is a replaced
-/// element that paints its own box content — `<img>` / `<svg>`, matching
-/// `convert::replaced`'s dispatch. Such a node has no rendered *descendants*
-/// yet is visible content in its own right, so a pathologically tall one
-/// must NOT be collapsed like a blank spacer (the collapse would clip the
-/// image to a single page). A background / border is decoration, not
-/// replaced content, and stays collapsible by design (see `MAX_PAGES`).
-fn is_replaced_content(doc: &BaseDocument, node_id: usize) -> bool {
-    doc.get_node(node_id)
-        .and_then(|n| n.element_data())
-        .is_some_and(|el| matches!(el.name.local.as_ref(), "img" | "svg"))
 }
 
 /// fulgur-ezst: true if `parent_id`'s subtree renders any VISIBLE box (a
@@ -4204,25 +4201,40 @@ mod tests {
         ));
     }
 
-    /// fulgur-ezst (Codex P2 on PR #553): a replaced element (`<img>`/`<svg>`)
-    /// has no descendants but paints its own box, so a pathologically tall
-    /// one must NOT collapse (that would clip the image to one page) — it
-    /// takes the cap path like any content-bearing block.
+    /// fulgur-c8re (security): a pathologically tall CHILDLESS replaced
+    /// element (`<img>` / `<svg>`) that paints nothing must collapse like any
+    /// blank spacer. "Paints nothing" covers the common offline-first case of
+    /// an unresolved `src` (no matching `AssetBundle` entry), a
+    /// `visibility:hidden` image, an undecodable format, and an empty `<svg>`.
+    ///
+    /// The predecessor `is_replaced_content` exception (Codex P2 on PR #553 /
+    /// fulgur-ezst) gated the collapse on tag name alone, so such a
+    /// non-painting node disabled the collapse and amplified a few bytes of
+    /// HTML into ~`MAX_PAGES` blank pages (a validated high-severity DoS). It
+    /// was removed: a replaced element only reaches this branch when it is
+    /// taller than `MAX_PAGES` pages (~10M px), a range no legitimate single
+    /// image occupies, so clipping it to one page loses no real content.
     #[test]
-    fn replaced_tall_block_is_not_collapsed() {
-        let html = r#"<html><body><img style="display:block;width:10px;height:99999999px" src="x.png"></body></html>"#;
-        let mut doc = parse(html, 600.0);
-        let table = run_pass(&mut doc, 800.0);
-        let pages = implied_page_count(&table);
-        assert!(
-            pages > 1_000,
-            "a replaced element paints its own content and must not collapse; got {pages}",
-        );
-        assert!(
-            pages <= crate::MAX_PAGES + 1,
-            "still clamped to ~MAX_PAGES ({}); got {pages}",
-            crate::MAX_PAGES,
-        );
+    fn replaced_tall_childless_block_collapses() {
+        for tag in [
+            // Unresolved `src`: no `AssetBundle` on this test path, so the
+            // image paints nothing — yet it is still a pathological amplifier.
+            r#"<img src="missing.png" style="display:block;width:10px;height:99999999px">"#,
+            // `visibility:hidden`: occupies layout, paints nothing.
+            r#"<img src="x.png" style="display:block;visibility:hidden;width:10px;height:99999999px">"#,
+            // Empty `<svg>`: no drawable content.
+            r#"<svg style="display:block;width:10px;height:99999999px"></svg>"#,
+        ] {
+            let html = format!(r#"<html><body>{tag}</body></html>"#);
+            let mut doc = parse(&html, 600.0);
+            let table = run_pass(&mut doc, 800.0);
+            assert_eq!(
+                implied_page_count(&table),
+                1,
+                "a non-painting tall replaced element must collapse, not \
+                 amplify into blank pages: {tag}",
+            );
+        }
     }
 
     /// fulgur-ezst (Codex P2 on PR #553): a `visibility:hidden` descendant
