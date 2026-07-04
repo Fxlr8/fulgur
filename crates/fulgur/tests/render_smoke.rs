@@ -4857,6 +4857,35 @@ fn childless_cap_exceeding_block_collapses_end_to_end() {
     );
 }
 
+/// fulgur-c8re (security): a tall CHILDLESS *replaced* element that paints
+/// nothing — an unresolved `src` (the common offline-first case, no matching
+/// `AssetBundle` entry), a `visibility:hidden` image, or an empty `<svg>` —
+/// must collapse end-to-end just like the blank `<div>` above, not amplify
+/// into ~10k blank pages. Guards the full `render.rs` per-page-allocation
+/// path the DoS finding exploited; the pagination unit test only checks
+/// `implied_page_count`. A tag-only replaced-element exception previously
+/// disabled the collapse here — uncollapsed, this 79-byte input rendered
+/// ~10k pages / ~3 MB; collapsed it is a single ~KB page.
+#[test]
+fn replaced_childless_cap_exceeding_block_collapses_end_to_end() {
+    let html = r#"<!doctype html><html><body><img src="missing.png" style="display:block;width:1px;height:99999999px"></body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render must terminate and succeed");
+    assert!(pdf.starts_with(b"%PDF"), "expected a valid PDF");
+    assert_eq!(
+        page_count(&pdf),
+        1,
+        "a non-painting tall replaced element must collapse to a single page",
+    );
+    assert!(
+        pdf.len() < 500_000,
+        "collapsed render must be small (single page); got {} bytes",
+        pdf.len(),
+    );
+}
+
 /// fulgur-2qpt: deprecated aliases `render_html` and `render_html_to_file`
 /// must delegate to the renamed methods and produce valid PDFs.
 #[test]
