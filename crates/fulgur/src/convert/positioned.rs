@@ -471,7 +471,13 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────
 
     fn parse_doc(html: &str) -> HtmlDocument {
-        crate::blitz_adapter::parse_and_layout(html, 595.0, 842.0, &[], false)
+        crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            false,
+        )
     }
 
     fn find_first_by_tag(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
@@ -633,8 +639,8 @@ mod tests {
                 <div style="position:absolute;width:10px;height:10px;">abs</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -671,8 +677,8 @@ mod tests {
                 <div>static</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -704,8 +710,8 @@ mod tests {
                 <div>second</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -732,8 +738,8 @@ mod tests {
         // visiting any children, even though child_ids is non-empty.
         let mut doc = crate::blitz_adapter::parse_and_layout(
             r#"<!doctype html><html><body><div><p>text</p></div></body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -771,8 +777,8 @@ mod tests {
                 <div style="position:absolute;width:5px;height:5px;"></div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -811,8 +817,8 @@ mod tests {
                 <div>content</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -1050,8 +1056,8 @@ mod tests {
                 <div style="position:absolute;width:20px;height:20px;">abs</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -1079,8 +1085,8 @@ mod tests {
             r#"<!doctype html><html><body>
               <section><div>static</div></section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -1107,8 +1113,8 @@ mod tests {
         // so no conversion occurs. Covers the function entry and loop header.
         let mut doc = crate::blitz_adapter::parse_and_layout(
             r#"<!doctype html><html><body><section><div>x</div></section></body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -1138,8 +1144,8 @@ mod tests {
                 <div style="position:absolute;width:10px;height:10px;">abs</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -1178,8 +1184,8 @@ mod tests {
                 <div style="position:absolute;width:10px;height:10px;">abs</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -1218,8 +1224,8 @@ mod tests {
                 <div style="position:fixed;width:10px;height:10px;">fixed</div>
               </section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );
@@ -1281,8 +1287,8 @@ mod tests {
             r#"<!doctype html><html><body>
               <section><div>static</div></section>
             </body></html>"#,
-            595.0,
-            842.0,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
             &[],
             false,
         );

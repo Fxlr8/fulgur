@@ -2,6 +2,7 @@ use crate::asset::AssetBundle;
 use crate::config::{Config, ConfigBuilder, Margin, PageSize};
 use crate::convert::ConvertContext;
 use crate::error::Result;
+use crate::units::F32Units;
 use krilla::SerializeSettings;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
@@ -207,8 +208,8 @@ impl Engine {
         // correctly.
         let (mut doc, link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             &html,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.page_height()) as u32,
+            self.config.content_width().as_pt().in_px().to_f32(),
+            self.config.page_height().as_pt().in_px().to_f32() as u32,
             fonts,
             self.system_fonts,
             self.base_path.as_deref(),
@@ -271,8 +272,8 @@ impl Engine {
         // `set_viewport_size_px` truncates to u32 internally for Blitz's
         // `Viewport.window_size`; Taffy keeps the f32 sub-pixel precision
         // it needs for its layout cache.
-        let resolved_content_width_px = crate::convert::pt_to_px(resolved_content_width_pt);
-        let resolved_content_height_px = crate::convert::pt_to_px(resolved_content_height_pt);
+        let resolved_content_width_px = resolved_content_width_pt.as_pt().in_px().to_f32();
+        let resolved_content_height_px = resolved_content_height_pt.as_pt().in_px().to_f32();
         crate::blitz_adapter::set_viewport_size_px(
             &mut doc,
             resolved_content_width_px,
@@ -848,8 +849,8 @@ impl Engine {
 
         let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.page_height()) as u32,
+            self.config.content_width().as_pt().in_px().to_f32(),
+            self.config.page_height().as_pt().in_px().to_f32() as u32,
             fonts,
             self.system_fonts,
             self.base_path.as_deref(),
@@ -862,14 +863,14 @@ impl Engine {
         crate::blitz_adapter::resolve(&mut doc);
         crate::blitz_adapter::relayout_position_fixed(
             &mut doc,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.content_height()),
+            self.config.content_width().as_pt().in_px().to_f32(),
+            self.config.content_height().as_pt().in_px().to_f32(),
         );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
         let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
-            crate::convert::pt_to_px(self.config.content_height()),
+            self.config.content_height().as_pt().in_px(),
             &column_styles,
         );
 
@@ -886,8 +887,8 @@ impl Engine {
             pagination_geometry,
             link_cache: Default::default(),
             viewport_size_px: Some((
-                crate::convert::pt_to_px(self.config.content_width()),
-                crate::convert::pt_to_px(self.config.content_height()),
+                self.config.content_width().as_pt().in_px().to_f32(),
+                self.config.content_height().as_pt().in_px().to_f32(),
             )),
         };
         crate::convert::dom_to_drawables(&doc, &mut convert_ctx)
@@ -913,8 +914,8 @@ impl Engine {
 
         let (mut doc, _link_gcpm) = crate::blitz_adapter::parse_html_with_local_resources(
             html,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.page_height()) as u32,
+            self.config.content_width().as_pt().in_px().to_f32(),
+            self.config.page_height().as_pt().in_px().to_f32() as u32,
             fonts,
             self.system_fonts,
             self.base_path.as_deref(),
@@ -927,14 +928,14 @@ impl Engine {
         crate::blitz_adapter::resolve(&mut doc);
         crate::blitz_adapter::relayout_position_fixed(
             &mut doc,
-            crate::convert::pt_to_px(self.config.content_width()),
-            crate::convert::pt_to_px(self.config.content_height()),
+            self.config.content_width().as_pt().in_px().to_f32(),
+            self.config.content_height().as_pt().in_px().to_f32(),
         );
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
         let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
             doc.deref_mut(),
-            crate::convert::pt_to_px(self.config.content_height()),
+            self.config.content_height().as_pt().in_px(),
             &column_styles,
         );
 
@@ -944,8 +945,8 @@ impl Engine {
         // render emits (see the `append_position_fixed_fragments` block
         // in `render`). Without this, the helper would diverge
         // from `render` for documents with `position: fixed`.
-        let content_w_px = crate::convert::pt_to_px(self.config.content_width());
-        let content_h_px = crate::convert::pt_to_px(self.config.content_height());
+        let content_w_px = self.config.content_width().as_pt().in_px().to_f32();
+        let content_h_px = self.config.content_height().as_pt().in_px().to_f32();
         let total_pages = crate::pagination_layout::implied_page_count(&pagination_geometry).max(1);
         crate::pagination_layout::append_position_fixed_fragments(
             &mut pagination_geometry,
