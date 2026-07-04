@@ -2080,6 +2080,11 @@ pub struct CounterPass {
     /// will consume it. Engine flips this on via
     /// [`with_snapshot_recording`] when bookmarks are emitted.
     record_node_snapshots: bool,
+    /// Running total of counter values stored across all `node_snapshots`,
+    /// enforcing the [`crate::MAX_COUNTER_SNAPSHOT_ENTRIES`] budget so
+    /// per-node chain snapshots cannot accumulate unbounded memory (see the
+    /// recording site in `resolve_node`).
+    snapshot_entries: std::cell::Cell<usize>,
     /// Pass-2 cross-reference table built at the end of pass 1. When
     /// present, `target-counter()` / `target-counters()` / `target-text()`
     /// inside `::before` / `::after` `content` resolve against this map.
@@ -2106,6 +2111,7 @@ impl CounterPass {
             ops_by_node: RefCell::new(Vec::new()),
             node_snapshots: RefCell::new(BTreeMap::new()),
             record_node_snapshots: false,
+            snapshot_entries: std::cell::Cell::new(0),
             anchor_map: None,
         }
     }
@@ -2271,10 +2277,20 @@ impl CounterPass {
         // element that authors target with `bookmark-label`. Gated on
         // `record_node_snapshots` so renders that don't emit bookmarks pay
         // nothing for this clone (fulgur-70c).
-        if self.record_node_snapshots {
-            self.node_snapshots
-                .borrow_mut()
-                .insert(node_id, self.state.borrow().chain_snapshot());
+        if self.record_node_snapshots
+            && self.snapshot_entries.get() < crate::MAX_COUNTER_SNAPSHOT_ENTRIES
+        {
+            // `chain_snapshot` clamps each chain to `MAX_COUNTER_CHAIN_ENTRIES`
+            // entries; this budget bounds the *aggregate* across nodes, since
+            // storing even a clamped snapshot at every one of N nodes is still
+            // input-proportional in N. Once reached, later nodes record
+            // nothing (their `counter()` / `counters()` in `bookmark-label`
+            // degrade to CSS defaults — acceptable under adversarial input).
+            let snapshot = self.state.borrow().chain_snapshot();
+            let entries: usize = snapshot.values().map(|chain| chain.len()).sum();
+            self.snapshot_entries
+                .set(self.snapshot_entries.get() + entries);
+            self.node_snapshots.borrow_mut().insert(node_id, snapshot);
         }
 
         // Phase 3: Split ::before (resolve now) and ::after (resolve after children).
@@ -2312,6 +2328,14 @@ impl CounterPass {
             let element = doc.get_node(node_id).and_then(|n| n.element_data());
             let mut css = self.generated_css.borrow_mut();
             for idx in &before_indices {
+                // Total-output budget: once the generated CSS reaches the cap,
+                // stop emitting further per-element rules. Each element emits
+                // its own rule and the sibling count is input-bounded only, so
+                // without this the aggregate is a resource-exhaustion vector
+                // even with each rule individually capped.
+                if css.len() >= crate::MAX_GENERATED_CSS_BYTES {
+                    break;
+                }
                 let mapping = &self.content_mappings[*idx];
                 let resolved = self.resolve_content(&mapping.content, element);
                 let _ = write!(
@@ -2339,6 +2363,10 @@ impl CounterPass {
             let element = doc.get_node(node_id).and_then(|n| n.element_data());
             let mut css = self.generated_css.borrow_mut();
             for idx in &after_indices {
+                // Total-output budget (see the `::before` loop above).
+                if css.len() >= crate::MAX_GENERATED_CSS_BYTES {
+                    break;
+                }
                 let mapping = &self.content_mappings[*idx];
                 let resolved = self.resolve_content(&mapping.content, element);
                 let _ = write!(
@@ -2369,6 +2397,13 @@ impl CounterPass {
         let state = self.state.borrow();
         let mut out = String::new();
         for item in items {
+            // Per-call materialization cap: a content list may hold an
+            // unbounded number of (individually capped) `counters()` items, so
+            // bound their sum before the per-element generated-CSS budget is
+            // consulted (fulgur-rtts / GHSA-395p-pj7r-jm42).
+            if out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES {
+                break;
+            }
             match item {
                 ContentItem::String(s) => out.push_str(s),
                 ContentItem::Counter { name, style } => {
@@ -2500,6 +2535,11 @@ pub struct BookmarkInfo {
 pub struct BookmarkPass {
     mappings: Vec<BookmarkMapping>,
     results: RefCell<Vec<(usize, BookmarkInfo)>>,
+    /// Running total of resolved-label bytes pushed to `results`, used to
+    /// enforce the [`crate::MAX_OUTLINE_LABEL_BYTES`] total-output budget so a
+    /// `counters()`-amplified `bookmark-label` cannot grow the outline without
+    /// bound (see the budget check in `resolve_node`).
+    emitted_label_bytes: std::cell::Cell<usize>,
     /// Per-node counter-state snapshots produced by `CounterPass`.
     /// Each value is the full nesting chain (outer-to-inner) per CSS
     /// Lists 3 §4.5; `counter()` takes the innermost (`last()`) value.
@@ -2536,6 +2576,7 @@ impl BookmarkPass {
         Self {
             mappings,
             results: RefCell::new(Vec::new()),
+            emitted_label_bytes: std::cell::Cell::new(0),
             counter_snapshots,
             string_snapshots,
         }
@@ -2617,6 +2658,16 @@ impl BookmarkPass {
             None => return,
         };
 
+        // Total-output budget: once the accumulated outline labels reach the
+        // cap, stop emitting further entries. `counters()` labels can be up to
+        // `MAX_COUNTER_CHAIN_BYTES` each from a tiny element, so the outline is
+        // an N-element amplification sink distinct from the generated CSS.
+        // Checked before resolution so the per-label materialization work is
+        // skipped too.
+        if self.emitted_label_bytes.get() >= crate::MAX_OUTLINE_LABEL_BYTES {
+            return;
+        }
+
         // Label fallback: if no `bookmark-label` was declared, use the
         // element's text content (equivalent to `content()`).
         let resolved_label = match label {
@@ -2639,6 +2690,8 @@ impl BookmarkPass {
             return;
         }
 
+        self.emitted_label_bytes
+            .set(self.emitted_label_bytes.get() + resolved_label.len());
         self.results.borrow_mut().push((
             node_id,
             BookmarkInfo {
@@ -2686,6 +2739,12 @@ fn resolve_label(
 ) -> String {
     let mut out = String::new();
     for item in items {
+        // Per-call materialization cap (see `resolve_content` / fulgur-rtts):
+        // a label list may hold unbounded (individually capped) `counters()`
+        // items; bound their sum before the per-label outline budget applies.
+        if out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES {
+            break;
+        }
         match item {
             ContentItem::String(s) => out.push_str(s),
             ContentItem::ContentText => {
@@ -3975,6 +4034,102 @@ mod tests {
         );
     }
 
+    /// DoS hardening (snapshot storage): `chain_snapshot` clones the active
+    /// chain per node, so N sibling `counter-reset`s would store a length-i
+    /// chain at the i-th node — O(N²) memory. Per-node chain length is clamped
+    /// to `MAX_COUNTER_CHAIN_ENTRIES` (a chain longer than that can only come
+    /// from adversarial sibling accumulation, never realistic nesting, which
+    /// is bounded by `MAX_DOM_DEPTH`).
+    #[test]
+    fn counter_pass_snapshot_clamps_per_node_chain_length() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        // More siblings than the clamp so the deepest chain is truncated.
+        const SIBLINGS: usize = crate::MAX_COUNTER_CHAIN_ENTRIES + 500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let max_chain = snapshots
+            .values()
+            .flat_map(|m| m.values())
+            .map(|chain| chain.len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_chain <= crate::MAX_COUNTER_CHAIN_ENTRIES,
+            "per-node stored chain length {max_chain} exceeded clamp {}",
+            crate::MAX_COUNTER_CHAIN_ENTRIES
+        );
+    }
+
+    /// DoS hardening (snapshot storage): even with each chain clamped, storing
+    /// a snapshot at every one of N nodes accumulates unbounded memory. The
+    /// aggregate stored-value count is capped by `MAX_COUNTER_SNAPSHOT_ENTRIES`;
+    /// recording stops once the budget is reached.
+    #[test]
+    fn counter_pass_snapshot_bounds_total_stored_entries() {
+        use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
+
+        // Enough siblings that the per-node-clamped chains (≤
+        // MAX_COUNTER_CHAIN_ENTRIES each) sum past the aggregate budget, so the
+        // budget guard must engage. `budget / per_node + ramp` + margin.
+        const SIBLINGS: usize = crate::MAX_COUNTER_SNAPSHOT_ENTRIES
+            / crate::MAX_COUNTER_CHAIN_ENTRIES
+            + crate::MAX_COUNTER_CHAIN_ENTRIES
+            + 500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        let pass = CounterPass::new(mappings, Vec::new()).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let total: usize = snapshots
+            .values()
+            .flat_map(|m| m.values())
+            .map(|chain| chain.len())
+            .sum();
+        let slack = crate::MAX_COUNTER_CHAIN_ENTRIES;
+        assert!(
+            total <= crate::MAX_COUNTER_SNAPSHOT_ENTRIES + slack,
+            "total stored snapshot entries {total} exceeded budget {}",
+            crate::MAX_COUNTER_SNAPSHOT_ENTRIES
+        );
+        assert!(
+            snapshots.len() < SIBLINGS,
+            "budget did not engage: {} snapshots for {SIBLINGS} siblings",
+            snapshots.len()
+        );
+    }
+
     #[test]
     fn counter_pass_nested_reset_records_chain_snapshot() {
         use crate::gcpm::{CounterMapping, CounterOp, ParsedSelector};
@@ -4127,6 +4282,131 @@ mod tests {
             !css.contains("content:\"3.1. \""),
             "leave_element regression: outer counter at third top-level li \
              should be `3.`, not `3.1.` (got: {css})"
+        );
+    }
+
+    /// DoS hardening (single-element multi-item list): a `content` list may
+    /// hold an unbounded number of `counters()` items. Each item is
+    /// individually capped, but their sum is materialized into one string
+    /// before the per-element generated-CSS budget is consulted, so a single
+    /// element could otherwise allocate `item_count × MAX_COUNTER_CHAIN_BYTES`.
+    /// `MAX_RESOLVED_CONTENT_BYTES` caps that per-call materialization.
+    #[test]
+    fn counter_pass_bounds_single_element_multi_item_content() {
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle,
+            ParsedSelector, PseudoElement,
+        };
+
+        // Two nested `counter-reset:x` so the target's chain is length 2 and a
+        // long separator makes each `counters()` item hit the per-chain cap.
+        let html = r#"<html><body><div><div class="t"></div></div></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+
+        let counter_mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        // One element, but its content list holds many `counters()` items.
+        const ITEMS: usize = 500;
+        let mut content = Vec::new();
+        for _ in 0..ITEMS {
+            content.push(ContentItem::Counters {
+                name: "x".into(),
+                separator: "x".repeat(4096),
+                style: CounterStyle::Decimal,
+            });
+        }
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("t".into()),
+            pseudo: PseudoElement::Before,
+            content,
+        }];
+
+        let pass = CounterPass::new(counter_mappings, content_mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let css = pass.generated_css();
+
+        // One element → one rule; its content must not exceed the per-call cap
+        // (plus one final item and the rule-wrapper overhead).
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 256;
+        assert!(
+            css.len() <= crate::MAX_RESOLVED_CONTENT_BYTES + slack,
+            "single-element generated CSS {} exceeded per-call cap {}",
+            css.len(),
+            crate::MAX_RESOLVED_CONTENT_BYTES
+        );
+    }
+
+    /// DoS hardening: many sibling `counter-reset` elements each emitting a
+    /// `counters(x, <long separator>)` `::before` rule must not grow the
+    /// generated CSS without bound. Sibling resets share the parent scope
+    /// (spec-correct), so the i-th sibling's chain has ≈ i entries and each
+    /// rule would otherwise materialize `separator_len * i` bytes — quadratic
+    /// in the sibling count. `MAX_COUNTER_CHAIN_BYTES` caps each rule and
+    /// `MAX_GENERATED_CSS_BYTES` caps the aggregate; here we assert the
+    /// aggregate stays within the total budget (plus one final rule).
+    #[test]
+    fn counter_pass_bounds_generated_css_under_sibling_reset_flood() {
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle,
+            ParsedSelector, PseudoElement,
+        };
+
+        // Enough siblings that, once each chain is capped at
+        // `MAX_COUNTER_CHAIN_BYTES`, the aggregate would exceed the total
+        // budget — so the total-budget guard must engage.
+        const SIBLINGS: usize = 2500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let counter_mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        let separator = "x".repeat(4096); // attacker-controlled, ≥ chain cap
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![ContentItem::Counters {
+                name: "x".into(),
+                separator,
+                style: CounterStyle::Decimal,
+            }],
+        }];
+
+        let pass = CounterPass::new(counter_mappings, content_mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let css = pass.generated_css();
+
+        // Aggregate bounded by the total budget plus at most one final rule.
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 4096;
+        assert!(
+            css.len() <= crate::MAX_GENERATED_CSS_BYTES + slack,
+            "generated CSS {} exceeded budget {} (+slack {})",
+            css.len(),
+            crate::MAX_GENERATED_CSS_BYTES,
+            slack
+        );
+        // The guard must actually have engaged: fewer emitted rules than
+        // siblings (otherwise the budget was never reached and this test is
+        // not exercising it).
+        let emitted = css.matches("::before{content:").count();
+        assert!(
+            emitted < SIBLINGS,
+            "budget did not engage: emitted {emitted} rules for {SIBLINGS} siblings"
         );
     }
 
@@ -4559,6 +4839,141 @@ mod tests {
         let results = pass.into_results();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.label, "1.2");
+    }
+
+    /// DoS hardening (bookmark sink, single-label multi-item list): a
+    /// `bookmark-label` list may hold an unbounded number of `counters()`
+    /// items, materialized into one label string before the per-label outline
+    /// budget is consulted. `MAX_RESOLVED_CONTENT_BYTES` caps that per-call
+    /// materialization.
+    #[test]
+    fn bookmark_pass_bounds_single_label_multi_item_content() {
+        use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
+        use crate::gcpm::{ContentItem, CounterStyle};
+
+        let html = r#"<html><body><h1 id="t">Title</h1></body></html>"#;
+        let mut doc = parse(html, 400.0, &[]);
+        fn find_h1(doc: &HtmlDocument, id: usize) -> Option<usize> {
+            let node = doc.get_node(id)?;
+            if node
+                .element_data()
+                .is_some_and(|el| el.name.local.as_ref() == "h1")
+            {
+                return Some(id);
+            }
+            node.children.iter().find_map(|&c| find_h1(doc, c))
+        }
+        let h1_id = find_h1(&doc, doc.root_element().id).expect("h1 node");
+
+        // Length-2 chain so the (long) separator appears in each item.
+        let mut counter_snapshots = BTreeMap::new();
+        let mut chain = BTreeMap::new();
+        chain.insert("x".to_string(), vec![1, 1]);
+        counter_snapshots.insert(h1_id, chain);
+
+        const ITEMS: usize = 500;
+        let mut label = Vec::new();
+        for _ in 0..ITEMS {
+            label.push(ContentItem::Counters {
+                name: "x".into(),
+                separator: "x".repeat(4096),
+                style: CounterStyle::Decimal,
+            });
+        }
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("h1".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(label),
+        }];
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snapshots, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+
+        assert_eq!(results.len(), 1);
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 256;
+        assert!(
+            results[0].1.label.len() <= crate::MAX_RESOLVED_CONTENT_BYTES + slack,
+            "single label {} exceeded per-call cap {}",
+            results[0].1.label.len(),
+            crate::MAX_RESOLVED_CONTENT_BYTES
+        );
+    }
+
+    /// DoS hardening (bookmark sink): `bookmark-label: counters(x, <long sep>)`
+    /// resolves to an up-to-`MAX_COUNTER_CHAIN_BYTES` label from a few bytes of
+    /// element, so many sibling entries would accumulate an unbounded outline
+    /// even though each single label is capped. The total-output
+    /// `MAX_OUTLINE_LABEL_BYTES` budget must bound the aggregate — the outline
+    /// is a separate sink from the generated CSS, which `MAX_GENERATED_CSS_BYTES`
+    /// does not cover.
+    #[test]
+    fn bookmark_pass_bounds_total_label_bytes_under_sibling_flood() {
+        use crate::gcpm::bookmark::{BookmarkLevel, BookmarkMapping};
+        use crate::gcpm::{ContentItem, CounterStyle};
+
+        const SIBLINGS: usize = 2500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        fn collect_divs(doc: &HtmlDocument, id: usize, out: &mut Vec<usize>) {
+            if let Some(node) = doc.get_node(id) {
+                if node
+                    .element_data()
+                    .is_some_and(|el| el.name.local.as_ref() == "div")
+                {
+                    out.push(id);
+                }
+                for &c in &node.children {
+                    collect_divs(doc, c, out);
+                }
+            }
+        }
+        let mut div_ids = Vec::new();
+        collect_divs(&doc, doc.root_element().id, &mut div_ids);
+        assert_eq!(div_ids.len(), SIBLINGS);
+
+        // Give every div a 2-entry chain so the resolved label (with a long
+        // separator) hits the per-label cap.
+        let mut counter_snapshots = BTreeMap::new();
+        for &id in &div_ids {
+            let mut chain = BTreeMap::new();
+            chain.insert("x".to_string(), vec![1, 1]);
+            counter_snapshots.insert(id, chain);
+        }
+
+        let separator = "x".repeat(4096);
+        let mappings = vec![BookmarkMapping {
+            selector: ParsedSelector::Tag("div".into()),
+            level: Some(BookmarkLevel::Integer(1)),
+            label: Some(vec![ContentItem::Counters {
+                name: "x".into(),
+                separator,
+                style: CounterStyle::Decimal,
+            }]),
+        }];
+        let pass = BookmarkPass::new_with_snapshots(mappings, counter_snapshots, BTreeMap::new());
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let results = pass.into_results();
+
+        let total: usize = results.iter().map(|(_, b)| b.label.len()).sum();
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 64;
+        assert!(
+            total <= crate::MAX_OUTLINE_LABEL_BYTES + slack,
+            "total outline label bytes {} exceeded budget {}",
+            total,
+            crate::MAX_OUTLINE_LABEL_BYTES
+        );
+        assert!(
+            results.len() < SIBLINGS,
+            "budget did not engage: {} entries for {SIBLINGS} siblings",
+            results.len()
+        );
     }
 
     #[test]

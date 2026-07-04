@@ -36,6 +36,102 @@ pub(crate) const MAX_DOM_DEPTH: usize = 512;
 /// `MAX_TILES` defensive bounds.
 pub(crate) const MAX_PAGES: u32 = 10_000;
 
+/// Upper bound on the **output bytes** materialized for a single resolved
+/// counter chain (`counters(name, sep, style)`), applied inside
+/// [`gcpm::counter::format_counter_chain`] so it covers every call site
+/// (`::before` / `::after` resolution, margin-box, and `target-counters()`).
+///
+/// `counters()` joins the active counter chain with an attacker-controlled
+/// separator, so a single resolution is `separator_len * chain_len`. This caps
+/// the *separator* axis: even a multi-kilobyte separator cannot push one
+/// `counters()` output past this ceiling. The orthogonal *length* axis is
+/// bounded by [`MAX_COUNTER_CHAIN_ENTRIES`]. Real documents (deepest legitimate
+/// `counters()`, e.g. nested `<ol>`) stay in the tens of bytes, far below this.
+/// Sibling of the total-output [`MAX_GENERATED_CSS_BYTES`] budget.
+pub(crate) const MAX_COUNTER_CHAIN_BYTES: usize = 4 * 1024;
+
+/// Upper bound on the **number of entries** kept for a single counter chain
+/// (its length), applied when a chain is cloned for later resolution
+/// (`CounterState::chain` / `chain_snapshot`).
+///
+/// A chain grows one entry per in-scope `counter-reset`. The *nesting*
+/// contribution is already bounded by [`MAX_DOM_DEPTH`] — the counter walk
+/// stops recursing there, so no reset below that depth is even processed —
+/// which is why this cap is tied to it: any chain longer than
+/// `MAX_DOM_DEPTH` can only come from following-sibling `counter-reset`
+/// accumulation (unbounded breadth, i.e. adversarial), and that surplus cannot
+/// affect a realistic document. Bounding the stored length keeps the retained
+/// per-node snapshots from being O(N²) and is the *length* companion to the
+/// *separator*-axis [`MAX_COUNTER_CHAIN_BYTES`]; the two are independent knobs
+/// on `separator_len * chain_len`.
+pub(crate) const MAX_COUNTER_CHAIN_ENTRIES: usize = MAX_DOM_DEPTH;
+
+/// Total-output budget for the generated CSS that
+/// [`blitz_adapter::CounterPass`] injects for resolved pseudo-element
+/// content. Once the accumulated generated CSS reaches this size, further
+/// per-element rules are skipped (the pseudo-element simply does not render).
+///
+/// Each element with matching `::before` / `::after` counter content emits
+/// its own generated rule, and the element (sibling) count is bounded only by
+/// input size — so without a total cap the aggregate is input-proportional in
+/// N with a per-rule constant, still a resource-exhaustion vector even after
+/// [`MAX_COUNTER_CHAIN_BYTES`] bounds each single rule. This budget makes the
+/// aggregate output absolutely bounded regardless of N, mirroring the
+/// additive-not-multiplicative rationale of [`MAX_PAGES`]. Kept generous so no
+/// realistic document is clipped (a document would need on the order of 10^5
+/// counter-bearing pseudo-elements to reach it).
+pub(crate) const MAX_GENERATED_CSS_BYTES: usize = 8 * 1024 * 1024;
+
+/// Total-output budget for the resolved `bookmark-label` strings that
+/// [`blitz_adapter::BookmarkPass`] accumulates into the PDF outline. Once the
+/// aggregate resolved-label size reaches this bound, further outline entries
+/// are skipped.
+///
+/// `bookmark-label: counters(name, sep)` resolves through the same
+/// [`MAX_COUNTER_CHAIN_BYTES`]-capped path, so a single label can be up to
+/// that cap while its originating element is only a few bytes — a per-element
+/// amplification that plain text labels (whose bytes come from the input)
+/// cannot produce. The outline is a separate sink from the generated CSS, so
+/// [`MAX_GENERATED_CSS_BYTES`] does not bound it; this budget caps the
+/// N-element accumulation there, mirroring that guard. Kept generous so no
+/// realistic document (headings / figures with short labels) is clipped.
+pub(crate) const MAX_OUTLINE_LABEL_BYTES: usize = 8 * 1024 * 1024;
+
+/// Total-storage budget (in counter values) for the per-node counter-chain
+/// snapshots that [`blitz_adapter::CounterPass`] harvests for `BookmarkPass` /
+/// anchor resolution. Once the accumulated stored-value count reaches this
+/// bound, no further node snapshots are recorded.
+///
+/// Snapshot recording clones the *full* active counter chain
+/// (`chain_snapshot`) at every visited element. Sibling `counter-reset`s make
+/// the chain length ≈ the sibling index, so storing it at N nodes is O(N²)
+/// memory — a resource-exhaustion sink independent of any output budget
+/// (`MAX_GENERATED_CSS_BYTES` / `MAX_OUTLINE_LABEL_BYTES` bound output bytes,
+/// not this retained storage). Per-node length is separately clamped to
+/// [`MAX_COUNTER_CHAIN_ENTRIES`] inside `chain_snapshot` (lossless for realistic
+/// counter state — nesting depth is bounded by [`MAX_DOM_DEPTH`], and anything
+/// longer is adversarial sibling accumulation); this budget then bounds the
+/// aggregate
+/// across all nodes, mirroring the additive-not-multiplicative rationale of
+/// [`MAX_PAGES`]. ~8M values ≈ 32 MiB — far above any realistic document.
+pub(crate) const MAX_COUNTER_SNAPSHOT_ENTRIES: usize = 8 * 1024 * 1024;
+
+/// Per-call cap on the bytes materialized while resolving a single content /
+/// label list (`::before` / `::after`, `bookmark-label`, margin-box running
+/// content) into one string.
+///
+/// [`MAX_COUNTER_CHAIN_BYTES`] bounds a *single* `counters()` / `counter()` /
+/// `target-counters()` item, but a content list may hold an unbounded number
+/// of such items (`content: counters(x) counters(x) …` — the parser caps
+/// neither item count nor list length). The aggregate output budgets
+/// ([`MAX_GENERATED_CSS_BYTES`], [`MAX_OUTLINE_LABEL_BYTES`]) are checked once
+/// per element *before* the list is resolved, so a single element could
+/// otherwise materialize `item_count × MAX_COUNTER_CHAIN_BYTES` in one
+/// allocation and overshoot them. This bounds that per-call materialization.
+/// Kept generous — no realistic single element resolves anywhere near this —
+/// so only adversarial multi-item lists are clipped.
+pub(crate) const MAX_RESOLVED_CONTENT_BYTES: usize = 1024 * 1024;
+
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;

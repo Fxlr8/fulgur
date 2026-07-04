@@ -63,6 +63,12 @@ pub fn resolve_content_to_string_with_anchor(
 ) -> String {
     let mut out = String::new();
     for item in items {
+        // Per-call materialization cap (see fulgur-rtts): a margin-box content
+        // list may hold unbounded (individually capped) `target-counters()`
+        // items, re-materialized per page.
+        if out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES {
+            break;
+        }
         match item {
             ContentItem::String(s) => out.push_str(s),
             ContentItem::Counter { name, style } => match name.as_str() {
@@ -218,6 +224,10 @@ pub fn resolve_content_to_html_with_anchor(
         // Flat mode: backward-compatible plain concatenation.
         let mut out = String::new();
         for item in items {
+            // Per-call materialization cap (see fulgur-rtts).
+            if out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES {
+                break;
+            }
             match item {
                 ContentItem::String(s) => push_escaped_html_text(&mut out, s),
                 ContentItem::Counter { name, style } => match name.as_str() {
@@ -317,7 +327,15 @@ pub fn resolve_content_to_html_with_anchor(
     // Flex mode: wrap everything in a flex container so that leader items
     // expand to fill the remaining line width.
     let mut parts: Vec<String> = Vec::new();
+    let mut parts_bytes = 0usize;
     for item in items {
+        // Per-call materialization cap (see fulgur-rtts): flex-mode margin-box
+        // content may hold unbounded (individually capped) target-counters()
+        // items. Each iteration appends at most one part.
+        if parts_bytes >= crate::MAX_RESOLVED_CONTENT_BYTES {
+            break;
+        }
+        let before = parts.len();
         match item {
             ContentItem::Leader { style } => {
                 let ch = style.leader_char();
@@ -432,6 +450,7 @@ pub fn resolve_content_to_html_with_anchor(
                 }
             }
         }
+        parts_bytes += parts[before..].iter().map(|p| p.len()).sum::<usize>();
     }
 
     format!(
@@ -531,16 +550,44 @@ pub fn resolve_element_policy<'a>(
     None
 }
 
+/// Append `s` to `out`, but never let `out` grow past `max_bytes`. Returns
+/// `false` when the append was truncated (the caller should stop). Truncation
+/// always lands on a UTF-8 char boundary so `out` stays valid.
+fn push_bounded(out: &mut String, s: &str, max_bytes: usize) -> bool {
+    let remaining = max_bytes.saturating_sub(out.len());
+    if s.len() <= remaining {
+        out.push_str(s);
+        return true;
+    }
+    // Largest char-boundary offset in `s` that fits in `remaining`.
+    let end = s
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|&idx| idx <= remaining)
+        .last()
+        .unwrap_or(0);
+    out.push_str(&s[..end]);
+    false
+}
+
 /// Format a list of counter values according to the given
 /// [`CounterStyle`] and join them by `separator`. Returns an empty
 /// string when `values` is empty.
+///
+/// The materialized output is bounded by [`crate::MAX_COUNTER_CHAIN_BYTES`]:
+/// `separator` is attacker-controlled and `values` can be arbitrarily long
+/// (sibling `counter-reset` accumulation), so an uncapped join is a
+/// single-allocation DoS. Truncation is char-boundary safe.
 pub fn format_counter_chain(values: &[i32], separator: &str, style: CounterStyle) -> String {
+    let max = crate::MAX_COUNTER_CHAIN_BYTES;
     let mut out = String::new();
     for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            out.push_str(separator);
+        if i > 0 && !push_bounded(&mut out, separator, max) {
+            break;
         }
-        out.push_str(&format_counter(*v, style));
+        if !push_bounded(&mut out, &format_counter(*v, style), max) {
+            break;
+        }
     }
     out
 }
@@ -764,20 +811,49 @@ impl CounterState {
 
     /// Chain of values for `name`, from outermost to innermost.
     /// Empty if no instance exists.
+    ///
+    /// Clamped to [`crate::MAX_COUNTER_CHAIN_ENTRIES`] entries: the only consumer
+    /// is `format_counter_chain`, whose output is byte-capped at the same
+    /// ceiling, so a longer chain cannot affect the result — and the clamp
+    /// avoids a transient O(depth) clone under sibling `counter-reset`
+    /// flooding.
     pub fn chain(&self, name: &str) -> Vec<i32> {
         self.stacks
             .get(name)
-            .map(|s| s.iter().map(|i| i.value).collect())
+            .map(|s| {
+                s.iter()
+                    .take(crate::MAX_COUNTER_CHAIN_ENTRIES)
+                    .map(|i| i.value)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// Snapshot of every counter's full chain (outer→inner). Used by
-    /// `CounterPass::take_node_snapshots` for `BookmarkPass`.
+    /// Snapshot of every counter's chain (outer→inner). Used by
+    /// `CounterPass::take_node_snapshots` for `BookmarkPass` / anchor
+    /// resolution.
+    ///
+    /// The snapshot is retained per node, so its size is bounded on two axes:
+    /// each chain keeps at most its outermost entries, and the **total** across
+    /// all names is capped at [`crate::MAX_COUNTER_CHAIN_ENTRIES`] entries — a
+    /// single node with many distinct deep counters would otherwise clone
+    /// `names × depth` values. Keeping the outermost is what
+    /// `format_counter_chain` consumes first; the clamp is lossless w.r.t.
+    /// every consumer for any realistic per-node counter state (`counters()`
+    /// output is already byte-capped at the same ceiling, and `counter()`'s
+    /// innermost value is preserved for any chain shorter than the clamp).
     pub fn chain_snapshot(&self) -> BTreeMap<String, Vec<i32>> {
-        self.stacks
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().map(|i| i.value).collect()))
-            .collect()
+        let mut remaining = crate::MAX_COUNTER_CHAIN_ENTRIES;
+        let mut out = BTreeMap::new();
+        for (k, v) in &self.stacks {
+            if remaining == 0 {
+                break;
+            }
+            let take = v.len().min(remaining);
+            remaining -= take;
+            out.insert(k.clone(), v.iter().take(take).map(|i| i.value).collect());
+        }
+        out
     }
 }
 
@@ -1672,6 +1748,46 @@ mod tests {
     }
 
     #[test]
+    fn test_chain_clamps_length() {
+        // `chain()` feeds `format_counter_chain` (byte-capped), so its result
+        // must be clamped to `MAX_COUNTER_CHAIN_ENTRIES` entries — an unclamped
+        // full-depth clone is a transient O(depth) allocation under sibling
+        // `counter-reset` flooding.
+        let mut s = CounterState::new();
+        for _ in 0..(crate::MAX_COUNTER_CHAIN_ENTRIES + 100) {
+            s.reset_in_scope("x", 0, 1);
+        }
+        assert!(
+            s.chain("x").len() <= crate::MAX_COUNTER_CHAIN_ENTRIES,
+            "chain length {} exceeded clamp",
+            s.chain("x").len()
+        );
+    }
+
+    #[test]
+    fn test_chain_snapshot_bounds_total_entries_across_names() {
+        // Per-node snapshot storage must be bounded across ALL names, not just
+        // per name: many distinct counter names each reset deep would clone
+        // K × depth values at one node otherwise.
+        let mut s = CounterState::new();
+        let names = 100;
+        let depth = 100;
+        for n in 0..names {
+            let name = format!("c{n}");
+            for _ in 0..depth {
+                s.reset_in_scope(&name, 0, 1);
+            }
+        }
+        let snap = s.chain_snapshot();
+        let total: usize = snap.values().map(|v| v.len()).sum();
+        assert!(
+            total <= crate::MAX_COUNTER_CHAIN_ENTRIES,
+            "per-node snapshot total {total} exceeded cap {}",
+            crate::MAX_COUNTER_CHAIN_ENTRIES
+        );
+    }
+
+    #[test]
     fn test_counter_state_nested_chain() {
         // Stack model: parent_id is the parent of the resetting element.
         let mut s = CounterState::new();
@@ -1760,6 +1876,35 @@ mod tests {
             format_counter_chain(&[1, 4, 9], "-", CounterStyle::UpperRoman),
             "I-IV-IX"
         );
+    }
+
+    #[test]
+    fn test_format_counter_chain_caps_materialized_output() {
+        // A long attacker-controlled separator over a long chain must not
+        // materialize an unbounded string: `separator_len * chain_len` would
+        // otherwise be a single multi-gigabyte allocation. The output is
+        // capped at `MAX_COUNTER_CHAIN_BYTES` (single-allocation spike guard).
+        let values = vec![1; 100_000];
+        let separator = "x".repeat(4096);
+        let out = format_counter_chain(&values, &separator, CounterStyle::Decimal);
+        assert!(
+            out.len() <= crate::MAX_COUNTER_CHAIN_BYTES,
+            "output {} exceeded cap {}",
+            out.len(),
+            crate::MAX_COUNTER_CHAIN_BYTES
+        );
+    }
+
+    #[test]
+    fn test_format_counter_chain_cap_is_char_boundary_safe() {
+        // Truncation must land on a UTF-8 boundary even when the separator is
+        // multi-byte, so building the capped `String` never panics.
+        let values = vec![1; 100_000];
+        let separator = "\u{03bb}".repeat(4096); // λ, 2 bytes each
+        let out = format_counter_chain(&values, &separator, CounterStyle::Decimal);
+        assert!(out.len() <= crate::MAX_COUNTER_CHAIN_BYTES);
+        // (A `String` is always valid UTF-8; reaching here without a panic in
+        // the truncation path is the real assertion.)
     }
 
     #[test]
