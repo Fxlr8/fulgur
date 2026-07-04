@@ -143,22 +143,22 @@ pub mod net {
 /// in CSS px) for an exact match.
 pub fn parse_and_layout(
     html: &str,
-    viewport_width: f32,
-    viewport_height: f32,
+    viewport_width: crate::units::Px,
+    viewport_height: crate::units::Px,
     font_data: &[Arc<Vec<u8>>],
     system_fonts: bool,
 ) -> HtmlDocument {
     let mut doc = parse_inner(
         html,
-        viewport_width,
-        viewport_height as u32,
+        viewport_width.to_f32(),
+        viewport_height.to_f32() as u32,
         font_data,
         system_fonts,
         None,
         None,
     );
     resolve(&mut doc);
-    relayout_position_fixed(&mut doc, viewport_width, viewport_height);
+    relayout_position_fixed(&mut doc, viewport_width.to_f32(), viewport_height.to_f32());
     doc
 }
 
@@ -3413,6 +3413,7 @@ pub(crate) fn apply_link_media_rewrites(doc: &mut HtmlDocument, rewrites: &[Link
 mod tests {
     use super::*;
     use crate::gcpm::TargetTextKind;
+    use crate::units::F32Units;
 
     #[test]
     fn build_static_content_css_serializes_selectors_and_escapes() {
@@ -3671,7 +3672,7 @@ mod tests {
     #[test]
     fn test_parse_and_layout_unchanged() {
         let html = "<html><body><p>Test</p></body></html>";
-        let doc = parse_and_layout(html, 400.0, 600.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 600.0_f32.as_px(), &[], true);
         let root = doc.root_element();
         assert!(!root.children.is_empty());
     }
@@ -5092,7 +5093,7 @@ mod tests {
     #[test]
     fn multicol_props_absent_on_plain_block() {
         let html = r#"<html><body><div id="p">plain</div></body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
         assert!(extract_multicol_props(doc.get_node(id).unwrap()).is_none());
     }
@@ -5102,7 +5103,7 @@ mod tests {
         let html = r#"<html><body>
             <div id="m" style="column-count: 3; column-gap: 12px;">a</div>
         </body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
         let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
         assert_eq!(props.column_count, Some(3));
@@ -5115,7 +5116,7 @@ mod tests {
         let html = r#"<html><body>
             <div id="m" style="column-width: 180px;">a</div>
         </body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
         let props = extract_multicol_props(doc.get_node(id).unwrap()).expect("should be multicol");
         assert_eq!(props.column_count, None);
@@ -5137,7 +5138,7 @@ mod tests {
         // baselines in paragraph.rs, producing a 4/3-off visual shift. Guards
         // against regression of the PR #101 unit-consolidation.
         let html = r#"<html><body><img style="vertical-align: 8px;" src=""></body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "img").expect("img");
         let va = extract_vertical_align(doc.get_node(id).unwrap());
         match va {
@@ -5157,7 +5158,7 @@ mod tests {
         // `vertical-align: 50%` still returns a unitless ratio — the px→pt
         // fix on the Length branch must not touch Percent semantics.
         let html = r#"<html><body><img style="vertical-align: 50%;" src=""></body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "img").expect("img");
         let va = extract_vertical_align(doc.get_node(id).unwrap());
         match va {
@@ -5174,7 +5175,7 @@ mod tests {
             <h1 style="column-span: all;">Big</h1>
             <p>plain</p>
         </body></html>"#;
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let h1 = find_element_by_local_name(&doc, "h1").expect("h1");
         let p = find_element_by_local_name(&doc, "p").expect("p");
         assert!(has_column_span_all(doc.get_node(h1).unwrap()));
@@ -5365,11 +5366,12 @@ mod transform_tests {
     use super::*;
     use crate::draw_primitives::matrix_test_util::approx;
     use crate::draw_primitives::{Affine2D, Point2};
+    use crate::units::F32Units;
 
     /// Parse a minimal HTML snippet and return the computed transform of
     /// the first `<div>` it contains, via `compute_transform()`.
     fn compute_for_div(html: &str, box_w: f32, box_h: f32) -> Option<(Affine2D, Point2)> {
-        let doc = parse_and_layout(html, 400.0, 2000.0, &[], true);
+        let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let div_id = find_element_by_tag(&doc, "div")?;
         let node = doc.get_node(div_id)?;
         let styles = node.primary_styles()?;

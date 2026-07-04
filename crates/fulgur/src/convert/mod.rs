@@ -1191,6 +1191,7 @@ mod semantics_tests {
     //! shape only.
 
     use crate::tagging::PdfTag;
+    use crate::units::F32Units;
     use std::ops::DerefMut;
 
     fn build_drawables(html: &str) -> crate::drawables::Drawables {
@@ -1199,7 +1200,7 @@ mod semantics_tests {
         // `parse_and_layout` already runs stylo + Taffy + the
         // `position: fixed` relayout, matching what the engine feeds
         // into convert at this point.
-        let mut doc = crate::blitz_adapter::parse_and_layout(html, 595.0, 842.0, &[], true);
+        let mut doc = crate::blitz_adapter::parse_and_layout(html, 595.0_f32.as_px(), 842.0_f32.as_px(), &[], true);
 
         let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);

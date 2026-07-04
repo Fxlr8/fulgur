@@ -3585,8 +3585,8 @@ impl<'a> MarginBoxRenderer<'a> {
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
-                    crate::convert::pt_to_px(content_width),
-                    crate::convert::pt_to_px(page_size.height),
+                    content_width.as_pt().in_px(),
+                    page_size.height.as_pt().in_px(),
                     self.font_data,
                     self.system_fonts,
                 );
@@ -3620,8 +3620,8 @@ impl<'a> MarginBoxRenderer<'a> {
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
-                    crate::convert::pt_to_px(fixed_width),
-                    crate::convert::pt_to_px(page_size.height),
+                    fixed_width.as_pt().in_px(),
+                    page_size.height.as_pt().in_px(),
                     self.font_data,
                     self.system_fonts,
                 );
@@ -3692,8 +3692,8 @@ impl<'a> MarginBoxRenderer<'a> {
                 );
                 let mut render_doc = crate::blitz_adapter::parse_and_layout(
                     &render_html,
-                    rect.width.in_px().to_f32(),
-                    rect.height.in_px().to_f32(),
+                    rect.width.in_px(),
+                    rect.height.in_px(),
                     self.font_data,
                     self.system_fonts,
                 );
