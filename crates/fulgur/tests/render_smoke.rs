@@ -5245,3 +5245,46 @@ fn layout_two_pass_target_counter_returns_drawables_and_geometry() {
             .collect::<Vec<_>>()
     );
 }
+
+/// End-to-end coverage for the `counters(name, sep, style)` `::before`
+/// resolution path (added in the GCPM counters() work) *and* a regression
+/// guard for the DoS hardening around it: many sibling `counter-reset`
+/// elements each emitting `counters()` with a non-trivial separator must
+/// render to a bounded, non-empty PDF without hanging or exhausting memory.
+///
+/// Sibling resets share the parent scope, so the chain grows with the sibling
+/// index and the generated pseudo content would blow up quadratically without
+/// the `MAX_COUNTER_CHAIN_BYTES` / `MAX_GENERATED_CSS_BYTES` caps. The pure
+/// boundedness invariants are unit-tested in the `fulgur` lib; this drives the
+/// whole `Engine::render_html` pipeline (convert → paginate → draw → PDF) so
+/// the counters() draw path is attributed in codecov (see CLAUDE.md
+/// "Coverage scope").
+#[test]
+fn test_render_counters_sibling_reset_is_bounded_smoke() {
+    const SIBLINGS: usize = 40;
+    let separator = "-".repeat(64);
+    let mut html = String::from(
+        "<!doctype html><html><head><style>\
+         div{counter-reset:x}\
+         div::before{content:counters(x,\"",
+    );
+    html.push_str(&separator);
+    html.push_str("\")}</style></head><body>");
+    for _ in 0..SIBLINGS {
+        html.push_str("<div></div>");
+    }
+    html.push_str("</body></html>");
+
+    let pdf = Engine::builder()
+        .build()
+        .render(&html)
+        .expect("counters() sibling-reset render should not panic or hang");
+    assert!(!pdf.is_empty(), "PDF should be non-empty");
+    // Sanity: input-proportional output, nowhere near the amplification a
+    // quadratic blowup would produce.
+    assert!(
+        page_count(&pdf) < 1000,
+        "page count {} unexpectedly large for {SIBLINGS} siblings",
+        page_count(&pdf)
+    );
+}

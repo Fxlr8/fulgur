@@ -36,6 +36,40 @@ pub(crate) const MAX_DOM_DEPTH: usize = 512;
 /// `MAX_TILES` defensive bounds.
 pub(crate) const MAX_PAGES: u32 = 10_000;
 
+/// Upper bound on the bytes materialized for a single resolved counter
+/// chain (`counters(name, sep, style)`), applied inside
+/// [`gcpm::counter::format_counter_chain`] so it covers every call site
+/// (`::before` / `::after` resolution, margin-box snapshots, and
+/// `target-counters()`).
+///
+/// `counters()` joins the full active counter chain with an
+/// attacker-controlled separator. Sibling `counter-reset` instances share
+/// the originating element's parent scope (CSS Lists 3 §4.4 following-sibling
+/// scope — spec-correct), so the chain for the i-th sibling has ≈ i entries.
+/// A single resolution is therefore `separator_len * chain_len`, either of
+/// which scales with untrusted input — a single multi-gigabyte allocation
+/// spike. Capping the materialized output bounds that spike; real documents
+/// (deepest legitimate `counters()`, e.g. nested `<ol>`) stay in the tens of
+/// bytes, far below this ceiling. Sibling of the total-output
+/// [`MAX_GENERATED_CSS_BYTES`] budget, which bounds N-element accumulation.
+pub(crate) const MAX_COUNTER_CHAIN_BYTES: usize = 4 * 1024;
+
+/// Total-output budget for the generated CSS that
+/// [`blitz_adapter::CounterPass`] injects for resolved pseudo-element
+/// content. Once the accumulated generated CSS reaches this size, further
+/// per-element rules are skipped (the pseudo-element simply does not render).
+///
+/// Each element with matching `::before` / `::after` counter content emits
+/// its own generated rule, and the element (sibling) count is bounded only by
+/// input size — so without a total cap the aggregate is input-proportional in
+/// N with a per-rule constant, still a resource-exhaustion vector even after
+/// [`MAX_COUNTER_CHAIN_BYTES`] bounds each single rule. This budget makes the
+/// aggregate output absolutely bounded regardless of N, mirroring the
+/// additive-not-multiplicative rationale of [`MAX_PAGES`]. Kept generous so no
+/// realistic document is clipped (a document would need on the order of 10^5
+/// counter-bearing pseudo-elements to reach it).
+pub(crate) const MAX_GENERATED_CSS_BYTES: usize = 8 * 1024 * 1024;
+
 pub mod asset;
 pub mod background;
 pub mod blitz_adapter;

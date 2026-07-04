@@ -531,16 +531,44 @@ pub fn resolve_element_policy<'a>(
     None
 }
 
+/// Append `s` to `out`, but never let `out` grow past `max_bytes`. Returns
+/// `false` when the append was truncated (the caller should stop). Truncation
+/// always lands on a UTF-8 char boundary so `out` stays valid.
+fn push_bounded(out: &mut String, s: &str, max_bytes: usize) -> bool {
+    let remaining = max_bytes.saturating_sub(out.len());
+    if s.len() <= remaining {
+        out.push_str(s);
+        return true;
+    }
+    // Largest char-boundary offset in `s` that fits in `remaining`.
+    let end = s
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|&idx| idx <= remaining)
+        .last()
+        .unwrap_or(0);
+    out.push_str(&s[..end]);
+    false
+}
+
 /// Format a list of counter values according to the given
 /// [`CounterStyle`] and join them by `separator`. Returns an empty
 /// string when `values` is empty.
+///
+/// The materialized output is bounded by [`crate::MAX_COUNTER_CHAIN_BYTES`]:
+/// `separator` is attacker-controlled and `values` can be arbitrarily long
+/// (sibling `counter-reset` accumulation), so an uncapped join is a
+/// single-allocation DoS. Truncation is char-boundary safe.
 pub fn format_counter_chain(values: &[i32], separator: &str, style: CounterStyle) -> String {
+    let max = crate::MAX_COUNTER_CHAIN_BYTES;
     let mut out = String::new();
     for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            out.push_str(separator);
+        if i > 0 && !push_bounded(&mut out, separator, max) {
+            break;
         }
-        out.push_str(&format_counter(*v, style));
+        if !push_bounded(&mut out, &format_counter(*v, style), max) {
+            break;
+        }
     }
     out
 }
@@ -1760,6 +1788,35 @@ mod tests {
             format_counter_chain(&[1, 4, 9], "-", CounterStyle::UpperRoman),
             "I-IV-IX"
         );
+    }
+
+    #[test]
+    fn test_format_counter_chain_caps_materialized_output() {
+        // A long attacker-controlled separator over a long chain must not
+        // materialize an unbounded string: `separator_len * chain_len` would
+        // otherwise be a single multi-gigabyte allocation. The output is
+        // capped at `MAX_COUNTER_CHAIN_BYTES` (single-allocation spike guard).
+        let values = vec![1; 100_000];
+        let separator = "x".repeat(4096);
+        let out = format_counter_chain(&values, &separator, CounterStyle::Decimal);
+        assert!(
+            out.len() <= crate::MAX_COUNTER_CHAIN_BYTES,
+            "output {} exceeded cap {}",
+            out.len(),
+            crate::MAX_COUNTER_CHAIN_BYTES
+        );
+    }
+
+    #[test]
+    fn test_format_counter_chain_cap_is_char_boundary_safe() {
+        // Truncation must land on a UTF-8 boundary even when the separator is
+        // multi-byte, so building the capped `String` never panics.
+        let values = vec![1; 100_000];
+        let separator = "\u{03bb}".repeat(4096); // λ, 2 bytes each
+        let out = format_counter_chain(&values, &separator, CounterStyle::Decimal);
+        assert!(out.len() <= crate::MAX_COUNTER_CHAIN_BYTES);
+        // (A `String` is always valid UTF-8; reaching here without a panic in
+        // the truncation path is the real assertion.)
     }
 
     #[test]

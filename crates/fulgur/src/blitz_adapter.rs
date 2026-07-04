@@ -2312,6 +2312,14 @@ impl CounterPass {
             let element = doc.get_node(node_id).and_then(|n| n.element_data());
             let mut css = self.generated_css.borrow_mut();
             for idx in &before_indices {
+                // Total-output budget: once the generated CSS reaches the cap,
+                // stop emitting further per-element rules. Each element emits
+                // its own rule and the sibling count is input-bounded only, so
+                // without this the aggregate is a resource-exhaustion vector
+                // even with each rule individually capped.
+                if css.len() >= crate::MAX_GENERATED_CSS_BYTES {
+                    break;
+                }
                 let mapping = &self.content_mappings[*idx];
                 let resolved = self.resolve_content(&mapping.content, element);
                 let _ = write!(
@@ -2339,6 +2347,10 @@ impl CounterPass {
             let element = doc.get_node(node_id).and_then(|n| n.element_data());
             let mut css = self.generated_css.borrow_mut();
             for idx in &after_indices {
+                // Total-output budget (see the `::before` loop above).
+                if css.len() >= crate::MAX_GENERATED_CSS_BYTES {
+                    break;
+                }
                 let mapping = &self.content_mappings[*idx];
                 let resolved = self.resolve_content(&mapping.content, element);
                 let _ = write!(
@@ -4127,6 +4139,74 @@ mod tests {
             !css.contains("content:\"3.1. \""),
             "leave_element regression: outer counter at third top-level li \
              should be `3.`, not `3.1.` (got: {css})"
+        );
+    }
+
+    /// DoS hardening: many sibling `counter-reset` elements each emitting a
+    /// `counters(x, <long separator>)` `::before` rule must not grow the
+    /// generated CSS without bound. Sibling resets share the parent scope
+    /// (spec-correct), so the i-th sibling's chain has ≈ i entries and each
+    /// rule would otherwise materialize `separator_len * i` bytes — quadratic
+    /// in the sibling count. `MAX_COUNTER_CHAIN_BYTES` caps each rule and
+    /// `MAX_GENERATED_CSS_BYTES` caps the aggregate; here we assert the
+    /// aggregate stays within the total budget (plus one final rule).
+    #[test]
+    fn counter_pass_bounds_generated_css_under_sibling_reset_flood() {
+        use crate::gcpm::{
+            ContentCounterMapping, ContentItem, CounterMapping, CounterOp, CounterStyle,
+            ParsedSelector, PseudoElement,
+        };
+
+        // Enough siblings that, once each chain is capped at
+        // `MAX_COUNTER_CHAIN_BYTES`, the aggregate would exceed the total
+        // budget — so the total-budget guard must engage.
+        const SIBLINGS: usize = 2500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<div></div>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let counter_mappings = vec![CounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            ops: vec![CounterOp::Reset {
+                name: "x".into(),
+                value: 0,
+            }],
+        }];
+        let separator = "x".repeat(4096); // attacker-controlled, ≥ chain cap
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Tag("div".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![ContentItem::Counters {
+                name: "x".into(),
+                separator,
+                style: CounterStyle::Decimal,
+            }],
+        }];
+
+        let pass = CounterPass::new(counter_mappings, content_mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let css = pass.generated_css();
+
+        // Aggregate bounded by the total budget plus at most one final rule.
+        let slack = crate::MAX_COUNTER_CHAIN_BYTES + 4096;
+        assert!(
+            css.len() <= crate::MAX_GENERATED_CSS_BYTES + slack,
+            "generated CSS {} exceeded budget {} (+slack {})",
+            css.len(),
+            crate::MAX_GENERATED_CSS_BYTES,
+            slack
+        );
+        // The guard must actually have engaged: fewer emitted rules than
+        // siblings (otherwise the budget was never reached and this test is
+        // not exercising it).
+        let emitted = css.matches("::before{content:").count();
+        assert!(
+            emitted < SIBLINGS,
+            "budget did not engage: emitted {emitted} rules for {SIBLINGS} siblings"
         );
     }
 
