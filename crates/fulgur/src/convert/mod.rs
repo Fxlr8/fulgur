@@ -67,8 +67,12 @@ pub(crate) fn px_to_pt(v: f32) -> f32 {
 /// `units::Px` (`x.as_pt().in_px()`), so this has no production callers.
 /// Removed together with `px_to_pt` once fulgur-sipv.2 drops the last
 /// `px_to_pt` caller (`shadow.rs`).
+///
+/// Kept present via `#[allow(dead_code)]` rather than `#[cfg(test)]` so the
+/// `PX_TO_PT` doc's `[pt_to_px]` link stays symmetric with the still-live
+/// `[px_to_pt]` sibling until fulgur-sipv.2 removes both together.
 #[inline]
-#[allow(dead_code)] // test-only until fulgur-sipv.2 removes both px_to_pt / pt_to_px
+#[allow(dead_code)]
 pub(crate) fn pt_to_px(v: f32) -> f32 {
     v / PX_TO_PT
 }
