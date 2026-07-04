@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.24.0] - 2026-07-04
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Features
+* feat(engine): expose public Engine::layout() + LayoutOutput (fulgur-2map.10) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/566
+### Documentation
+* docs(readme): document Engine::layout() API and link design doc (fulgur-2map.11) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/568
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.23.0...v0.24.0
+
 ## [0.23.0] - 2026-07-04
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
