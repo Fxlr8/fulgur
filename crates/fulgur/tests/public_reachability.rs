@@ -35,4 +35,10 @@ fn layout_output_field_types_are_externally_nameable() {
     let _geometry: &PaginationGeometryTable = &out.geometry;
     let _drawables: &fulgur::drawables::Drawables = &out.drawables;
     assert!(!out.geometry.is_empty());
+
+    // Exercise the public `Debug` + `Clone` derives: consumers rely on them,
+    // and invoking them here attributes the `#[derive(Debug, Clone)]` region
+    // on `LayoutOutput` for codecov/patch (it is otherwise never called).
+    let cloned = out.clone();
+    assert!(!format!("{cloned:?}").is_empty());
 }
