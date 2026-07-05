@@ -2055,12 +2055,21 @@ impl StringSetPass {
             // previous "first-match wins" lookup silently dropped the
             // remainder, which is observable from `bookmark-label:
             // string(...)` once snapshots are wired in.
+            // `content(text)` resolves the same subtree for every matching
+            // rule on this element; extract it once and share across them.
+            let mut content_text_cache: Option<String> = None;
             for mapping in self
                 .mappings
                 .iter()
                 .filter(|m| selector_matches(&m.parsed, elem))
             {
-                let value = resolve_string_set_values(doc, node_id, elem, &mapping.values);
+                let value = resolve_string_set_values(
+                    doc,
+                    node_id,
+                    elem,
+                    &mapping.values,
+                    &mut content_text_cache,
+                );
                 // The running map is only consumed by the
                 // `record_node_snapshots`-gated per-node snapshot clone below
                 // (no other reader, no pub accessor). On the default path it is
@@ -2074,10 +2083,14 @@ impl StringSetPass {
                 // aggregate past the cap, bounding the distinct-name count M
                 // (`string()` for the dropped name degrades to "" under
                 // adversarial input, matching store/snapshot degradation).
-                // Overwriting an existing name is always honored — it cannot
-                // multiply (one value per name, last-write-wins) and correct
-                // `string()` resolution needs the latest value — with its byte
-                // delta reflected so the budget stays accurate.
+                // Overwriting an existing name is always honored (unlike the
+                // store's hard drop): only *new distinct* names multiply the
+                // input (the M in O(M x value_size)), and those are gated. An
+                // overwrite keeps one value per name (last-write-wins), so the
+                // retained running map stays <= O(input text) — linear, not
+                // amplifying — and correct `string()` resolution needs the
+                // latest value. Its byte delta is reflected so the budget stays
+                // accurate.
                 if self.record_node_snapshots {
                     let mut running = self.running.borrow_mut();
                     match running.get(&mapping.name) {
@@ -3013,12 +3026,23 @@ fn resolve_string_set_values(
     node_id: usize,
     elem: &blitz_dom::node::ElementData,
     values: &[StringSetValue],
+    content_text_cache: &mut Option<String>,
 ) -> String {
     let mut out = String::new();
     for val in values {
         match val {
             StringSetValue::ContentText => {
-                out.push_str(&extract_text_content(doc, node_id));
+                // `content(text)` extracts the element's whole subtree, an
+                // O(subtree) walk. A single element can match many
+                // `string-set` rules (and one rule can list `content(text)`
+                // more than once), so resolve it once per element and reuse
+                // the result — without this, M matching rules re-walk the same
+                // L-byte subtree M times (O(M x L), a folding-DoS CPU sink on
+                // the default render path). The extraction depends only on the
+                // element, so the cached value is identical for every use.
+                let content =
+                    content_text_cache.get_or_insert_with(|| extract_text_content(doc, node_id));
+                out.push_str(content);
             }
             // content(before)/content(after) require pseudo-element computed styles.
             StringSetValue::ContentBefore | StringSetValue::ContentAfter => {}
@@ -5314,6 +5338,44 @@ mod tests {
             pass.running_retained_bytes(),
             crate::MAX_STRING_SNAPSHOT_BYTES
         );
+    }
+
+    /// The per-element `content(text)` cache (which avoids re-walking the
+    /// subtree once per matching rule) must yield identical text for every
+    /// rule: an element matched by two distinct `string-set` rules that both
+    /// use `content(text)` resolves both named strings to the element's text.
+    #[test]
+    fn string_set_pass_shares_content_text_across_matching_rules() {
+        use crate::gcpm::StringSetValue;
+
+        let html = r#"<html><body><h1 class="a b">Chapter</h1></body></html>"#;
+        let mappings = vec![
+            StringSetMapping {
+                parsed: ParsedSelector::Class("a".into()),
+                name: "one".into(),
+                values: vec![StringSetValue::ContentText],
+            },
+            StringSetMapping {
+                parsed: ParsedSelector::Class("b".into()),
+                name: "two".into(),
+                values: vec![StringSetValue::ContentText],
+            },
+        ];
+        let mut doc = parse(html, 400.0, &[]);
+        let pass = StringSetPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let store = pass.into_store();
+
+        let value_of = |name: &str| {
+            store
+                .entries()
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.value.clone())
+        };
+        assert_eq!(value_of("one").as_deref(), Some("Chapter"));
+        assert_eq!(value_of("two").as_deref(), Some("Chapter"));
     }
 
     /// DoS hardening (snapshot count): with recording enabled a snapshot is
