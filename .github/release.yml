@@ -4,6 +4,9 @@ changelog:
       - release-notes:internal
       - dependencies
   categories:
+    - title: Security
+      labels:
+        - release-notes:security
     - title: Features
       labels:
         - release-notes:feature

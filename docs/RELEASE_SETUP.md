@@ -36,6 +36,7 @@ commits. `.github/release.yml` defines the category mapping.
 
 | Label | Category |
 |-------|----------|
+| `release-notes:security` | Security (auto-applied from a `harden:` title prefix) |
 | `release-notes:feature` | Features |
 | `release-notes:fix` | Bug Fixes |
 | `release-notes:docs` | Documentation |
