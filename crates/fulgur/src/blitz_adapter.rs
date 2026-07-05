@@ -2068,10 +2068,15 @@ impl StringSetPass {
             // `MAX_COUNTER_SNAPSHOT_ENTRIES` guard.
             if self.record_node_snapshots {
                 let running = self.running.borrow();
+                // Charge a base (the empty-map node_snapshots slot) plus the
+                // per-record overhead for EACH cloned (name, value) B-tree entry
+                // — the map's entry count equals the number of distinct named
+                // strings, so many tiny distinct strings would otherwise retain
+                // hundreds of entries per snapshot counted as only their payload.
                 let cost: usize = crate::STRING_ENTRY_OVERHEAD_BYTES
                     + running
                         .iter()
-                        .map(|(k, v)| k.len() + v.len())
+                        .map(|(k, v)| crate::STRING_ENTRY_OVERHEAD_BYTES + k.len() + v.len())
                         .sum::<usize>();
                 if self.snapshot_bytes.get().saturating_add(cost)
                     <= crate::MAX_STRING_SNAPSHOT_BYTES
@@ -5210,6 +5215,53 @@ mod tests {
         assert!(
             snapshots.len() < n,
             "budget did not engage: {} snapshots for {n} elements",
+            snapshots.len()
+        );
+    }
+
+    /// DoS hardening (snapshot per-entry overhead): a per-node snapshot clones a
+    /// `BTreeMap` whose entry count equals the number of distinct named strings
+    /// (attacker-definable via many `string-set` rules). The budget must charge
+    /// the per-record overhead for EACH map entry, not once per snapshot — else
+    /// many distinct tiny named strings retain hundreds of B-tree entries per
+    /// snapshot while being charged only their payload plus one base overhead.
+    #[test]
+    fn string_set_pass_snapshot_charges_per_map_entry_overhead() {
+        use crate::gcpm::StringSetValue;
+
+        // 1000 distinct named strings, all set (to empty values) on the first
+        // <div>, so every subsequent per-node snapshot clones a 1000-entry map.
+        const NAMES: usize = 1000;
+        let mut mappings = Vec::with_capacity(NAMES);
+        for i in 0..NAMES {
+            mappings.push(StringSetMapping {
+                parsed: ParsedSelector::Tag("div".into()),
+                name: format!("n{i}"),
+                values: vec![StringSetValue::Literal(String::new())],
+            });
+        }
+
+        // Enough following elements that the base-only charge would admit far
+        // more snapshots than the per-entry charge allows.
+        let n = 2500;
+        let mut html = String::from("<html><body><div></div>");
+        for _ in 0..n {
+            html.push_str("<p></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        // With per-entry overhead each 1000-entry snapshot costs
+        // ~NAMES × STRING_ENTRY_OVERHEAD_BYTES, so far fewer than `n` snapshots
+        // fit; a base-only charge (~NAMES × name_len) would admit thousands.
+        assert!(
+            snapshots.len() < 500,
+            "per-entry overhead not charged: {} snapshots retained (n={n}, names={NAMES})",
             snapshots.len()
         );
     }
