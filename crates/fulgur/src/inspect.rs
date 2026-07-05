@@ -847,8 +847,7 @@ mod tests {
         assert_eq!(
             result.text_items.len(),
             3,
-            "expected 3 text items from Td/TD/T* positioned text, got {}",
-            result.text_items.len()
+            "expected 3 text items from Td/TD/T* positioned text"
         );
         let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
         assert!(texts.contains(&"Line1"), "missing Line1");
