@@ -3335,6 +3335,48 @@ fn bookmark_label_string_appears_in_outline() {
     assert_eq!(titles, vec!["Alpha".to_string(), "Beta".to_string()]);
 }
 
+/// End-to-end coverage-scope companion (CLAUDE.md "Coverage scope") for the
+/// `StringSetPass` per-node snapshot budget (`MAX_STRING_SNAPSHOT_BYTES`,
+/// unit-tested in `string_set_pass_snapshot_bounds_total_stored_bytes`). The
+/// lib test drives the pass in isolation via `.with_snapshot_recording()`; this
+/// drives the *engine* gate → pass → budget path on the amplification shape:
+/// one large `string-set` value followed by many elements that each snapshot it.
+/// Asserts the render stays bounded (completes, non-empty PDF) and that the
+/// heading's `string(title)` label still resolves — the budget clips only the
+/// per-node snapshot storage, never the first-seen value.
+#[test]
+fn string_set_snapshot_bounded_render_does_not_blow_up() {
+    let big = "A".repeat(48 * 1024); // one large named-string source value
+    let mut html = String::from(
+        "<!doctype html><html><head><style>\
+         h1 { string-set: title content(text); bookmark-level: 1; bookmark-label: string(title); }\
+         </style></head><body>",
+    );
+    html.push_str(&format!("<h1>{big}</h1>"));
+    // Many following siblings each trigger a per-node snapshot clone of `title`
+    // through the engine's `record_string_snapshots` gate; without the budget
+    // this is O(N × value_size) retained memory.
+    for _ in 0..400 {
+        html.push_str("<p>x</p>");
+    }
+    html.push_str("</body></html>");
+
+    let pdf = Engine::builder()
+        .bookmarks(true)
+        .build()
+        .render(&html)
+        .expect("render");
+    assert!(
+        !pdf.is_empty(),
+        "adversarial string-set doc should still render"
+    );
+    let titles = outline_titles(&pdf);
+    assert!(
+        titles.iter().any(|t| t == &big),
+        "the heading's string(title) label must still resolve"
+    );
+}
+
 /// Regression test for fulgur-v1cm + fulgur-vrkv: render time must not
 /// blow up quadratically with section/table count.
 ///
