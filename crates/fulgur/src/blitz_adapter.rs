@@ -2079,36 +2079,32 @@ impl StringSetPass {
                 // folded per element) that the store/snapshot budgets do not
                 // cover. On the bookmark path, keep it but charge each entry
                 // against `MAX_STRING_SNAPSHOT_BYTES` (the budget its clones
-                // feed): a *new* named string is dropped once it would push the
-                // aggregate past the cap, bounding the distinct-name count M
-                // (`string()` for the dropped name degrades to "" under
-                // adversarial input, matching store/snapshot degradation).
-                // Overwriting an existing name is always honored (unlike the
-                // store's hard drop): only *new distinct* names multiply the
-                // input (the M in O(M x value_size)), and those are gated. An
-                // overwrite keeps one value per name (last-write-wins), so the
-                // retained running map stays <= O(input text) — linear, not
-                // amplifying — and correct `string()` resolution needs the
-                // latest value. Its byte delta is reflected so the budget stays
-                // accurate.
+                // feed): an entry is dropped once it would push the aggregate
+                // past the cap (`string()` for the dropped name degrades to its
+                // previous value / "" under adversarial input, matching
+                // store/snapshot degradation). Both a *new* name (bounding the
+                // distinct-name count M) and an *overwrite* that grows the value
+                // are gated — otherwise an attacker admits many names with tiny
+                // values, then overwrites each with a large one to bypass the
+                // budget entirely (many-name x large-value amplification, PR
+                // #584 review). A new name charges `name + value`; an overwrite
+                // charges only the value delta (the name is already counted).
                 if self.record_node_snapshots {
                     let mut running = self.running.borrow_mut();
-                    match running.get(&mapping.name) {
-                        Some(existing) => {
-                            let running_bytes =
-                                self.running_bytes.get() - existing.len() + value.len();
-                            self.running_bytes.set(running_bytes);
-                            running.insert(mapping.name.clone(), value.clone());
-                        }
-                        None => {
-                            let add = mapping.name.len() + value.len();
-                            if self.running_bytes.get().saturating_add(add)
-                                <= crate::MAX_STRING_SNAPSHOT_BYTES
-                            {
-                                self.running_bytes.set(self.running_bytes.get() + add);
-                                running.insert(mapping.name.clone(), value.clone());
-                            }
-                        }
+                    let projected = match running.get(&mapping.name) {
+                        Some(existing) => self
+                            .running_bytes
+                            .get()
+                            .saturating_sub(existing.len())
+                            .saturating_add(value.len()),
+                        None => self
+                            .running_bytes
+                            .get()
+                            .saturating_add(mapping.name.len() + value.len()),
+                    };
+                    if projected <= crate::MAX_STRING_SNAPSHOT_BYTES {
+                        self.running_bytes.set(projected);
+                        running.insert(mapping.name.clone(), value.clone());
                     }
                 }
                 self.store.borrow_mut().push(StringSetEntry {
@@ -5335,6 +5331,60 @@ mod tests {
         assert!(
             pass.running_retained_bytes() <= crate::MAX_STRING_SNAPSHOT_BYTES,
             "running map retained bytes {} exceeded budget {}",
+            pass.running_retained_bytes(),
+            crate::MAX_STRING_SNAPSHOT_BYTES
+        );
+    }
+
+    /// DoS hardening (running map, overwrite path): the byte budget must also
+    /// gate *overwrites* of an existing name, not just new names. Otherwise an
+    /// attacker admits many distinct names with tiny values (all within
+    /// budget), then overwrites each with a large value on a later element —
+    /// the value delta would bypass the new-key gate entirely. Reported by
+    /// review on PR #584.
+    #[test]
+    fn string_set_pass_running_map_bounds_large_overwrites() {
+        use crate::gcpm::StringSetValue;
+
+        const BIG: usize = 64 * 1024; // 64 KiB overwrite value
+        // Enough names that overwriting each with BIG blows past the budget.
+        const NAMES: usize = crate::MAX_STRING_SNAPSHOT_BYTES / BIG + 200;
+        let big_text = "z".repeat(BIG);
+        let a_classes = (0..NAMES)
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let b_classes = (0..NAMES)
+            .map(|i| format!("b{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        // First element sets every sN to a 1-byte literal (all admitted
+        // cheaply under the budget); the second, later element overwrites every
+        // sN with BIG via content(text).
+        let html = format!(
+            "<html><body><p class=\"{a_classes}\"></p><p class=\"{b_classes}\">{big_text}</p></body></html>"
+        );
+        let mut mappings: Vec<StringSetMapping> = (0..NAMES)
+            .map(|i| StringSetMapping {
+                parsed: ParsedSelector::Class(format!("a{i}")),
+                name: format!("s{i}"),
+                values: vec![StringSetValue::Literal("x".into())],
+            })
+            .collect();
+        mappings.extend((0..NAMES).map(|i| StringSetMapping {
+            parsed: ParsedSelector::Class(format!("b{i}")),
+            name: format!("s{i}"),
+            values: vec![StringSetValue::ContentText],
+        }));
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        assert!(
+            pass.running_retained_bytes() <= crate::MAX_STRING_SNAPSHOT_BYTES,
+            "running map retained bytes {} exceeded budget {} after large overwrites",
             pass.running_retained_bytes(),
             crate::MAX_STRING_SNAPSHOT_BYTES
         );
