@@ -728,4 +728,244 @@ mod tests {
         assert!((result[4] - 8.0).abs() < 1e-4);
         assert!((result[5] - 14.0).abs() < 1e-4);
     }
+
+    // --- obj_to_f32 edge case ---
+
+    #[test]
+    fn obj_to_f32_returns_zero_for_non_numeric_object() {
+        // The `_ => 0.0` arm is hit when the Object is neither Integer nor Real
+        // (e.g., a Name or Null). This covers the fallback branch.
+        assert_eq!(obj_to_f32(&lopdf::Object::Null), 0.0);
+        assert_eq!(obj_to_f32(&lopdf::Object::Boolean(true)), 0.0);
+        assert_eq!(obj_to_f32(&lopdf::Object::Name(b"F1".to_vec())), 0.0);
+        // The covered variants
+        assert_eq!(obj_to_f32(&lopdf::Object::Integer(5)), 5.0);
+        assert!((obj_to_f32(&lopdf::Object::Real(2.5)) - 2.5).abs() < 1e-4);
+    }
+
+    // --- detect_image_format edge cases ---
+
+    #[test]
+    fn detect_image_format_unrecognized_name_filter() {
+        // Filter is a Name but not one of the four recognized values.
+        // Hits the `_ => {}` arm in the inner match, then falls through to "unknown".
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(b"Filter", lopdf::Object::Name(b"ASCII85Decode".to_vec()));
+        assert_eq!(detect_image_format(&dict), "unknown");
+    }
+
+    #[test]
+    fn detect_image_format_non_name_non_array_filter_object() {
+        // Filter is neither a Name nor an Array (e.g., an Integer).
+        // Hits the `_ => String::new()` arm in the outer match.
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(b"Filter", lopdf::Object::Integer(1));
+        assert_eq!(detect_image_format(&dict), "unknown");
+    }
+
+    // --- lopdf-constructed PDF: TL / Td / TD / T* text-positioning operators ---
+
+    /// Build a minimal lopdf-native PDF whose content stream uses the
+    /// TL / Td / TD / T* text-positioning operators.  fulgur-generated PDFs
+    /// use Tm/Tj for all text positioning, so these operator paths in
+    /// `extract_text_items` are only reachable via synthetically crafted PDFs.
+    fn make_pdf_with_text_positioning_ops() -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type1",
+                    "BaseFont" => "Courier",
+                },
+            },
+        });
+
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new(
+                    "Tf",
+                    vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+                ),
+                // TL sets text leading to 14 pt
+                Operation::new("TL", vec![Object::Real(14.0)]),
+                // Td moves text position
+                Operation::new("Td", vec![Object::Real(100.0), Object::Real(700.0)]),
+                Operation::new("Tj", vec![Object::string_literal("Line1")]),
+                // TD moves and also resets leading to abs(-14) = 14
+                Operation::new("TD", vec![Object::Real(0.0), Object::Real(-14.0)]),
+                Operation::new("Tj", vec![Object::string_literal("Line2")]),
+                // T* advances by the current text leading (set via TL / TD)
+                Operation::new("T*", vec![]),
+                Operation::new("Tj", vec![Object::string_literal("Line3")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn inspect_text_operators_tl_td_td_tstar_produce_text_items() {
+        let pdf = make_pdf_with_text_positioning_ops();
+        let result = inspect_bytes(&pdf);
+        // Three Tj calls → three text items (Line1 / Line2 / Line3)
+        assert_eq!(
+            result.text_items.len(),
+            3,
+            "expected 3 text items from Td/TD/T* positioned text"
+        );
+        let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
+        assert!(texts.contains(&"Line1"), "missing Line1");
+        assert!(texts.contains(&"Line2"), "missing Line2");
+        assert!(texts.contains(&"Line3"), "missing Line3");
+    }
+
+    #[test]
+    fn inspect_text_td_advances_position() {
+        // After `Td 100 700`, tx should be ~100 + advance; verify the first
+        // item's x is near 100 (within the default identity CTM).
+        let pdf = make_pdf_with_text_positioning_ops();
+        let result = inspect_bytes(&pdf);
+        let first = result.text_items.first().expect("expected text items");
+        assert!(
+            (first.x - 100.0).abs() < 1e-4,
+            "expected text x to be exactly 100.0, got {}",
+            first.x
+        );
+    }
+
+    #[test]
+    fn inspect_text_td_updates_leading_via_td_operator() {
+        // TD 0 -14 sets text_leading = 14 (abs(-(-14))), then T* moves by that
+        // amount. The third item (after T*) should have a y offset different
+        // from the second item (after TD).
+        let pdf = make_pdf_with_text_positioning_ops();
+        let result = inspect_bytes(&pdf);
+        assert!(result.text_items.len() >= 3, "need at least 3 text items");
+        let y1 = result.text_items[1].y;
+        let y2 = result.text_items[2].y;
+        // y2 (after T*) should differ from y1 (after TD) by ~14 pt in either
+        // direction (depending on the coordinate convention in use).
+        let diff = (y2 - y1).abs();
+        assert!(
+            (diff - 14.0).abs() < 1e-4,
+            "expected T* to advance y by exactly 14.0, got {diff}"
+        );
+    }
+
+    // --- metadata absent ---
+
+    #[test]
+    fn inspect_metadata_returns_all_none_when_no_info_dict() {
+        // A PDF without an Info entry in the trailer exercises the
+        // `Err(_) => return meta` branch (line 80 in extract_metadata).
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new(
+                    "Tf",
+                    vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+                ),
+                Operation::new(
+                    "Tm",
+                    vec![
+                        Object::Real(1.0),
+                        Object::Real(0.0),
+                        Object::Real(0.0),
+                        Object::Real(1.0),
+                        Object::Real(72.0),
+                        Object::Real(720.0),
+                    ],
+                ),
+                Operation::new("Tj", vec![Object::string_literal("hi")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type1",
+                    "BaseFont" => "Courier",
+                },
+            },
+        });
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        // No trailer "Info" key → exercises the Err branch in extract_metadata
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert_eq!(result.metadata.title, None);
+        assert_eq!(result.metadata.author, None);
+        assert_eq!(result.metadata.creator, None);
+        assert_eq!(result.metadata.created_at, None);
+        assert_eq!(result.metadata.modified_at, None);
+    }
 }
