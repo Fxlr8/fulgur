@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.29.0] - 2026-07-05
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(gcpm): bound StringSetPass running-map memory and cache content(text) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/584
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.28.0...v0.29.0
+
 ## [0.28.0] - 2026-07-05
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
