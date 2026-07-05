@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(obj_to_f32(&lopdf::Object::Name(b"F1".to_vec())), 0.0);
         // The covered variants
         assert_eq!(obj_to_f32(&lopdf::Object::Integer(5)), 5.0);
-        assert!((obj_to_f32(&lopdf::Object::Real(3.14)) - 3.14).abs() < 1e-4);
+        assert!((obj_to_f32(&lopdf::Object::Real(2.5)) - 2.5).abs() < 1e-4);
     }
 
     // --- detect_image_format edge cases ---
@@ -835,7 +835,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
         let mut buf = Vec::new();
-        doc.save_to(&mut std::io::Cursor::new(&mut buf)).unwrap();
+        doc.save_to(&mut buf).unwrap();
         buf
     }
 
@@ -864,8 +864,8 @@ mod tests {
         let result = inspect_bytes(&pdf);
         let first = result.text_items.first().expect("expected text items");
         assert!(
-            first.x > 50.0,
-            "text x after Td 100 should be > 50, got {}",
+            (first.x - 100.0).abs() < 1e-4,
+            "expected text x to be exactly 100.0, got {}",
             first.x
         );
     }
@@ -884,8 +884,8 @@ mod tests {
         // direction (depending on the coordinate convention in use).
         let diff = (y2 - y1).abs();
         assert!(
-            diff > 1.0,
-            "T* should advance y from TD-positioned line; diff was {diff}"
+            (diff - 14.0).abs() < 1e-4,
+            "expected T* to advance y by exactly 14.0, got {diff}"
         );
     }
 
@@ -960,7 +960,7 @@ mod tests {
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
         let mut buf = Vec::new();
-        doc.save_to(&mut std::io::Cursor::new(&mut buf)).unwrap();
+        doc.save_to(&mut buf).unwrap();
 
         let result = inspect_bytes(&buf);
         assert_eq!(result.metadata.title, None);
