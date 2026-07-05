@@ -116,6 +116,62 @@ pub(crate) const MAX_OUTLINE_LABEL_BYTES: usize = 8 * 1024 * 1024;
 /// [`MAX_PAGES`]. ~8M values ≈ 32 MiB — far above any realistic document.
 pub(crate) const MAX_COUNTER_SNAPSHOT_ENTRIES: usize = 8 * 1024 * 1024;
 
+/// Total-storage budget (in bytes) for the per-node named-string snapshots that
+/// [`blitz_adapter::StringSetPass`] harvests for `BookmarkPass` `string(name)`
+/// resolution inside `bookmark-label`. Once the accumulated stored string bytes
+/// reach this bound, no further node snapshots are recorded.
+///
+/// Snapshot recording clones the *full* running `name -> value` map at every
+/// visited element, and the values are attacker-controlled strings resolved
+/// from element text / attributes (`string-set: title content(text)`). A single
+/// large value snapshotted at N nodes is O(N × value_size) retained memory — a
+/// resource-exhaustion sink independent of any output budget, and the string
+/// twin of the counter-chain [`MAX_COUNTER_SNAPSHOT_ENTRIES`] guard. This budget
+/// bounds the aggregate across all nodes regardless of N, mirroring the
+/// additive-not-multiplicative rationale of [`MAX_PAGES`]. Kept generous (8 MiB)
+/// so no realistic bookmark-bearing document (short named strings × headings) is
+/// clipped; adversarial input degrades `string()` to the CSS default ("") for
+/// nodes past the cap, which is acceptable.
+pub(crate) const MAX_STRING_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Approximate per-record heap + struct overhead charged against the
+/// [`MAX_STRING_SNAPSHOT_BYTES`] / [`MAX_STRING_SET_STORE_BYTES`] budgets in
+/// addition to each record's `name` + `value` payload bytes.
+///
+/// Both budgets otherwise counted only string payload, so empty / tiny named
+/// strings (`p { string-set: x "" }` matched by N elements, or a per-node
+/// snapshot recorded at every visited element while the running map is still
+/// empty) accumulated near-zero *counted* bytes while retaining millions of
+/// `StringSetEntry` / `BTreeMap` records — each of which costs `String` headers,
+/// a node id, and B-tree / `Vec` slot overhead that dwarfs a zero-length value.
+/// Charging this per-record constant makes the byte budget bound the record
+/// *count* as well (ceiling ≈ `budget / this`, ~131 K records at 8 MiB), matching
+/// the entry-count guard of the sibling [`MAX_COUNTER_SNAPSHOT_ENTRIES`]. Sized
+/// to conservatively cover two `String` structs (24 B each) plus a node id and
+/// container slot; realistic bookmark documents stay far below the ceiling.
+pub(crate) const STRING_ENTRY_OVERHEAD_BYTES: usize = 64;
+
+/// Total-storage budget (in bytes) for the resolved `string-set` values that
+/// [`gcpm::string_set::StringSetStore`] accumulates during
+/// [`blitz_adapter::StringSetPass`]. Once the accumulated stored value bytes
+/// would exceed this bound, further assignments are dropped.
+///
+/// Unlike the [`MAX_STRING_SNAPSHOT_BYTES`] snapshot (a bookmark-only aux gated
+/// on `record_node_snapshots`), the store is populated *unconditionally* on the
+/// default render path — one entry per (element, matching `string-set` rule) —
+/// and its values are cloned again downstream into the per-node render map
+/// (`Engine::render_html`'s `string_set_by_node` / `string_set_for_render`). A
+/// single repeated literal (`p { string-set: x "BIG" }` matched by N sibling
+/// elements) pushes N copies of `BIG` from a single-copy input — an
+/// O(N × value_size) breadth-unbounded amplification independent of any output
+/// budget. Capping the aggregate at the source push bounds the downstream clones
+/// dependently (peak ≈ 3× this budget). Kept generous (8 MiB) so no realistic
+/// document (headings / figures with short named strings, even thousands of
+/// them) is clipped; past the cap, `string()` reads the last recorded value —
+/// a stale/absent-value degradation acceptable under adversarial input. Store
+/// sibling of [`MAX_STRING_SNAPSHOT_BYTES`].
+pub(crate) const MAX_STRING_SET_STORE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Per-call cap on the bytes materialized while resolving a single content /
 /// label list (`::before` / `::after`, `bookmark-label`, margin-box running
 /// content) into one string.

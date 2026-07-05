@@ -17,16 +17,42 @@ pub struct StringSetEntry {
 /// Stores string-set entries collected during DOM traversal.
 pub struct StringSetStore {
     entries: Vec<StringSetEntry>,
+    /// Running total of stored `name` + `value` bytes, enforcing the
+    /// [`crate::MAX_STRING_SET_STORE_BYTES`] budget in [`Self::push`].
+    total_bytes: usize,
 }
 
 impl StringSetStore {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            total_bytes: 0,
         }
     }
 
+    /// Record a resolved `string-set` assignment.
+    ///
+    /// DoS budget: `string-set` values are attacker-controlled and one entry is
+    /// pushed per (element, matching rule), so a repeated literal
+    /// (`p { string-set: x "BIG" }` matched by N elements) accumulates
+    /// O(N × value_size) here from a single-copy input — and the values are
+    /// cloned again downstream into the per-node render map. Each entry is
+    /// charged its `name` + `value` payload plus a per-record
+    /// [`crate::STRING_ENTRY_OVERHEAD_BYTES`], so the budget bounds the entry
+    /// *count* as well as payload bytes (empty / tiny values such as
+    /// `p { string-set: x "" }` would otherwise admit millions of near-zero-byte
+    /// records). Once a new entry would push the aggregate past
+    /// [`crate::MAX_STRING_SET_STORE_BYTES`], it is dropped (its `string()`
+    /// degrades to the last recorded value — acceptable under adversarial input).
+    /// Capping at this source point bounds the downstream clones dependently.
+    /// Smaller later entries can still fit, so the aggregate is a hard ceiling
+    /// (no overshoot).
     pub fn push(&mut self, entry: StringSetEntry) {
+        let add = crate::STRING_ENTRY_OVERHEAD_BYTES + entry.name.len() + entry.value.len();
+        if self.total_bytes.saturating_add(add) > crate::MAX_STRING_SET_STORE_BYTES {
+            return;
+        }
+        self.total_bytes += add;
         self.entries.push(entry);
     }
 

@@ -330,9 +330,20 @@ impl Engine {
         // empty strings even though `attr(href), page` still works
         // via `AnchorEntry.page_num`. Compute the gate once here so
         // each pass can opt out of the per-element clone otherwise.
-        let record_node_snapshots = (self.config.effective_bookmarks()
-            && !gcpm.bookmark_mappings.is_empty())
-            || has_target_refs;
+        let bookmark_active =
+            self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
+        // Counter snapshots feed BOTH bookmark `counter()` resolution and
+        // the target-ref anchor map, so record them for either trigger.
+        let record_counter_snapshots = bookmark_active || has_target_refs;
+        // String snapshots are consumed ONLY by BookmarkPass's `string()`
+        // resolution — `build_anchor_map` reads counter snapshots, not
+        // string ones — so recording them for a target-ref-only render is
+        // pure waste and, before the `MAX_STRING_SNAPSHOT_BYTES` budget,
+        // an attacker-reachable amplification sink via inline `target-*`
+        // CSS with no bookmark opt-in. Gate them on bookmarks alone.
+        // NOTE: if a future feature makes `string()` resolve in a
+        // target-ref / `running()` context (fulgur-ejw9), widen this gate.
+        let record_string_snapshots = bookmark_active;
 
         // Extract string-set values via DomPass.
         // Also harvest per-node `name -> latest value` snapshots that the
@@ -341,7 +352,7 @@ impl Engine {
         let (string_set_store, string_snapshots) = if !gcpm.string_set_mappings.is_empty() {
             let mut pass =
                 crate::blitz_adapter::StringSetPass::new(gcpm.string_set_mappings.clone());
-            if record_node_snapshots {
+            if record_string_snapshots {
                 pass = pass.with_snapshot_recording();
             }
             crate::blitz_adapter::apply_single_pass(&pass, &mut doc, &ctx);
@@ -367,7 +378,7 @@ impl Engine {
                     gcpm.counter_mappings.clone(),
                     gcpm.content_counter_mappings.clone(),
                 );
-                if record_node_snapshots {
+                if record_counter_snapshots {
                     pass = pass.with_snapshot_recording();
                 }
                 if let Some(map) = anchor_map {
@@ -415,9 +426,8 @@ impl Engine {
         // resolve to the chain at the destination. `BookmarkPass`
         // consumes the map by value, so when both gates fire we have to
         // clone first; the clone cost is paid only when bookmarks +
-        // `target-*` are active simultaneously.
-        let bookmark_active =
-            self.config.effective_bookmarks() && !gcpm.bookmark_mappings.is_empty();
+        // `target-*` are active simultaneously. `bookmark_active` is
+        // computed once above (shared with the snapshot-recording gates).
         let target_refs_active = has_target_refs;
         let (counter_snapshots_for_bookmark, counter_snapshots_for_anchor) =
             match (bookmark_active, target_refs_active) {

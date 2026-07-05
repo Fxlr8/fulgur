@@ -1958,6 +1958,12 @@ pub struct StringSetPass {
     /// Gate for `node_snapshots`. Mirrors `CounterPass`. Off by default
     /// so renders that do not emit bookmarks skip the per-element clone.
     record_node_snapshots: bool,
+    /// Running total of string bytes stored across all `node_snapshots`,
+    /// enforcing the [`crate::MAX_STRING_SNAPSHOT_BYTES`] budget so per-node
+    /// snapshots of attacker-controlled named-string values cannot accumulate
+    /// unbounded memory (see the recording site in `walk_tree`). String twin of
+    /// `CounterPass::snapshot_entries`.
+    snapshot_bytes: std::cell::Cell<usize>,
 }
 
 impl StringSetPass {
@@ -1968,6 +1974,7 @@ impl StringSetPass {
             running: RefCell::new(BTreeMap::new()),
             node_snapshots: RefCell::new(BTreeMap::new()),
             record_node_snapshots: false,
+            snapshot_bytes: std::cell::Cell::new(0),
         }
     }
 
@@ -2043,11 +2050,42 @@ impl StringSetPass {
             // element should observe its own string-set value.
             // Mirrors `CounterPass`'s per-node snapshot timing. Gated
             // on `record_node_snapshots` so non-bookmark renders skip
-            // the clone (fulgur-70c).
+            // the clone (fulgur-70c). The `snapshot_bytes` budget bounds
+            // the *aggregate* retained memory across nodes: the running
+            // values are attacker-controlled (`content(text)` / `attr()`),
+            // so cloning a large value at every one of N nodes is
+            // O(N × value_size) memory. Each snapshot is charged its string
+            // payload plus a per-snapshot `STRING_ENTRY_OVERHEAD_BYTES`
+            // (recording is unconditional per visited element, so an empty
+            // running map would otherwise retain ~N near-zero-byte snapshots
+            // — bounding the count as well as the bytes). The size is
+            // measured BEFORE cloning and the snapshot is skipped when it
+            // would push the aggregate past the cap — a hard ceiling that
+            // also avoids ever cloning an over-budget map. Once reached,
+            // later nodes record nothing (their `string()` in
+            // `bookmark-label` degrades to the CSS default "" — acceptable
+            // under adversarial input). String twin of the CounterPass
+            // `MAX_COUNTER_SNAPSHOT_ENTRIES` guard.
             if self.record_node_snapshots {
-                self.node_snapshots
-                    .borrow_mut()
-                    .insert(node_id, self.running.borrow().clone());
+                let running = self.running.borrow();
+                // Charge a base (the empty-map node_snapshots slot) plus the
+                // per-record overhead for EACH cloned (name, value) B-tree entry
+                // — the map's entry count equals the number of distinct named
+                // strings, so many tiny distinct strings would otherwise retain
+                // hundreds of entries per snapshot counted as only their payload.
+                let cost: usize = crate::STRING_ENTRY_OVERHEAD_BYTES
+                    + running
+                        .iter()
+                        .map(|(k, v)| crate::STRING_ENTRY_OVERHEAD_BYTES + k.len() + v.len())
+                        .sum::<usize>();
+                if self.snapshot_bytes.get().saturating_add(cost)
+                    <= crate::MAX_STRING_SNAPSHOT_BYTES
+                {
+                    self.snapshot_bytes.set(self.snapshot_bytes.get() + cost);
+                    self.node_snapshots
+                        .borrow_mut()
+                        .insert(node_id, running.clone());
+                }
             }
         }
 
@@ -5031,6 +5069,240 @@ mod tests {
             snapshots.get(&p2).and_then(|m| m.get("title").cloned()),
             Some("Second".to_string()),
             "second <p> should see title=Second (set by preceding h1)"
+        );
+    }
+
+    /// DoS hardening (snapshot storage): the per-node running-map clone stores
+    /// attacker-controlled named-string values at every visited element. Without
+    /// an aggregate budget, one large `string-set` value snapshotted at N nodes
+    /// is O(N × value_size) retained memory. `MAX_STRING_SNAPSHOT_BYTES` caps the
+    /// aggregate; recording stops once the budget is reached. String twin of
+    /// `counter_pass_snapshot_bounds_total_stored_entries`.
+    #[test]
+    fn string_set_pass_snapshot_bounds_total_stored_bytes() {
+        use crate::gcpm::StringSetValue;
+
+        // One heading sets a large named string; each following sibling triggers
+        // a per-node snapshot clone of that value. Enough siblings that the
+        // aggregate would blow past the budget without the guard.
+        const BIG: usize = 64 * 1024; // 64 KiB value
+        const SIBLINGS: usize = crate::MAX_STRING_SNAPSHOT_BYTES / BIG + 500;
+        let big_text = "x".repeat(BIG);
+        let mut html = format!("<html><body><h1>{big_text}</h1>");
+        for _ in 0..SIBLINGS {
+            html.push_str("<p></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Tag("h1".into()),
+            name: "title".into(),
+            values: vec![StringSetValue::ContentText],
+        }];
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        let total: usize = snapshots
+            .values()
+            .flat_map(|m| m.iter())
+            .map(|(k, v)| k.len() + v.len())
+            .sum();
+        // The guard measures each snapshot BEFORE cloning and skips any that
+        // would exceed the cap, so the aggregate is a hard ceiling (no overshoot)
+        // — the counted bytes never exceed the budget, and the payload measured
+        // here is a subset of those counted bytes.
+        assert!(
+            total <= crate::MAX_STRING_SNAPSHOT_BYTES,
+            "total stored snapshot bytes {total} exceeded budget {}",
+            crate::MAX_STRING_SNAPSHOT_BYTES
+        );
+        assert!(
+            snapshots.len() < SIBLINGS,
+            "budget did not engage: {} snapshots for {SIBLINGS} siblings",
+            snapshots.len()
+        );
+    }
+
+    /// DoS hardening (store output): a repeated `string-set` literal matched by
+    /// N elements pushes N copies of the value into the store — O(N × value_size)
+    /// retained (and cloned again downstream into the per-node render map), on
+    /// the *default* render path with no bookmark / target-ref opt-in (the store
+    /// is ungated, unlike the snapshot). `MAX_STRING_SET_STORE_BYTES` caps the
+    /// aggregate stored value bytes at the source push. Store sibling of
+    /// `string_set_pass_snapshot_bounds_total_stored_bytes`.
+    #[test]
+    fn string_set_store_bounds_total_value_bytes() {
+        use crate::gcpm::StringSetValue;
+
+        // One large literal matched by many sibling elements: each match pushes
+        // a full copy of the literal into the store from a single-copy input.
+        const BIG: usize = 64 * 1024; // 64 KiB literal
+        const MATCHES: usize = crate::MAX_STRING_SET_STORE_BYTES / BIG + 500;
+        let big_literal = "y".repeat(BIG);
+        let mut html = String::from("<html><body>");
+        for _ in 0..MATCHES {
+            html.push_str("<p class=\"m\"></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Class("m".into()),
+            name: "x".into(),
+            values: vec![StringSetValue::Literal(big_literal)],
+        }];
+        // No `.with_snapshot_recording()` — the store fills on the default path.
+        let pass = StringSetPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let store = pass.into_store();
+
+        let total: usize = store
+            .entries()
+            .iter()
+            .map(|e| e.name.len() + e.value.len())
+            .sum();
+        assert!(
+            total <= crate::MAX_STRING_SET_STORE_BYTES,
+            "total store value bytes {total} exceeded budget {}",
+            crate::MAX_STRING_SET_STORE_BYTES
+        );
+        assert!(
+            store.entries().len() < MATCHES,
+            "budget did not engage: {} entries for {MATCHES} matches",
+            store.entries().len()
+        );
+    }
+
+    /// DoS hardening (snapshot count): with recording enabled a snapshot is
+    /// taken at every visited element even when the running map is empty
+    /// (payload bytes = 0), so the byte budget alone would retain ~N empty
+    /// `BTreeMap` snapshots. The per-snapshot `STRING_ENTRY_OVERHEAD_BYTES` base
+    /// charge bounds the count.
+    #[test]
+    fn string_set_pass_snapshot_bounds_count_for_empty_values() {
+        use crate::gcpm::StringSetValue;
+
+        let ceiling = crate::MAX_STRING_SNAPSHOT_BYTES / crate::STRING_ENTRY_OVERHEAD_BYTES;
+        let n = ceiling + 500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..n {
+            html.push_str("<p></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        // Selector matches nothing → running map stays empty → every per-node
+        // snapshot is an empty map (zero payload bytes), while recording is on.
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Tag("h9".into()),
+            name: "x".into(),
+            values: vec![StringSetValue::ContentText],
+        }];
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        assert!(
+            snapshots.len() <= ceiling + 1,
+            "snapshot count {} not bounded by overhead budget (ceiling {ceiling})",
+            snapshots.len()
+        );
+        assert!(
+            snapshots.len() < n,
+            "budget did not engage: {} snapshots for {n} elements",
+            snapshots.len()
+        );
+    }
+
+    /// DoS hardening (snapshot per-entry overhead): a per-node snapshot clones a
+    /// `BTreeMap` whose entry count equals the number of distinct named strings
+    /// (attacker-definable via many `string-set` rules). The budget must charge
+    /// the per-record overhead for EACH map entry, not once per snapshot — else
+    /// many distinct tiny named strings retain hundreds of B-tree entries per
+    /// snapshot while being charged only their payload plus one base overhead.
+    #[test]
+    fn string_set_pass_snapshot_charges_per_map_entry_overhead() {
+        use crate::gcpm::StringSetValue;
+
+        // 1000 distinct named strings, all set (to empty values) on the first
+        // <div>, so every subsequent per-node snapshot clones a 1000-entry map.
+        const NAMES: usize = 1000;
+        let mut mappings = Vec::with_capacity(NAMES);
+        for i in 0..NAMES {
+            mappings.push(StringSetMapping {
+                parsed: ParsedSelector::Tag("div".into()),
+                name: format!("n{i}"),
+                values: vec![StringSetValue::Literal(String::new())],
+            });
+        }
+
+        // Enough following elements that the base-only charge would admit far
+        // more snapshots than the per-entry charge allows.
+        let n = 2500;
+        let mut html = String::from("<html><body><div></div>");
+        for _ in 0..n {
+            html.push_str("<p></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        // With per-entry overhead each 1000-entry snapshot costs
+        // ~NAMES × STRING_ENTRY_OVERHEAD_BYTES, so far fewer than `n` snapshots
+        // fit; a base-only charge (~NAMES × name_len) would admit thousands.
+        assert!(
+            snapshots.len() < 500,
+            "per-entry overhead not charged: {} snapshots retained (n={n}, names={NAMES})",
+            snapshots.len()
+        );
+    }
+
+    /// DoS hardening (store entry count): empty / tiny `string-set` values must
+    /// not let the byte budget admit an unbounded number of records. The
+    /// per-record `STRING_ENTRY_OVERHEAD_BYTES` charge bounds the *count* too,
+    /// not just payload bytes — otherwise `p { string-set: x "" }` matched by N
+    /// elements retains ~N `StringSetEntry` records at near-zero counted bytes.
+    #[test]
+    fn string_set_store_bounds_entry_count_for_empty_values() {
+        use crate::gcpm::StringSetValue;
+
+        let ceiling = crate::MAX_STRING_SET_STORE_BYTES / crate::STRING_ENTRY_OVERHEAD_BYTES;
+        let matches = ceiling + 500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..matches {
+            html.push_str("<p class=\"m\"></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Class("m".into()),
+            name: "x".into(),
+            values: vec![StringSetValue::Literal(String::new())],
+        }];
+        let pass = StringSetPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let store = pass.into_store();
+
+        assert!(
+            store.entries().len() <= ceiling + 1,
+            "store entry count {} not bounded by overhead budget (ceiling {ceiling})",
+            store.entries().len()
+        );
+        assert!(
+            store.entries().len() < matches,
+            "budget did not engage: {} entries for {matches} matches",
+            store.entries().len()
         );
     }
 
