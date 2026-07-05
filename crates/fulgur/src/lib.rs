@@ -134,6 +134,23 @@ pub(crate) const MAX_COUNTER_SNAPSHOT_ENTRIES: usize = 8 * 1024 * 1024;
 /// nodes past the cap, which is acceptable.
 pub(crate) const MAX_STRING_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Approximate per-record heap + struct overhead charged against the
+/// [`MAX_STRING_SNAPSHOT_BYTES`] / [`MAX_STRING_SET_STORE_BYTES`] budgets in
+/// addition to each record's `name` + `value` payload bytes.
+///
+/// Both budgets otherwise counted only string payload, so empty / tiny named
+/// strings (`p { string-set: x "" }` matched by N elements, or a per-node
+/// snapshot recorded at every visited element while the running map is still
+/// empty) accumulated near-zero *counted* bytes while retaining millions of
+/// `StringSetEntry` / `BTreeMap` records — each of which costs `String` headers,
+/// a node id, and B-tree / `Vec` slot overhead that dwarfs a zero-length value.
+/// Charging this per-record constant makes the byte budget bound the record
+/// *count* as well (ceiling ≈ `budget / this`, ~131 K records at 8 MiB), matching
+/// the entry-count guard of the sibling [`MAX_COUNTER_SNAPSHOT_ENTRIES`]. Sized
+/// to conservatively cover two `String` structs (24 B each) plus a node id and
+/// container slot; realistic bookmark documents stay far below the ceiling.
+pub(crate) const STRING_ENTRY_OVERHEAD_BYTES: usize = 64;
+
 /// Total-storage budget (in bytes) for the resolved `string-set` values that
 /// [`gcpm::string_set::StringSetStore`] accumulates during
 /// [`blitz_adapter::StringSetPass`]. Once the accumulated stored value bytes

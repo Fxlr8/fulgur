@@ -2051,21 +2051,36 @@ impl StringSetPass {
             // Mirrors `CounterPass`'s per-node snapshot timing. Gated
             // on `record_node_snapshots` so non-bookmark renders skip
             // the clone (fulgur-70c). The `snapshot_bytes` budget bounds
-            // the *aggregate* retained string bytes across nodes: the
-            // running values are attacker-controlled (`content(text)` /
-            // `attr()`), so cloning a large value at every one of N nodes
-            // is O(N × value_size) memory. Once the budget is reached,
+            // the *aggregate* retained memory across nodes: the running
+            // values are attacker-controlled (`content(text)` / `attr()`),
+            // so cloning a large value at every one of N nodes is
+            // O(N × value_size) memory. Each snapshot is charged its string
+            // payload plus a per-snapshot `STRING_ENTRY_OVERHEAD_BYTES`
+            // (recording is unconditional per visited element, so an empty
+            // running map would otherwise retain ~N near-zero-byte snapshots
+            // — bounding the count as well as the bytes). The size is
+            // measured BEFORE cloning and the snapshot is skipped when it
+            // would push the aggregate past the cap — a hard ceiling that
+            // also avoids ever cloning an over-budget map. Once reached,
             // later nodes record nothing (their `string()` in
             // `bookmark-label` degrades to the CSS default "" — acceptable
             // under adversarial input). String twin of the CounterPass
             // `MAX_COUNTER_SNAPSHOT_ENTRIES` guard.
-            if self.record_node_snapshots
-                && self.snapshot_bytes.get() < crate::MAX_STRING_SNAPSHOT_BYTES
-            {
-                let snapshot = self.running.borrow().clone();
-                let bytes: usize = snapshot.iter().map(|(k, v)| k.len() + v.len()).sum();
-                self.snapshot_bytes.set(self.snapshot_bytes.get() + bytes);
-                self.node_snapshots.borrow_mut().insert(node_id, snapshot);
+            if self.record_node_snapshots {
+                let running = self.running.borrow();
+                let cost: usize = crate::STRING_ENTRY_OVERHEAD_BYTES
+                    + running
+                        .iter()
+                        .map(|(k, v)| k.len() + v.len())
+                        .sum::<usize>();
+                if self.snapshot_bytes.get().saturating_add(cost)
+                    <= crate::MAX_STRING_SNAPSHOT_BYTES
+                {
+                    self.snapshot_bytes.set(self.snapshot_bytes.get() + cost);
+                    self.node_snapshots
+                        .borrow_mut()
+                        .insert(node_id, running.clone());
+                }
             }
         }
 
@@ -5090,11 +5105,12 @@ mod tests {
             .flat_map(|m| m.iter())
             .map(|(k, v)| k.len() + v.len())
             .sum();
-        // The guard checks the budget *before* adding, so one final snapshot can
-        // overshoot by up to one full running map (here a single BIG value).
-        let slack = BIG + 64;
+        // The guard measures each snapshot BEFORE cloning and skips any that
+        // would exceed the cap, so the aggregate is a hard ceiling (no overshoot)
+        // — the counted bytes never exceed the budget, and the payload measured
+        // here is a subset of those counted bytes.
         assert!(
-            total <= crate::MAX_STRING_SNAPSHOT_BYTES + slack,
+            total <= crate::MAX_STRING_SNAPSHOT_BYTES,
             "total stored snapshot bytes {total} exceeded budget {}",
             crate::MAX_STRING_SNAPSHOT_BYTES
         );
@@ -5152,6 +5168,88 @@ mod tests {
         assert!(
             store.entries().len() < MATCHES,
             "budget did not engage: {} entries for {MATCHES} matches",
+            store.entries().len()
+        );
+    }
+
+    /// DoS hardening (snapshot count): with recording enabled a snapshot is
+    /// taken at every visited element even when the running map is empty
+    /// (payload bytes = 0), so the byte budget alone would retain ~N empty
+    /// `BTreeMap` snapshots. The per-snapshot `STRING_ENTRY_OVERHEAD_BYTES` base
+    /// charge bounds the count.
+    #[test]
+    fn string_set_pass_snapshot_bounds_count_for_empty_values() {
+        use crate::gcpm::StringSetValue;
+
+        let ceiling = crate::MAX_STRING_SNAPSHOT_BYTES / crate::STRING_ENTRY_OVERHEAD_BYTES;
+        let n = ceiling + 500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..n {
+            html.push_str("<p></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        // Selector matches nothing → running map stays empty → every per-node
+        // snapshot is an empty map (zero payload bytes), while recording is on.
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Tag("h9".into()),
+            name: "x".into(),
+            values: vec![StringSetValue::ContentText],
+        }];
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let snapshots = pass.take_node_snapshots();
+
+        assert!(
+            snapshots.len() <= ceiling + 1,
+            "snapshot count {} not bounded by overhead budget (ceiling {ceiling})",
+            snapshots.len()
+        );
+        assert!(
+            snapshots.len() < n,
+            "budget did not engage: {} snapshots for {n} elements",
+            snapshots.len()
+        );
+    }
+
+    /// DoS hardening (store entry count): empty / tiny `string-set` values must
+    /// not let the byte budget admit an unbounded number of records. The
+    /// per-record `STRING_ENTRY_OVERHEAD_BYTES` charge bounds the *count* too,
+    /// not just payload bytes — otherwise `p { string-set: x "" }` matched by N
+    /// elements retains ~N `StringSetEntry` records at near-zero counted bytes.
+    #[test]
+    fn string_set_store_bounds_entry_count_for_empty_values() {
+        use crate::gcpm::StringSetValue;
+
+        let ceiling = crate::MAX_STRING_SET_STORE_BYTES / crate::STRING_ENTRY_OVERHEAD_BYTES;
+        let matches = ceiling + 500;
+        let mut html = String::from("<html><body>");
+        for _ in 0..matches {
+            html.push_str("<p class=\"m\"></p>");
+        }
+        html.push_str("</body></html>");
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let mappings = vec![StringSetMapping {
+            parsed: ParsedSelector::Class("m".into()),
+            name: "x".into(),
+            values: vec![StringSetValue::Literal(String::new())],
+        }];
+        let pass = StringSetPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let store = pass.into_store();
+
+        assert!(
+            store.entries().len() <= ceiling + 1,
+            "store entry count {} not bounded by overhead budget (ceiling {ceiling})",
+            store.entries().len()
+        );
+        assert!(
+            store.entries().len() < matches,
+            "budget did not engage: {} entries for {matches} matches",
             store.entries().len()
         );
     }
