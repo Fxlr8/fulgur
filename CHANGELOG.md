@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.28.0] - 2026-07-05
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* harden(gcpm): bound string-set snapshot + store memory (DoS) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/582
+### Documentation
+* docs(changelog): backfill 0.27.0 security note (GHSA-395p-pj7r-jm42) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/581
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.27.0...v0.28.0
+
 ## [0.27.0] - 2026-07-04
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
