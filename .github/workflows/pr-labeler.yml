@@ -47,6 +47,7 @@ jobs:
             const map = {
               feat: 'release-notes:feature',
               fix: 'release-notes:fix',
+              harden: 'release-notes:security',
               docs: 'release-notes:docs',
               chore: 'release-notes:internal',
               test: 'release-notes:internal',
