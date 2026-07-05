@@ -6,7 +6,8 @@ All notable changes to this project will be documented in this file.
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
 
-
+### Security
+* Fixes an availability (denial-of-service) vulnerability: unbounded CSS `counters()` expansion in generated content could exhaust CPU/memory when rendering untrusted HTML/CSS that uses CSS counters / `bookmark-label` (GCPM). Advisory: [GHSA-395p-pj7r-jm42](https://github.com/fulgur-rs/fulgur/security/advisories/GHSA-395p-pj7r-jm42) (High, CVSS 7.5, CWE-400). Affected: `>= 0.15.0, < 0.27.0`; fixed in 0.27.0.
 
 **Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.26.0...v0.27.0
 
