@@ -1947,8 +1947,18 @@ pub struct StringSetPass {
     /// Running map `name -> latest value` updated as the DOM walk
     /// encounters string-set assignments. Snapshotted into
     /// `node_snapshots` at every visited element so `BookmarkPass` can
-    /// resolve `string(name)` at the element's DOM position.
+    /// resolve `string(name)` at the element's DOM position. Only built
+    /// when `record_node_snapshots` is enabled — it has no other consumer,
+    /// so the default render path leaves it empty. On the bookmark path its
+    /// aggregate byte size is bounded by [`crate::MAX_STRING_SNAPSHOT_BYTES`]
+    /// (the budget its per-node clones feed) via `running_bytes`.
     running: RefCell<BTreeMap<String, String>>,
+    /// Running total of `name` + `value` bytes retained in `running`,
+    /// enforcing the [`crate::MAX_STRING_SNAPSHOT_BYTES`] budget so folding
+    /// many *distinct* named strings on one element cannot accumulate
+    /// unbounded memory in the running map itself (a folding-DoS sink the
+    /// store and snapshot budgets do not cover).
+    running_bytes: std::cell::Cell<usize>,
     /// Per-node snapshot of `running` taken at every visited element
     /// after that element's own string-set assignment (if any) has been
     /// applied. Only populated when `record_node_snapshots` is enabled.
@@ -1972,6 +1982,7 @@ impl StringSetPass {
             mappings,
             store: RefCell::new(StringSetStore::new()),
             running: RefCell::new(BTreeMap::new()),
+            running_bytes: std::cell::Cell::new(0),
             node_snapshots: RefCell::new(BTreeMap::new()),
             record_node_snapshots: false,
             snapshot_bytes: std::cell::Cell::new(0),
@@ -1997,6 +2008,20 @@ impl StringSetPass {
     /// method has already been called once — call before `into_store`.
     pub fn take_node_snapshots(&self) -> BTreeMap<usize, BTreeMap<String, String>> {
         std::mem::take(&mut *self.node_snapshots.borrow_mut())
+    }
+
+    /// Total `name` + `value` bytes retained in the live `running` map.
+    /// Test-only observability for the running-map memory budget: `running`
+    /// has no public accessor and its only consumer (the per-node snapshot
+    /// clone) is separately capped, so this is the honest window onto the
+    /// running map's own peak retention.
+    #[cfg(test)]
+    fn running_retained_bytes(&self) -> usize {
+        self.running
+            .borrow()
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum()
     }
 }
 
@@ -2036,9 +2061,43 @@ impl StringSetPass {
                 .filter(|m| selector_matches(&m.parsed, elem))
             {
                 let value = resolve_string_set_values(doc, node_id, elem, &mapping.values);
-                self.running
-                    .borrow_mut()
-                    .insert(mapping.name.clone(), value.clone());
+                // The running map is only consumed by the
+                // `record_node_snapshots`-gated per-node snapshot clone below
+                // (no other reader, no pub accessor). On the default path it is
+                // dead state, so skip building it entirely — this both avoids a
+                // wasted clone and closes the O(M × value_size) folding sink for
+                // distinct named strings (`.cN { string-set: sN content(text) }`
+                // folded per element) that the store/snapshot budgets do not
+                // cover. On the bookmark path, keep it but charge each entry
+                // against `MAX_STRING_SNAPSHOT_BYTES` (the budget its clones
+                // feed): a *new* named string is dropped once it would push the
+                // aggregate past the cap, bounding the distinct-name count M
+                // (`string()` for the dropped name degrades to "" under
+                // adversarial input, matching store/snapshot degradation).
+                // Overwriting an existing name is always honored — it cannot
+                // multiply (one value per name, last-write-wins) and correct
+                // `string()` resolution needs the latest value — with its byte
+                // delta reflected so the budget stays accurate.
+                if self.record_node_snapshots {
+                    let mut running = self.running.borrow_mut();
+                    match running.get(&mapping.name) {
+                        Some(existing) => {
+                            let running_bytes =
+                                self.running_bytes.get() - existing.len() + value.len();
+                            self.running_bytes.set(running_bytes);
+                            running.insert(mapping.name.clone(), value.clone());
+                        }
+                        None => {
+                            let add = mapping.name.len() + value.len();
+                            if self.running_bytes.get().saturating_add(add)
+                                <= crate::MAX_STRING_SNAPSHOT_BYTES
+                            {
+                                self.running_bytes.set(self.running_bytes.get() + add);
+                                running.insert(mapping.name.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
                 self.store.borrow_mut().push(StringSetEntry {
                     name: mapping.name.clone(),
                     value,
@@ -5174,6 +5233,86 @@ mod tests {
             store.entries().len() < MATCHES,
             "budget did not engage: {} entries for {MATCHES} matches",
             store.entries().len()
+        );
+    }
+
+    /// DoS hardening (running map, default path): the `running` named-string
+    /// map is only consumed by the `record_node_snapshots`-gated per-node
+    /// snapshot clone. On the default (no-bookmark) render path it is dead
+    /// state, yet folding many distinct named strings on one large element
+    /// (`.cN { string-set: sN content(text) }`) would otherwise retain
+    /// O(M × value_size) here — the folding-DoS sink the store/snapshot caps
+    /// do not cover. With recording off, the pass must not accumulate `running`.
+    #[test]
+    fn string_set_pass_default_path_does_not_build_running_map() {
+        use crate::gcpm::StringSetValue;
+
+        const BIG: usize = 64 * 1024; // 64 KiB per extracted value
+        const RULES: usize = 40;
+        let big_text = "z".repeat(BIG);
+        let classes = (0..RULES)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let html = format!("<html><body class=\"{classes}\">{big_text}</body></html>");
+        let mappings = (0..RULES)
+            .map(|i| StringSetMapping {
+                parsed: ParsedSelector::Class(format!("c{i}")),
+                name: format!("s{i}"),
+                values: vec![StringSetValue::ContentText],
+            })
+            .collect();
+        let mut doc = parse(&html, 400.0, &[]);
+
+        // Default construction → recording OFF → running is never consumed.
+        let pass = StringSetPass::new(mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        assert_eq!(
+            pass.running_retained_bytes(),
+            0,
+            "running map must not be built on the default (no-snapshot) path"
+        );
+    }
+
+    /// DoS hardening (running map, bookmark path): with snapshot recording on,
+    /// the `running` map is the source cloned into per-node snapshots. Distinct
+    /// named strings folded on one large element retain O(M × value_size) in
+    /// `running` itself — outside the store and snapshot byte budgets. The
+    /// running map must carry its own aggregate byte budget mirroring those
+    /// sinks. String-folding twin of `string_set_store_bounds_total_value_bytes`.
+    #[test]
+    fn string_set_pass_running_map_bounds_distinct_named_values() {
+        use crate::gcpm::StringSetValue;
+
+        const BIG: usize = 64 * 1024; // 64 KiB per extracted value
+        // Enough distinct names that M × BIG blows past the budget.
+        const RULES: usize = crate::MAX_STRING_SNAPSHOT_BYTES / BIG + 500;
+        let big_text = "z".repeat(BIG);
+        let classes = (0..RULES)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let html = format!("<html><body class=\"{classes}\">{big_text}</body></html>");
+        let mappings = (0..RULES)
+            .map(|i| StringSetMapping {
+                parsed: ParsedSelector::Class(format!("c{i}")),
+                name: format!("s{i}"),
+                values: vec![StringSetValue::ContentText],
+            })
+            .collect();
+        let mut doc = parse(&html, 400.0, &[]);
+
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        assert!(
+            pass.running_retained_bytes() <= crate::MAX_STRING_SNAPSHOT_BYTES,
+            "running map retained bytes {} exceeded budget {}",
+            pass.running_retained_bytes(),
+            crate::MAX_STRING_SNAPSHOT_BYTES
         );
     }
 
