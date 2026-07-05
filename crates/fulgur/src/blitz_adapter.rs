@@ -2023,6 +2023,15 @@ impl StringSetPass {
             .map(|(name, value)| name.len() + value.len())
             .sum()
     }
+
+    /// Number of live entries in the `running` map. Test-only: the byte-budget
+    /// bounds entry *count* (via the per-entry overhead charge) as well as
+    /// payload bytes, so a near-zero-value flood cannot retain unbounded map
+    /// entries.
+    #[cfg(test)]
+    fn running_len(&self) -> usize {
+        self.running.borrow().len()
+    }
 }
 
 impl DomPass for StringSetPass {
@@ -2097,10 +2106,17 @@ impl StringSetPass {
                             .get()
                             .saturating_sub(existing.len())
                             .saturating_add(value.len()),
-                        None => self
-                            .running_bytes
-                            .get()
-                            .saturating_add(mapping.name.len() + value.len()),
+                        // A new entry is charged a per-record
+                        // `STRING_ENTRY_OVERHEAD_BYTES` on top of its payload so
+                        // the budget bounds the entry *count* as well as the
+                        // bytes — otherwise many distinct names with empty / tiny
+                        // values (`.cN { string-set: sN content(text) }` over a
+                        // text-less element) would retain up to `budget /
+                        // name_len` map entries, each with real per-node
+                        // overhead. Mirrors the store / snapshot caps.
+                        None => self.running_bytes.get().saturating_add(
+                            crate::STRING_ENTRY_OVERHEAD_BYTES + mapping.name.len() + value.len(),
+                        ),
                     };
                     if projected <= crate::MAX_STRING_SNAPSHOT_BYTES {
                         self.running_bytes.set(projected);
@@ -5387,6 +5403,49 @@ mod tests {
             "running map retained bytes {} exceeded budget {} after large overwrites",
             pass.running_retained_bytes(),
             crate::MAX_STRING_SNAPSHOT_BYTES
+        );
+    }
+
+    /// DoS hardening (running map, entry count): with recording on, many
+    /// distinct names with empty/tiny values would retain up to
+    /// `budget / name_len` `BTreeMap` entries if only payload bytes were
+    /// charged — each entry carries real per-node overhead. The budget charges
+    /// `STRING_ENTRY_OVERHEAD_BYTES` per new entry to bound the count too.
+    /// Reported by review on PR #584. Running twin of
+    /// `string_set_store_bounds_entry_count_for_empty_values`.
+    #[test]
+    fn string_set_pass_running_map_bounds_entry_count_for_empty_values() {
+        use crate::gcpm::StringSetValue;
+
+        // Body has no text → every `content(text)` resolves empty. Enough
+        // distinct names that the count would blow past the budget if charged
+        // only by (near-zero) payload bytes. All rules use a `body` tag
+        // selector so folding stays O(names) (no per-class scan).
+        let ceiling = crate::MAX_STRING_SNAPSHOT_BYTES / crate::STRING_ENTRY_OVERHEAD_BYTES;
+        let names = ceiling + 500;
+        let html = "<html><body></body></html>";
+        let mappings = (0..names)
+            .map(|i| StringSetMapping {
+                parsed: ParsedSelector::Tag("body".into()),
+                name: format!("s{i}"),
+                values: vec![StringSetValue::ContentText],
+            })
+            .collect();
+        let mut doc = parse(html, 400.0, &[]);
+
+        let pass = StringSetPass::new(mappings).with_snapshot_recording();
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+
+        assert!(
+            pass.running_len() <= ceiling,
+            "running map retained {} entries, exceeding the count ceiling {ceiling}",
+            pass.running_len()
+        );
+        assert!(
+            pass.running_len() < names,
+            "entry-count budget did not engage: {} entries for {names} names",
+            pass.running_len()
         );
     }
 
