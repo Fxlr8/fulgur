@@ -64,6 +64,26 @@ pub(crate) const MAX_PAGES: u32 = 10_000;
 /// [`MAX_DOM_DEPTH`] / [`MAX_PAGES`] defensive bounds.
 pub(crate) const MAX_COLUMN_COUNT: u32 = 64;
 
+/// Maximum number of CSS gradient color stops retained per background layer.
+/// CSS accepts an unbounded stop list (`linear-gradient(c0, c1, …, cN)`), and
+/// convert clones the resolved `Vec<GradientStop>` into every element's
+/// [`crate::draw_primitives::BackgroundLayer`] — so a rule like
+/// `* { background: linear-gradient(<N stops>) }` retains O(elements × N).
+/// For repeating gradients the draw-time period expansion in
+/// `background::expand_repeating_stops` further materializes
+/// `total_copies × stops.len()` entries (`total_copies` is already bounded by
+/// its own `MAX_PERIODS`), so bounding `stops.len()` here keeps that product
+/// bounded too.
+///
+/// Clamping the stop count at the convert-side choke points that build the
+/// vector (`resolve_color_stops` for linear/radial, plus the conic loop)
+/// bounds both the retained per-layer vector and the downstream repeating
+/// expansion at once. 256 stops is far beyond any legitimate gradient — real
+/// designs use a handful — so no realistic document changes output; excess
+/// stops are truncated (clamp-and-warn). Sibling of the [`MAX_COLUMN_COUNT`]
+/// multicol bound.
+pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
+
 /// Upper bound on the **output bytes** materialized for a single resolved
 /// counter chain (`counters(name, sep, style)`), applied inside
 /// [`gcpm::counter::format_counter_chain`] so it covers every call site

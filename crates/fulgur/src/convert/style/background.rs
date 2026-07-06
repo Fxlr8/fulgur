@@ -229,8 +229,12 @@ fn resolve_color_stops(
     use crate::draw_primitives::{GradientStop, GradientStopPosition};
     use style::values::generics::image::GradientItem;
 
-    let mut out: Vec<GradientStop> = Vec::with_capacity(items.len());
-    for item in items.iter() {
+    // Cap the retained stop count: `items` is an attacker-controllable,
+    // unbounded stop list, and this vector is cloned into every element's
+    // `BackgroundLayer` (O(elements × stops)). Bounding it here also bounds
+    // the draw-time repeating expansion (`total_copies × stops.len()`).
+    let mut out: Vec<GradientStop> = Vec::with_capacity(items.len().min(crate::MAX_GRADIENT_STOPS));
+    for item in items.iter().take(crate::MAX_GRADIENT_STOPS) {
         match item {
             GradientItem::SimpleColorStop(c) => {
                 let abs = c.resolve_to_absolute(current_color);
@@ -431,8 +435,12 @@ fn resolve_conic_gradient(
     let position_y = try_convert_lp_to_bg(&position.vertical)?;
     let repeating = flags.contains(GradientFlags::REPEATING);
 
-    let mut stops: Vec<crate::draw_primitives::GradientStop> = Vec::with_capacity(items.len());
-    for item in items.iter() {
+    // Cap the retained stop count (see `resolve_color_stops`): the conic
+    // stop list is a separate attacker-controllable, unbounded input, and
+    // this vector is likewise cloned per element and period-expanded at draw.
+    let mut stops: Vec<crate::draw_primitives::GradientStop> =
+        Vec::with_capacity(items.len().min(crate::MAX_GRADIENT_STOPS));
+    for item in items.iter().take(crate::MAX_GRADIENT_STOPS) {
         use crate::draw_primitives::{GradientStop, GradientStopPosition};
         match item {
             GradientItem::SimpleColorStop(c) => {
@@ -983,5 +991,68 @@ mod tests {
             .render(html)
             .expect("render missing-bundle bg");
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// Return the stop count of the first gradient background layer found in
+    /// `html`'s converted block styles, or `None` if there is no gradient.
+    fn first_gradient_stop_count(html: &str) -> Option<usize> {
+        use crate::draw_primitives::BgImageContent;
+        let drawables = Engine::builder()
+            .build()
+            .build_drawables_for_testing_no_gcpm(html);
+        drawables.block_styles.values().find_map(|block| {
+            block
+                .style
+                .background_layers
+                .iter()
+                .find_map(|layer| match &layer.content {
+                    BgImageContent::LinearGradient { stops, .. }
+                    | BgImageContent::RadialGradient { stops, .. }
+                    | BgImageContent::ConicGradient { stops, .. } => Some(stops.len()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// Security regression: an unbounded `column-stop` list must not be
+    /// retained verbatim per element. A gradient with far more stops than
+    /// [`crate::MAX_GRADIENT_STOPS`] is clamped when convert builds the
+    /// `BackgroundLayer` vector, bounding the O(elements × stops) retention
+    /// (and the downstream repeating period expansion). Real gradients use a
+    /// handful of stops, so this only affects pathological input.
+    #[test]
+    fn gradient_stop_count_is_defensively_capped() {
+        // ~2000 alternating color stops — far above MAX_GRADIENT_STOPS (256).
+        let mut stops = String::new();
+        for i in 0..2000 {
+            stops.push_str(if i % 2 == 0 { "red," } else { "blue," });
+        }
+        stops.push_str("red");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:linear-gradient({stops})"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html).expect("linear gradient layer present");
+        assert!(
+            count <= crate::MAX_GRADIENT_STOPS,
+            "gradient stops must be capped, got {count}"
+        );
+    }
+
+    /// Same cap on the conic-gradient stop-building path (a separate loop).
+    #[test]
+    fn conic_gradient_stop_count_is_defensively_capped() {
+        let mut stops = String::new();
+        for i in 0..2000 {
+            stops.push_str(if i % 2 == 0 { "red," } else { "blue," });
+        }
+        stops.push_str("red");
+        let html = format!(
+            r#"<html><body><div style="width:120px;height:80px;background:conic-gradient({stops})"></div></body></html>"#
+        );
+        let count = first_gradient_stop_count(&html).expect("conic gradient layer present");
+        assert!(
+            count <= crate::MAX_GRADIENT_STOPS,
+            "conic gradient stops must be capped, got {count}"
+        );
     }
 }

@@ -5421,3 +5421,25 @@ fn test_render_html_huge_multicol_column_count_is_bounded() {
     let pdf = Engine::builder().build().render(html).expect("render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn test_render_html_huge_gradient_stop_list_is_bounded() {
+    // Security regression (unbounded gradient color stops): convert clones the
+    // resolved stop vector into every element's BackgroundLayer, so a huge
+    // stop list retains O(elements × stops); a repeating gradient additionally
+    // period-expands `total_copies × stops.len()` at draw. The MAX_GRADIENT_STOPS
+    // clamp bounds both. A repeating-linear-gradient with thousands of stops
+    // must render in bounded memory/time.
+    let mut stops = String::new();
+    for i in 0..5000 {
+        stops.push_str(if i % 2 == 0 { "red 0%," } else { "blue 1%," });
+    }
+    stops.push_str("red 2%");
+    let html = format!(
+        r#"<!DOCTYPE html><html><body>
+        <div style="width:120px;height:80px;background:repeating-linear-gradient({stops})"></div>
+    </body></html>"#
+    );
+    let pdf = Engine::builder().build().render(&html).expect("render");
+    assert!(!pdf.is_empty());
+}
