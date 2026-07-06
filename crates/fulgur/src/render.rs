@@ -3030,23 +3030,29 @@ fn draw_list_item_with_block(
             draw_block_inner_paint(canvas, b, x, y, frag, is_split);
         }
         if let Some(p) = paragraph {
-            // inline-root li の段落コンテンツを LBody 配下に記録する
-            let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
+            // Pick the struct-tree node that per-run link tags nest under.
+            // A semantic `<li>` remaps to its synthetic LBody id. A CSS
+            // list item that is itself a tagged element (e.g. `<div
+            // style="display:list-item">` → `PdfTag::Div`) uses its own id.
+            // But a CSS list item whose element has no `SemanticEntry` — e.g.
+            // `<a style="display:list-item">` or a custom element, for which
+            // `classify_element` returns `None` — has no struct-tree home:
+            // wiring a link run under it would mark the span wired without its
+            // content ever entering the tag tree, tripping Krilla's "every
+            // tagged annotation appears in the tag tree" invariant (a panic in
+            // `krilla::serialize`). Skip per-run tagging there; the link
+            // annotation is still emitted, just untagged.
+            let run_tag_node_id = drawables.li_lbody_ids.get(&node_id).copied().or_else(|| {
+                drawables
+                    .semantics
+                    .contains_key(&node_id)
+                    .then_some(node_id)
+            });
+            let use_run_tagging = canvas.tag_collector.is_some()
+                && para_has_link_runs(p)
+                && run_tag_node_id.is_some();
             let tag_info = if use_run_tagging {
-                // A semantic `<li>` remaps its link runs under the synthetic
-                // LBody id so they nest correctly in the PDF/UA struct tree.
-                // A non-semantic CSS list item (e.g. `<div
-                // style="display:list-item">`) is present in
-                // `drawables.list_items` but has no LBody entry — only
-                // `PdfTag::Li` allocates one (`convert::walk_semantics`). Fall
-                // back to the node's own id, matching the plain
-                // block-paragraph link-run path in `dispatch_fragment`.
-                let run_tag_node_id = drawables
-                    .li_lbody_ids
-                    .get(&node_id)
-                    .copied()
-                    .unwrap_or(node_id);
-                canvas.link_run_node_id = Some(run_tag_node_id);
+                canvas.link_run_node_id = run_tag_node_id;
                 None
             } else {
                 try_start_tagged(canvas, node_id, drawables)

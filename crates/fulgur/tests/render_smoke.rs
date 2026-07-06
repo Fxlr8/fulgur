@@ -5356,3 +5356,40 @@ fn test_tagged_css_list_item_with_link_does_not_panic() {
         .expect("tagged CSS list-item containing a link must not panic");
     assert!(!pdf.is_empty(), "PDF should be non-empty");
 }
+
+/// Companion guard for the case the LBody fallback must NOT tag: a CSS
+/// list item whose element has no `SemanticEntry` at all. `classify_element`
+/// returns `None` for `<a>` and for custom elements, so neither `<a
+/// style="display:list-item">` nor `<x-foo style="display:list-item">` gets
+/// a semantic entry or an LBody id. Falling back to `node_id` unconditionally
+/// would wire the link run under an id absent from the struct tree, and
+/// Krilla panics in `serialize` ("annotation identifier ... doesn't appear in
+/// the tag tree"). Per-run tagging must be skipped for these, leaving the link
+/// annotation untagged.
+#[test]
+fn test_tagged_semanticless_list_item_with_link_does_not_panic() {
+    // `<a>` is itself the CSS list item and carries the link.
+    let a = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(
+            "<html><body>\
+             <a href=\"https://example.com\" style=\"display:list-item; margin-left:40px\">x</a>\
+             </body></html>",
+        )
+        .expect("tagged <a display:list-item> must not panic");
+    assert!(!a.is_empty(), "PDF should be non-empty");
+
+    // Custom element (no semantic entry) wrapping a link.
+    let custom = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(
+            "<html><body>\
+             <x-foo style=\"display:list-item; margin-left:40px\">\
+             <a href=\"https://example.com\">x</a></x-foo>\
+             </body></html>",
+        )
+        .expect("tagged custom-element list-item with a link must not panic");
+    assert!(!custom.is_empty(), "PDF should be non-empty");
+}
