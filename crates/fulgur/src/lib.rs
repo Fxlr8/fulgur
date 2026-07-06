@@ -36,6 +36,34 @@ pub(crate) const MAX_DOM_DEPTH: usize = 512;
 /// `MAX_TILES` defensive bounds.
 pub(crate) const MAX_PAGES: u32 = 10_000;
 
+/// Maximum number of columns a single multi-column container is laid out
+/// across, regardless of the CSS `column-count` / `column-width` the input
+/// requests. CSS accepts `column-count` up to `i32::MAX`, and a small
+/// `column-width` on a wide container derives an equally large used count —
+/// neither is bounded by the spec.
+///
+/// The used count `n` is a **multiplier on retained layout metadata**: the
+/// multicol hook allocates one `vec![0.0; n]` per column group (`col_heights`)
+/// and, for every paragraph that splits across columns, an `n`-length
+/// `column_slices` vector padded with placeholders for unused columns (its
+/// length equals `n` by the `ParagraphSplitEntry` contract). A single
+/// `<div style="column-count:2000000000">x</div>` therefore forces one ~8 GB
+/// `col_heights` allocation, and the split path amplifies to
+/// O(`column_count` × paragraph_count) — an unbounded, attacker-controllable
+/// memory-exhaustion DoS on a server-side renderer of untrusted HTML/CSS.
+///
+/// Clamping the resolved count at the single choke point
+/// ([`multicol_layout::resolve_column_layout`]) bounds every downstream `n`
+/// sink at once (`col_heights`, `column_slices`, `slice_lines_by_budget`) and
+/// keeps the total metadata input-proportional (`n` is a small constant, so
+/// the split path stays O(paragraph_count)). 64 is far above any legitimate
+/// print layout — real multi-column text rarely exceeds a handful of columns —
+/// so no realistic document is affected; a pathological explicit or
+/// width-derived count is merely clamped (the columns collapse to zero width,
+/// as they already would past the container's capacity). Sibling of the
+/// [`MAX_DOM_DEPTH`] / [`MAX_PAGES`] defensive bounds.
+pub(crate) const MAX_COLUMN_COUNT: u32 = 64;
+
 /// Upper bound on the **output bytes** materialized for a single resolved
 /// counter chain (`counters(name, sep, style)`), applied inside
 /// [`gcpm::counter::format_counter_chain`] so it covers every call site

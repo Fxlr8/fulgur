@@ -5396,3 +5396,28 @@ fn test_tagged_semanticless_link_runs_do_not_panic() {
         assert!(!pdf.is_empty(), "PDF should be non-empty for {body:?}");
     }
 }
+
+#[test]
+fn test_render_html_huge_multicol_column_count_is_bounded() {
+    // Security regression (unbounded `column-count` memory-exhaustion DoS):
+    // a single multicol container with an enormous `column-count` must not
+    // allocate `column-count`-sized layout metadata. Before the
+    // MAX_COLUMN_COUNT clamp in `resolve_column_layout`, the multicol hook
+    // ran `vec![0.0; n]` for `col_heights` (here n = 2_000_000_000 ≈ 8 GB)
+    // unconditionally, and the inline-root split path amplified further to
+    // O(column_count × paragraph_count) `column_slices`. With the clamp the
+    // used count is bounded to a small constant, so this renders in bounded
+    // memory/time. Paragraphs are included so the split path is exercised too.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="column-count:2000000000; column-gap:10px; width:300px">
+            <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+               eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
+            <p>Ut enim ad minim veniam, quis nostrud exercitation ullamco
+               laboris nisi ut aliquip ex ea commodo consequat.</p>
+            <p>Duis aute irure dolor in reprehenderit in voluptate velit esse
+               cillum dolore eu fugiat nulla pariatur.</p>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("render");
+    assert!(!pdf.is_empty());
+}
