@@ -2725,6 +2725,13 @@ pub fn append_position_fixed_fragments(
     let root_id = doc.root_element().id;
     walk_for_position_fixed(doc, root_id, &mut fixed_ids, 0);
 
+    // Aggregate budget across all fixed roots and their descendants: each
+    // node emits one fragment per page, so the retained total is
+    // O((roots + descendants) × pages). `pages` is bounded by MAX_PAGES, but
+    // the node axis is not — cap the total to keep the pass bounded on
+    // untrusted input (`crate::MAX_FIXED_SUBTREE_FRAGMENTS`).
+    let mut emitted: usize = 0;
+
     for id in fixed_ids {
         let Some(node) = doc.get_node(id) else {
             continue;
@@ -2770,6 +2777,9 @@ pub fn append_position_fixed_fragments(
         entry.fragments.clear();
         entry.is_repeat = true;
         for page_index in 0..pages {
+            if emitted >= crate::MAX_FIXED_SUBTREE_FRAGMENTS {
+                break;
+            }
             entry.fragments.push(Fragment {
                 page_index,
                 x: x.as_px(),
@@ -2777,6 +2787,7 @@ pub fn append_position_fixed_fragments(
                 width: w.as_px(),
                 height: h.as_px(),
             });
+            emitted += 1;
         }
 
         // fulgur-4m16: emit per-page repeated fragments for every
@@ -2789,7 +2800,7 @@ pub fn append_position_fixed_fragments(
         // entry for the pencil child or v2 never reaches it. The
         // existing root-only fragment carries inline text rendering
         // (fixedpos-001 / 008 ref pattern) but not block descendants.
-        record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages);
+        record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages, &mut emitted);
     }
 
     // Don't allocate empty entries for nodes without fragments.
@@ -2819,9 +2830,11 @@ fn record_fixed_subtree_descendants(
     fixed_root_id: usize,
     root_stored_xy: (f32, f32),
     pages: u32,
+    emitted: &mut usize,
 ) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
 
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         geometry: &mut PaginationGeometryTable,
         doc: &BaseDocument,
@@ -2830,6 +2843,7 @@ fn record_fixed_subtree_descendants(
         root_stored_xy: (f32, f32),
         pages: u32,
         depth: usize,
+        emitted: &mut usize,
     ) {
         if depth >= crate::MAX_DOM_DEPTH {
             return;
@@ -2845,14 +2859,24 @@ fn record_fixed_subtree_descendants(
         let entry = geometry.entry(node_id).or_default();
         entry.fragments.clear();
         entry.is_repeat = true;
-        for page_index in 0..pages.max(1) {
-            entry.fragments.push(Fragment {
-                page_index,
-                x: stored_x.as_px(),
-                y: stored_y.as_px(),
-                width: w.as_px(),
-                height: h.as_px(),
-            });
+        // Zero-area fragments draw nothing, so skipping them is
+        // output-preserving and removes the most common fixed-subtree
+        // amplifier (empty structural wrappers). The aggregate `emitted`
+        // budget is the hard bound on the residual O(descendants × pages).
+        if w > 0.0 || h > 0.0 {
+            for page_index in 0..pages.max(1) {
+                if *emitted >= crate::MAX_FIXED_SUBTREE_FRAGMENTS {
+                    break;
+                }
+                entry.fragments.push(Fragment {
+                    page_index,
+                    x: stored_x.as_px(),
+                    y: stored_y.as_px(),
+                    width: w.as_px(),
+                    height: h.as_px(),
+                });
+                *emitted += 1;
+            }
         }
 
         let children: Vec<usize> = {
@@ -2892,6 +2916,7 @@ fn record_fixed_subtree_descendants(
                 root_stored_xy,
                 pages,
                 depth + 1,
+                emitted,
             );
         }
     }
@@ -2933,6 +2958,7 @@ fn record_fixed_subtree_descendants(
             root_stored_xy,
             pages,
             1,
+            emitted,
         );
     }
 }
@@ -5223,6 +5249,63 @@ h2 { string-set: chapter-title content(text); }
             });
 
         assert_eq!(fixed_pages, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn fixed_zero_area_descendant_emits_no_fragments() {
+        // A zero-area fixed descendant draws nothing, so emitting one repeated
+        // fragment per page for it is pure amplification. Skipping zero-area
+        // fragments is output-preserving and removes a fixed-subtree amplifier.
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: fixed; top:0; width:100px; height:100px">
+                <div style="width:0; height:0"></div>
+                <div style="width:10px; height:10px"></div>
+              </div>
+              <div style="height:1200px"></div>
+            </body></html>
+        "#;
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
+        let zero_area_repeated = geom
+            .values()
+            .filter(|g| g.is_repeat)
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.width.to_f32() <= 0.0 && f.height.to_f32() <= 0.0)
+            .count();
+        assert_eq!(
+            zero_area_repeated, 0,
+            "zero-area fixed descendant must not emit repeated fragments"
+        );
+    }
+
+    #[test]
+    fn fixed_subtree_fragment_total_is_bounded() {
+        // Security regression: a `position: fixed` root and every in-flow
+        // descendant each emit one fragment per page → O(nodes × pages).
+        // The aggregate MAX_FIXED_SUBTREE_FRAGMENTS budget caps the retained
+        // total regardless of how many descendants the subtree has.
+        let mut kids = String::new();
+        for _ in 0..20_000 {
+            kids.push_str(r#"<div style="height:1px">x</div>"#);
+        }
+        let html = format!(
+            r#"<html><body style="margin:0">
+              <div style="position: fixed; top:0; width:50px; height:50px">{kids}</div>
+              <div style="height:100000px"></div>
+            </body></html>"#
+        );
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+        let total: usize = geom
+            .values()
+            .filter(|g| g.is_repeat)
+            .map(|g| g.fragments.len())
+            .sum();
+        assert!(
+            total <= crate::MAX_FIXED_SUBTREE_FRAGMENTS,
+            "fixed fragment total must be bounded, got {total}"
+        );
     }
 
     #[test]

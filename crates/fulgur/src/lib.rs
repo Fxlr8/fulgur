@@ -98,6 +98,26 @@ pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
 /// bound.
 pub(crate) const MAX_PAGE_NAME_BYTES: usize = 256;
 
+/// Aggregate upper bound on per-page repeated fragments emitted for
+/// `position: fixed` roots and their in-flow descendants
+/// (`pagination_layout::append_position_fixed_fragments`). A fixed element
+/// repeats on every page, and every in-flow descendant of a fixed root is
+/// recorded once per page — so the retained fragment total is
+/// O((fixed_roots + fixed_descendants) × pages). The page axis is already
+/// bounded by [`MAX_PAGES`], but the node axis is not: a fixed subtree with
+/// many descendants (or a document with many fixed elements) amplifies to a
+/// large retained `Fragment` vector and a matching per-page render loop on
+/// untrusted input.
+///
+/// A single running counter across the whole fixed-fragment pass caps the
+/// total (excess fragments are dropped — the fixed content simply stops
+/// repeating past the budget). Combined with skipping zero-area fragments
+/// (which draw nothing, so the skip is output-preserving), this bounds the
+/// pass in memory and time. 1M fragments (~tens of MiB) is far above any
+/// realistic running header/footer over a long document. Sibling of the
+/// [`MAX_PAGE_NAME_BYTES`] bound.
+pub(crate) const MAX_FIXED_SUBTREE_FRAGMENTS: usize = 1_000_000;
+
 /// Upper bound on the **output bytes** materialized for a single resolved
 /// counter chain (`counters(name, sep, style)`), applied inside
 /// [`gcpm::counter::format_counter_chain`] so it covers every call site
