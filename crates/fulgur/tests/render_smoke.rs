@@ -5357,39 +5357,42 @@ fn test_tagged_css_list_item_with_link_does_not_panic() {
     assert!(!pdf.is_empty(), "PDF should be non-empty");
 }
 
-/// Companion guard for the case the LBody fallback must NOT tag: a CSS
-/// list item whose element has no `SemanticEntry` at all. `classify_element`
-/// returns `None` for `<a>` and for custom elements, so neither `<a
-/// style="display:list-item">` nor `<x-foo style="display:list-item">` gets
-/// a semantic entry or an LBody id. Falling back to `node_id` unconditionally
-/// would wire the link run under an id absent from the struct tree, and
-/// Krilla panics in `serialize` ("annotation identifier ... doesn't appear in
-/// the tag tree"). Per-run tagging must be skipped for these, leaving the link
-/// annotation untagged.
+/// Guard for every per-run tagging sink: a link run whose owning element has
+/// no `SemanticEntry` must not be wired into the struct tree. `classify_element`
+/// returns `None` for `<a>`, custom elements and `<body>`, so a link-bearing
+/// element that is itself the paragraph / inline-root node (rather than a child
+/// of a `<p>` / `<div>`) has neither an LBody id nor a semantic entry. Wiring
+/// the link span under such a node marks it "wired" while its content never
+/// enters the tag tree, so Krilla panics in `serialize` ("annotation identifier
+/// ... doesn't appear in the tag tree"). Every rendering path — `dispatch_fragment`
+/// block / paragraph, multicol slices, `draw_under_clip`, list item — routes the
+/// per-run node through `run_tag_target`, which returns `None` for these and
+/// keeps the link annotation untagged. Reported by Codex Review on #592 across
+/// two rounds (list item, then the clipped / block paths).
 #[test]
-fn test_tagged_semanticless_list_item_with_link_does_not_panic() {
-    // `<a>` is itself the CSS list item and carries the link.
-    let a = Engine::builder()
-        .tagged(true)
-        .build()
-        .render(
-            "<html><body>\
-             <a href=\"https://example.com\" style=\"display:list-item; margin-left:40px\">x</a>\
-             </body></html>",
-        )
-        .expect("tagged <a display:list-item> must not panic");
-    assert!(!a.is_empty(), "PDF should be non-empty");
-
-    // Custom element (no semantic entry) wrapping a link.
-    let custom = Engine::builder()
-        .tagged(true)
-        .build()
-        .render(
-            "<html><body>\
-             <x-foo style=\"display:list-item; margin-left:40px\">\
-             <a href=\"https://example.com\">x</a></x-foo>\
-             </body></html>",
-        )
-        .expect("tagged custom-element list-item with a link must not panic");
-    assert!(!custom.is_empty(), "PDF should be non-empty");
+fn test_tagged_semanticless_link_runs_do_not_panic() {
+    // Each body is a link-bearing element with no semantic entry that is itself
+    // the paragraph node, exercising a distinct per-run tagging sink.
+    let bodies = [
+        // `<a>` that is itself a CSS list item (list-item path).
+        r#"<a href="https://example.com" style="display:list-item; margin-left:40px">x</a>"#,
+        // Custom element list item wrapping a link.
+        r#"<x-foo style="display:list-item"><a href="https://example.com">x</a></x-foo>"#,
+        // Clipped CSS list item (draw_under_clip).
+        r#"<a href="https://example.com" style="display:list-item; overflow:hidden">x</a>"#,
+        // Block-level `<a>` (block-with-inner-content path).
+        r#"<a href="https://example.com" style="display:block">x</a>"#,
+        // Clipped block-level `<a>` (draw_under_clip block path).
+        r#"<a href="https://example.com" style="display:block; overflow:hidden">x</a>"#,
+        // Plain inline `<a>` as the sole body content (paragraph path).
+        r#"<a href="https://example.com">x</a>"#,
+    ];
+    for body in bodies {
+        let pdf = Engine::builder()
+            .tagged(true)
+            .build()
+            .render(&format!("<html><body>{body}</body></html>"))
+            .unwrap_or_else(|e| panic!("tagged render must not fail for {body:?}: {e:?}"));
+        assert!(!pdf.is_empty(), "PDF should be non-empty for {body:?}");
+    }
 }

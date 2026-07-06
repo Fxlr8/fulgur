@@ -865,6 +865,32 @@ fn para_has_link_runs(entry: &crate::drawables::ParagraphEntry) -> bool {
     })
 }
 
+/// The struct-tree node id that per-run link tags for `node_id` should nest
+/// under, or `None` when the node has no home in the tag tree — in which case
+/// per-run tagging MUST be skipped. Otherwise `RunRegionTracker` records a
+/// `ParagraphRunItem::LinkContent` that marks the span "wired", so
+/// `emit_link_annotations` uses `add_tagged_annotation`, but `build_struct_tree`
+/// only walks ids present in `drawables.semantics`; the annotation's OBJR never
+/// enters the StructTree and Krilla panics during serialization
+/// ("annotation identifier ... doesn't appear in the tag tree").
+///
+/// A semantic `<li>` remaps to its synthetic LBody id. Any other node must
+/// itself be present in `drawables.semantics`. A CSS list item or inline root
+/// whose element has no `SemanticEntry` — `<a>`, a custom element, `<body>`,
+/// etc., for which `classify_element` returns `None` — yields `None` here and
+/// keeps its link annotation untagged.
+fn run_tag_target(
+    drawables: &Drawables,
+    node_id: crate::drawables::NodeId,
+) -> Option<crate::drawables::NodeId> {
+    drawables.li_lbody_ids.get(&node_id).copied().or_else(|| {
+        drawables
+            .semantics
+            .contains_key(&node_id)
+            .then_some(node_id)
+    })
+}
+
 /// Collect the plain-text title from a paragraph's shaped lines.
 ///
 /// Returns the concatenated text of all `Text` run items across all lines.
@@ -1039,11 +1065,13 @@ pub(crate) fn dispatch_fragment(
         let img_for_block = drawables.images.get(&node_id);
         let svg_for_block = drawables.svgs.get(&node_id);
         if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
+            let run_tag_node_id = run_tag_target(drawables, node_id);
             let use_run_tagging = para_for_block
                 .map(|p| canvas.tag_collector.is_some() && para_has_link_runs(p))
-                .unwrap_or(false);
+                .unwrap_or(false)
+                && run_tag_node_id.is_some();
             let tag_info = if use_run_tagging {
-                canvas.link_run_node_id = Some(node_id);
+                canvas.link_run_node_id = run_tag_node_id;
                 None
             } else if para_for_block.is_some() {
                 try_start_tagged(canvas, node_id, drawables)
@@ -1107,9 +1135,11 @@ pub(crate) fn dispatch_fragment(
         return;
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
-        let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(para);
+        let run_tag_node_id = run_tag_target(drawables, node_id);
+        let use_run_tagging =
+            canvas.tag_collector.is_some() && para_has_link_runs(para) && run_tag_node_id.is_some();
         let tag_info = if use_run_tagging {
-            canvas.link_run_node_id = Some(node_id);
+            canvas.link_run_node_id = run_tag_node_id;
             None
         } else {
             try_start_tagged(canvas, node_id, drawables)
@@ -1252,13 +1282,15 @@ fn paint_multicol_paragraph_slices(
     // so `is_split() == fragments.len() > 1` for any valid input here.
     // Using the predicate documents the intent.
     let needs_partition = container_geom.is_split();
+    let run_tag_node_id = run_tag_target(drawables, source_node_id);
     let use_run_tagging = canvas.tag_collector.is_some()
         && drawables
             .paragraphs
             .get(&source_node_id)
-            .is_some_and(para_has_link_runs);
+            .is_some_and(para_has_link_runs)
+        && run_tag_node_id.is_some();
     if use_run_tagging {
-        canvas.link_run_node_id = Some(source_node_id);
+        canvas.link_run_node_id = run_tag_node_id;
     }
     draw_with_opacity(canvas, opacity, |canvas| {
         for slice in &slices_entry.slices {
@@ -1739,9 +1771,12 @@ fn draw_under_clip(
         let inner_x = x_pt + inner_inset.0;
         let inner_y = y_pt + inner_inset.1;
         if let Some(p) = para_for_block {
-            let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
+            let run_tag_node_id = run_tag_target(drawables, node_id);
+            let use_run_tagging = canvas.tag_collector.is_some()
+                && para_has_link_runs(p)
+                && run_tag_node_id.is_some();
             let tag_info = if use_run_tagging {
-                canvas.link_run_node_id = Some(node_id);
+                canvas.link_run_node_id = run_tag_node_id;
                 None
             } else {
                 try_start_tagged(canvas, node_id, drawables)
@@ -2099,9 +2134,12 @@ fn draw_under_opacity(
             let inner_x = x_pt + inner_inset.0;
             let inner_y = y_pt + inner_inset.1;
             if let Some(p) = para_for_block {
-                let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
+                let run_tag_node_id = run_tag_target(drawables, node_id);
+                let use_run_tagging = canvas.tag_collector.is_some()
+                    && para_has_link_runs(p)
+                    && run_tag_node_id.is_some();
                 let tag_info = if use_run_tagging {
-                    canvas.link_run_node_id = Some(node_id);
+                    canvas.link_run_node_id = run_tag_node_id;
                     None
                 } else {
                     try_start_tagged(canvas, node_id, drawables)
@@ -3030,24 +3068,7 @@ fn draw_list_item_with_block(
             draw_block_inner_paint(canvas, b, x, y, frag, is_split);
         }
         if let Some(p) = paragraph {
-            // Pick the struct-tree node that per-run link tags nest under.
-            // A semantic `<li>` remaps to its synthetic LBody id. A CSS
-            // list item that is itself a tagged element (e.g. `<div
-            // style="display:list-item">` → `PdfTag::Div`) uses its own id.
-            // But a CSS list item whose element has no `SemanticEntry` — e.g.
-            // `<a style="display:list-item">` or a custom element, for which
-            // `classify_element` returns `None` — has no struct-tree home:
-            // wiring a link run under it would mark the span wired without its
-            // content ever entering the tag tree, tripping Krilla's "every
-            // tagged annotation appears in the tag tree" invariant (a panic in
-            // `krilla::serialize`). Skip per-run tagging there; the link
-            // annotation is still emitted, just untagged.
-            let run_tag_node_id = drawables.li_lbody_ids.get(&node_id).copied().or_else(|| {
-                drawables
-                    .semantics
-                    .contains_key(&node_id)
-                    .then_some(node_id)
-            });
+            let run_tag_node_id = run_tag_target(drawables, node_id);
             let use_run_tagging = canvas.tag_collector.is_some()
                 && para_has_link_runs(p)
                 && run_tag_node_id.is_some();
