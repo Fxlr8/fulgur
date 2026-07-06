@@ -2776,18 +2776,26 @@ pub fn append_position_fixed_fragments(
         // representation for fixed content.
         entry.fragments.clear();
         entry.is_repeat = true;
-        for page_index in 0..pages {
-            if emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                break;
+        // A collapsed fixed root — either border-box dimension 0 — paints
+        // nothing (a zero border-box width/height leaves no border, background,
+        // or content area), so emitting a per-page fragment for it is pure
+        // amplification and charging the shared budget for it can starve a
+        // later visible fixed element (Codex review). Skip it, matching the
+        // descendant walk's guard.
+        if w > 0.0 && h > 0.0 {
+            for page_index in 0..pages {
+                if emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                    break;
+                }
+                entry.fragments.push(Fragment {
+                    page_index,
+                    x: x.as_px(),
+                    y: y.as_px(),
+                    width: w.as_px(),
+                    height: h.as_px(),
+                });
+                emitted += 1;
             }
-            entry.fragments.push(Fragment {
-                page_index,
-                x: x.as_px(),
-                y: y.as_px(),
-                width: w.as_px(),
-                height: h.as_px(),
-            });
-            emitted += 1;
         }
 
         // fulgur-4m16: emit per-page repeated fragments for every
@@ -2863,11 +2871,12 @@ fn record_fixed_subtree_descendants(
         let entry = geometry.entry(node_id).or_default();
         entry.fragments.clear();
         entry.is_repeat = true;
-        // Zero-area fragments draw nothing, so skipping them is
-        // output-preserving and removes the most common fixed-subtree
-        // amplifier (empty structural wrappers). The aggregate `emitted`
-        // budget is the hard bound on the residual O(descendants × pages).
-        if w > 0.0 || h > 0.0 {
+        // A collapsed descendant — either border-box dimension 0 — draws
+        // nothing, so skipping it is output-preserving and removes the most
+        // common fixed-subtree amplifier (empty structural wrappers). The
+        // aggregate `emitted` budget is the hard bound on the residual
+        // O(descendants × pages).
+        if w > 0.0 && h > 0.0 {
             for page_index in 0..pages.max(1) {
                 if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
                     // Budget spent: return rather than break so the rest of
@@ -3320,38 +3329,46 @@ fn record_subtree_fragments_at_offset(
                 let entry = geometry.entry(node_id).or_default();
                 entry.fragments.clear();
                 entry.is_repeat = false;
-                for page_index in first_page..=last_page {
-                    // Aggregate budget: each node emits one fragment per
-                    // intersected page, so a subtree of many page-spanning
-                    // absolutes is O(nodes × pages). Stop past the cap
-                    // (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`) — shared with the
-                    // fixed pass. Return rather than break so the remaining
-                    // subtree is not walked once the budget is spent (gemini
-                    // review).
-                    if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                        return;
+                // A collapsed absolute box — either border-box dimension 0
+                // (e.g. width:0; height:200000px) — paints nothing, so skip its
+                // per-page fragments: it would otherwise amplify O(pages) and
+                // drain the shared budget from a later visible element (Codex
+                // review). The outer guard only requires positive height, so
+                // this additionally catches zero-width page-spanning boxes.
+                if w > 0.0 && h > 0.0 {
+                    for page_index in first_page..=last_page {
+                        // Aggregate budget: each node emits one fragment per
+                        // intersected page, so a subtree of many page-spanning
+                        // absolutes is O(nodes × pages). Stop past the cap
+                        // (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`) — shared with the
+                        // fixed pass. Return rather than break so the remaining
+                        // subtree is not walked once the budget is spent (gemini
+                        // review).
+                        if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                            return;
+                        }
+                        let is_monolithic_continuation =
+                            monolithic_adjust > 0.0 && page_index > first_page;
+                        let stored_y = if is_monolithic_continuation {
+                            -body_offset.1
+                        } else {
+                            paging_origin_y - (page_index as f32) * page_stride_px - body_offset.1
+                        };
+                        let stored_h = if is_monolithic_continuation {
+                            let consumed = (page_index - first_page) as f32 * page_h_px;
+                            (h_for_paging - consumed).clamp(0.0, page_h_px)
+                        } else {
+                            h
+                        };
+                        entry.fragments.push(Fragment {
+                            page_index,
+                            x: stored_x.as_px(),
+                            y: stored_y.as_px(),
+                            width: w.as_px(),
+                            height: stored_h.as_px(),
+                        });
+                        *emitted += 1;
                     }
-                    let is_monolithic_continuation =
-                        monolithic_adjust > 0.0 && page_index > first_page;
-                    let stored_y = if is_monolithic_continuation {
-                        -body_offset.1
-                    } else {
-                        paging_origin_y - (page_index as f32) * page_stride_px - body_offset.1
-                    };
-                    let stored_h = if is_monolithic_continuation {
-                        let consumed = (page_index - first_page) as f32 * page_h_px;
-                        (h_for_paging - consumed).clamp(0.0, page_h_px)
-                    } else {
-                        h
-                    };
-                    entry.fragments.push(Fragment {
-                        page_index,
-                        x: stored_x.as_px(),
-                        y: stored_y.as_px(),
-                        width: w.as_px(),
-                        height: stored_h.as_px(),
-                    });
-                    *emitted += 1;
                 }
                 descendant_total_pages = descendant_total_pages.max(last_page.saturating_add(1));
             }
@@ -5305,6 +5322,58 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(
             zero_area_repeated, 0,
             "zero-area fixed descendant must not emit repeated fragments"
+        );
+    }
+
+    #[test]
+    fn fixed_collapsed_root_emits_no_fragments() {
+        // A fixed root with a collapsed border-box (width 0, positive height)
+        // paints nothing; it must not emit per-page fragments or charge the
+        // shared budget, otherwise many such empty roots starve a later visible
+        // fixed element (Codex review).
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: fixed; top:0; width:0; height:50px"></div>
+              <div style="height:1200px"></div>
+            </body></html>
+        "#;
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
+        let zero_width_repeated = geom
+            .values()
+            .filter(|g| g.is_repeat)
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.width.to_f32() <= 0.0)
+            .count();
+        assert_eq!(
+            zero_width_repeated, 0,
+            "collapsed (width:0) fixed root must not emit repeated fragments"
+        );
+    }
+
+    #[test]
+    fn absolute_collapsed_box_emits_no_fragments() {
+        // A body-direct absolute with a collapsed border-box (width 0) but a
+        // large height paints nothing; it must not emit per-page fragments or
+        // charge the shared budget. The outer paging guard only requires
+        // positive height, so this zero-width page-spanning box would otherwise
+        // charge O(pages) fragments (Codex review).
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: absolute; top:0; width:0; height:200000px"></div>
+              <div style="height:1200px"></div>
+            </body></html>
+        "#;
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
+        let zero_width = geom
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.width.to_f32() <= 0.0)
+            .count();
+        assert_eq!(
+            zero_width, 0,
+            "collapsed (width:0) absolute must not emit fragments"
         );
     }
 
