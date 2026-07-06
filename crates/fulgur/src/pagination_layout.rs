@@ -2800,7 +2800,11 @@ pub fn append_position_fixed_fragments(
         // entry for the pencil child or v2 never reaches it. The
         // existing root-only fragment carries inline text rendering
         // (fixedpos-001 / 008 ref pattern) but not block descendants.
-        record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages, &mut emitted);
+        // Skip the descendant walk entirely once the budget is spent: it would
+        // only traverse the subtree without emitting anything (gemini review).
+        if emitted < crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+            record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages, &mut emitted);
+        }
     }
 
     // Don't allocate empty entries for nodes without fragments.
@@ -2866,7 +2870,9 @@ fn record_fixed_subtree_descendants(
         if w > 0.0 || h > 0.0 {
             for page_index in 0..pages.max(1) {
                 if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                    break;
+                    // Budget spent: return rather than break so the rest of
+                    // this subtree is not walked at all (gemini review).
+                    return;
                 }
                 entry.fragments.push(Fragment {
                     page_index,
@@ -3319,9 +3325,11 @@ fn record_subtree_fragments_at_offset(
                     // intersected page, so a subtree of many page-spanning
                     // absolutes is O(nodes × pages). Stop past the cap
                     // (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`) — shared with the
-                    // fixed pass.
+                    // fixed pass. Return rather than break so the remaining
+                    // subtree is not walked once the budget is spent (gemini
+                    // review).
                     if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                        break;
+                        return;
                     }
                     let is_monolithic_continuation =
                         monolithic_adjust > 0.0 && page_index > first_page;
