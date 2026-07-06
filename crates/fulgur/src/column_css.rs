@@ -515,7 +515,25 @@ fn parse_page_value<'i>(input: &mut Parser<'i, '_>) -> Result<PageName, ParseErr
         ) {
             Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
         } else {
-            Ok(PageName::Named(s.to_string()))
+            // Bound the retained name length: a CSS `<custom-ident>` is
+            // unbounded and this string is cloned into the column style table
+            // and once per node while resolving used page names
+            // (O(nodes × name_len)). Truncate an over-long name at a UTF-8
+            // char boundary (clamp-and-warn); realistic names are far shorter.
+            let name = if s.len() > crate::MAX_PAGE_NAME_BYTES {
+                let mut end = crate::MAX_PAGE_NAME_BYTES;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                log::warn!(
+                    "page: name exceeds {} bytes; truncated (defensive bound)",
+                    crate::MAX_PAGE_NAME_BYTES
+                );
+                s[..end].to_string()
+            } else {
+                s.to_string()
+            };
+            Ok(PageName::Named(name))
         }
     }
 }
@@ -1821,6 +1839,25 @@ mod tests {
     fn parses_page_auto() {
         let props = parse_declaration_block("page: auto;");
         assert_eq!(props.page, Some(PageName::Auto));
+    }
+
+    #[test]
+    fn page_name_length_is_defensively_capped() {
+        // Security regression: a CSS `<custom-ident>` is length-unbounded and
+        // the retained name is cloned into the column style table and once per
+        // node while walking used page names (O(nodes × name_len)). A very
+        // long name is truncated at its single construction site so retention
+        // stays bounded; realistic page names are far shorter and unaffected.
+        let long = "a".repeat(10_000);
+        let props = parse_declaration_block(&format!("page: {long};"));
+        match props.page {
+            Some(PageName::Named(s)) => assert!(
+                s.len() <= crate::MAX_PAGE_NAME_BYTES,
+                "page name must be capped, got {}",
+                s.len()
+            ),
+            other => panic!("expected Named page, got {other:?}"),
+        }
     }
 
     #[test]

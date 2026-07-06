@@ -5443,3 +5443,25 @@ fn test_render_html_huge_gradient_stop_list_is_bounded() {
     let pdf = Engine::builder().build().render(&html).expect("render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn test_render_html_huge_page_name_is_bounded() {
+    // Security regression (unbounded page-name cloning): a CSS named page is
+    // a length-unbounded custom-ident retained in ColumnProps, cloned into the
+    // column style table and once per node while resolving used page names
+    // (O(nodes × name_len)). The MAX_PAGE_NAME_BYTES clamp at the parse site
+    // bounds the retained name, so many nodes sharing a huge page name render
+    // in bounded memory.
+    let long_name = "a".repeat(20_000);
+    let mut body = String::new();
+    for _ in 0..500 {
+        body.push_str("<div>x</div>");
+    }
+    let html = format!(
+        r#"<!DOCTYPE html><html><head><style>
+        div {{ page: {long_name}; }}
+        </style></head><body>{body}</body></html>"#
+    );
+    let pdf = Engine::builder().build().render(&html).expect("render");
+    assert!(!pdf.is_empty());
+}

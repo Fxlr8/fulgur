@@ -84,6 +84,20 @@ pub(crate) const MAX_COLUMN_COUNT: u32 = 64;
 /// multicol bound.
 pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
 
+/// Maximum byte length of a CSS named page (`page: <custom-ident>` /
+/// `@page <name>`). A CSS `<custom-ident>` is length-unbounded, and the name
+/// `String` is retained in the parsed `ColumnProps`, cloned into the column
+/// style table, and cloned again per node while walking used page names
+/// (`blitz_adapter::walk_used_page_names`) — so a huge name amplifies to
+/// O(nodes × name_len) retained bytes on untrusted CSS.
+///
+/// Capping the name at its single construction site (`parse_page_value`)
+/// bounds every downstream clone at once. 256 bytes is far beyond any real
+/// page name (`cover`, `landscape-table`, …); a longer ident is truncated at
+/// a UTF-8 char boundary (clamp-and-warn). Sibling of the [`MAX_GRADIENT_STOPS`]
+/// bound.
+pub(crate) const MAX_PAGE_NAME_BYTES: usize = 256;
+
 /// Upper bound on the **output bytes** materialized for a single resolved
 /// counter chain (`counters(name, sep, style)`), applied inside
 /// [`gcpm::counter::format_counter_chain`] so it covers every call site
