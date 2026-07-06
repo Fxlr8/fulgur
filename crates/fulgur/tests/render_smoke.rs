@@ -5330,3 +5330,29 @@ fn test_render_counters_sibling_reset_is_bounded_smoke() {
         page_count(&pdf)
     );
 }
+
+/// Regression guard: a non-semantic CSS list item (`display:list-item` on a
+/// non-`<li>` element) that contains a hyperlink used to panic under tagged
+/// output. `drawables.list_items` is populated for CSS list-item behaviour,
+/// including non-`<li>` elements, but `li_lbody_ids` is only populated for
+/// semantic `<li>` (`PdfTag::Li`), so `draw_list_item_with_block`'s per-run
+/// tagging path hit `.expect("list-item paragraph must have an LBody id")`
+/// on the missing LBody entry. `<div style="display:list-item"><a href>`
+/// with tagging enabled reproduced a hard panic (CLI exit 101); default
+/// (untagged) output rendered fine. The fix falls back to the node's own id
+/// (matching the plain block-paragraph link-run path) when there is no LBody
+/// remap for the node.
+#[test]
+fn test_tagged_css_list_item_with_link_does_not_panic() {
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(
+            "<html><body>\
+             <div style=\"display:list-item; margin-left:40px\">\
+             <a href=\"https://example.com\">x</a></div>\
+             </body></html>",
+        )
+        .expect("tagged CSS list-item containing a link must not panic");
+    assert!(!pdf.is_empty(), "PDF should be non-empty");
+}

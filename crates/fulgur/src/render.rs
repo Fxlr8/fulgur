@@ -3033,11 +3033,20 @@ fn draw_list_item_with_block(
             // inline-root li の段落コンテンツを LBody 配下に記録する
             let use_run_tagging = canvas.tag_collector.is_some() && para_has_link_runs(p);
             let tag_info = if use_run_tagging {
-                let lbody_id = *drawables
+                // A semantic `<li>` remaps its link runs under the synthetic
+                // LBody id so they nest correctly in the PDF/UA struct tree.
+                // A non-semantic CSS list item (e.g. `<div
+                // style="display:list-item">`) is present in
+                // `drawables.list_items` but has no LBody entry — only
+                // `PdfTag::Li` allocates one (`convert::walk_semantics`). Fall
+                // back to the node's own id, matching the plain
+                // block-paragraph link-run path in `dispatch_fragment`.
+                let run_tag_node_id = drawables
                     .li_lbody_ids
                     .get(&node_id)
-                    .expect("list-item paragraph must have an LBody id");
-                canvas.link_run_node_id = Some(lbody_id);
+                    .copied()
+                    .unwrap_or(node_id);
+                canvas.link_run_node_id = Some(run_tag_node_id);
                 None
             } else {
                 try_start_tagged(canvas, node_id, drawables)
