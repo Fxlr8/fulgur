@@ -6314,4 +6314,165 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // --- paint_multicol_paragraph_slices from dispatch_fragment (Case A) ---
+
+    #[test]
+    fn render_smoke_multicol_self_inline_root_bare_text() {
+        // Exercises paint_multicol_paragraph_slices called from within
+        // dispatch_fragment when the multicol container is itself the inline
+        // root (Case A: bare text directly in the container, no <p> wrapper).
+        // In this case the container has both a block_styles entry and a
+        // paragraph_slices entry; dispatch_fragment must paint the block bg
+        // first and then call paint_multicol_paragraph_slices for the lines.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="column-count:2;column-gap:10px;width:400px;font-size:14px">
+              alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu
+              nu xi omicron pi rho sigma tau upsilon phi chi psi omega
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- draw_under_clip: transform / table+clip / opacity branches ---
+
+    #[test]
+    fn render_smoke_transform_inside_overflow_clip() {
+        // Exercises draw_under_clip's descendant loop: when a transformed
+        // child lives inside an overflow:hidden container, draw_under_clip must
+        // call draw_under_transform for that descendant rather than
+        // dispatch_fragment directly.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="width:120px;height:80px;overflow:hidden;background:#cef">
+              <div style="transform:rotate(8deg);width:80px;height:40px;background:#fce">
+                rotated inside clip
+              </div>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_table_overflow_clip_inside_overflow_clip() {
+        // Exercises draw_under_clip's table-with-overflow-clip branch: a table
+        // with overflow:hidden nested inside an overflow:hidden block forces
+        // draw_under_clip_table to be called from within draw_under_clip's
+        // descendant loop so the table's own clip boundary is pushed correctly.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="width:200px;height:120px;overflow:hidden;background:#eef">
+              <table style="width:300px;overflow:hidden;border:1px solid #aaa">
+                <tr>
+                  <td style="padding:4px;background:#cef">wide cell overflowing</td>
+                  <td style="padding:4px;background:#fce">second cell</td>
+                </tr>
+              </table>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- draw_under_transform: table+clip branch ---
+
+    #[test]
+    fn render_smoke_table_overflow_clip_inside_transform() {
+        // Exercises draw_under_transform's table-with-overflow-clip branch: a
+        // table with overflow:hidden nested inside a transformed element forces
+        // draw_under_clip_table to be called from within draw_under_transform's
+        // descendant loop so the table's clip boundary is pushed under the
+        // transform.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="transform:translate(10px,5px)">
+              <table style="width:200px;overflow:hidden;border:1px solid #aaa">
+                <tr>
+                  <td style="padding:6px;background:#cef">cell inside transform</td>
+                </tr>
+              </table>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- draw_under_opacity: transform / clip / table+clip / nested-opacity branches ---
+
+    #[test]
+    fn render_smoke_transform_inside_opacity_scope() {
+        // Exercises draw_under_opacity's transform-descendant branch: a
+        // transformed child nested inside an opacity-scoped block forces
+        // draw_under_transform to be called from within draw_under_opacity's
+        // descendant loop.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="opacity:0.7">
+              <div style="transform:rotate(10deg);width:80px;height:40px;background:#fce">
+                rotated inside opacity
+              </div>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_overflow_clip_inside_opacity_scope() {
+        // Exercises draw_under_opacity's overflow-clip descendant branch: an
+        // overflow:hidden child nested inside an opacity-scoped block forces
+        // draw_under_clip to be called from within draw_under_opacity's
+        // descendant loop.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="opacity:0.7">
+              <div style="overflow:hidden;width:100px;height:60px;background:#cef">
+                <div style="width:200px;height:20px;background:#f99">clipped</div>
+              </div>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_table_overflow_clip_inside_opacity_scope() {
+        // Exercises draw_under_opacity's table-with-overflow-clip descendant
+        // branch: a table with overflow:hidden nested inside an opacity-scoped
+        // block forces draw_under_clip_table to be called from within
+        // draw_under_opacity's descendant loop.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="opacity:0.65">
+              <table style="width:200px;overflow:hidden;border:1px solid #aaa">
+                <tr>
+                  <td style="padding:4px;background:#cef">opacity+table+clip</td>
+                </tr>
+              </table>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_nested_opacity_inside_opacity_scope() {
+        // Exercises draw_under_opacity's nested-opacity descendant branch: an
+        // opacity-scoped child nested inside another opacity-scoped block forces
+        // a recursive draw_under_opacity call from within the outer
+        // draw_under_opacity's descendant loop.
+        let pdf = render_html(
+            r##"<!doctype html><html><body>
+            <div style="opacity:0.8">
+              <div style="opacity:0.5">
+                <div style="background:#c9f;width:60px;height:40px">double-faded</div>
+              </div>
+            </div>
+            </body></html>"##,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
