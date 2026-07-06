@@ -5396,3 +5396,72 @@ fn test_tagged_semanticless_link_runs_do_not_panic() {
         assert!(!pdf.is_empty(), "PDF should be non-empty for {body:?}");
     }
 }
+
+#[test]
+fn test_render_html_huge_multicol_column_count_is_bounded() {
+    // Security regression (unbounded `column-count` memory-exhaustion DoS):
+    // a single multicol container with an enormous `column-count` must not
+    // allocate `column-count`-sized layout metadata. Before the
+    // MAX_COLUMN_COUNT clamp in `resolve_column_layout`, the multicol hook
+    // ran `vec![0.0; n]` for `col_heights` (here n = 2_000_000_000 ≈ 8 GB)
+    // unconditionally, and the inline-root split path amplified further to
+    // O(column_count × paragraph_count) `column_slices`. With the clamp the
+    // used count is bounded to a small constant, so this renders in bounded
+    // memory/time. Paragraphs are included so the split path is exercised too.
+    let html = r#"<!DOCTYPE html><html><body>
+        <div style="column-count:2000000000; column-gap:10px; width:300px">
+            <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do
+               eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
+            <p>Ut enim ad minim veniam, quis nostrud exercitation ullamco
+               laboris nisi ut aliquip ex ea commodo consequat.</p>
+            <p>Duis aute irure dolor in reprehenderit in voluptate velit esse
+               cillum dolore eu fugiat nulla pariatur.</p>
+        </div>
+    </body></html>"#;
+    let pdf = Engine::builder().build().render(html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_huge_gradient_stop_list_is_bounded() {
+    // Security regression (unbounded gradient color stops): convert clones the
+    // resolved stop vector into every element's BackgroundLayer, so a huge
+    // stop list retains O(elements × stops); a repeating gradient additionally
+    // period-expands `total_copies × stops.len()` at draw. The MAX_GRADIENT_STOPS
+    // clamp bounds both. A repeating-linear-gradient with thousands of stops
+    // must render in bounded memory/time.
+    let mut stops = String::new();
+    for i in 0..5000 {
+        stops.push_str(if i % 2 == 0 { "red 0%," } else { "blue 1%," });
+    }
+    stops.push_str("red 2%");
+    let html = format!(
+        r#"<!DOCTYPE html><html><body>
+        <div style="width:120px;height:80px;background:repeating-linear-gradient({stops})"></div>
+    </body></html>"#
+    );
+    let pdf = Engine::builder().build().render(&html).expect("render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
+fn test_render_html_huge_page_name_is_bounded() {
+    // Security regression (unbounded page-name cloning): a CSS named page is
+    // a length-unbounded custom-ident retained in ColumnProps, cloned into the
+    // column style table and once per node while resolving used page names
+    // (O(nodes × name_len)). The MAX_PAGE_NAME_BYTES clamp at the parse site
+    // bounds the retained name, so many nodes sharing a huge page name render
+    // in bounded memory.
+    let long_name = "a".repeat(20_000);
+    let mut body = String::new();
+    for _ in 0..500 {
+        body.push_str("<div>x</div>");
+    }
+    let html = format!(
+        r#"<!DOCTYPE html><html><head><style>
+        div {{ page: {long_name}; }}
+        </style></head><body>{body}</body></html>"#
+    );
+    let pdf = Engine::builder().build().render(&html).expect("render");
+    assert!(!pdf.is_empty());
+}

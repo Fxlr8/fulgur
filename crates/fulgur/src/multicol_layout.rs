@@ -437,8 +437,15 @@ pub fn resolve_column_layout(
             1
         }
     };
+    // Clamp to `[1, MAX_COLUMN_COUNT]` at this single choke point. The used
+    // count `n` multiplies retained layout metadata downstream (`col_heights`,
+    // per-split `column_slices`, `slice_lines_by_budget`), all of which read
+    // this returned `n`; bounding it here bounds every sink at once and blocks
+    // the unbounded-`column-count` memory-exhaustion DoS. Applies to both the
+    // explicit-count and width-derived paths (every branch routes through
+    // `capped`).
     let capped = |n: u32| -> (u32, f32) {
-        let n = n.max(1);
+        let n = n.clamp(1, crate::MAX_COLUMN_COUNT);
         let col_w = ((content_w - gap * (n as f32 - 1.0)) / n as f32).max(0.0);
         (n, col_w)
     };
@@ -1851,6 +1858,17 @@ mod tests {
         assert_eq!(w, 400.0);
     }
 
+    #[test]
+    fn resolve_count_only_huge_count_is_defensively_capped() {
+        // An attacker-supplied `column-count` up to i32::MAX must not become
+        // the used count: it multiplies retained layout metadata (col_heights,
+        // per-split column_slices). It is clamped to MAX_COLUMN_COUNT; the
+        // columns collapse to zero width, as they already would past capacity.
+        let (n, w) = resolve_column_layout(400.0, Some(2_000_000_000), None, 10.0);
+        assert_eq!(n, crate::MAX_COLUMN_COUNT);
+        assert_eq!(w, 0.0);
+    }
+
     // ── resolve_column_layout: width only ───────────────────────────
     #[test]
     fn resolve_width_only_derives_count() {
@@ -1873,6 +1891,16 @@ mod tests {
         let (n, w) = resolve_column_layout(300.0, None, Some(100.0), 0.0);
         assert_eq!(n, 3);
         assert!((w - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn resolve_width_only_huge_derived_count_is_defensively_capped() {
+        // A tiny `column-width` on a very wide container derives an
+        // unbounded fits_count; the same MAX_COLUMN_COUNT clamp inside
+        // `capped` must bound this width-derived path too, not just the
+        // explicit-count path.
+        let (n, _w) = resolve_column_layout(1_000_000.0, None, Some(1.0), 0.0);
+        assert_eq!(n, crate::MAX_COLUMN_COUNT);
     }
 
     // ── resolve_column_layout: both present ─────────────────────────

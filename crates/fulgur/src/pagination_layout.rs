@@ -2725,6 +2725,13 @@ pub fn append_position_fixed_fragments(
     let root_id = doc.root_element().id;
     walk_for_position_fixed(doc, root_id, &mut fixed_ids, 0);
 
+    // Aggregate budget across all fixed roots and their descendants: each
+    // node emits one fragment per page, so the retained total is
+    // O((roots + descendants) × pages). `pages` is bounded by MAX_PAGES, but
+    // the node axis is not — cap the total to keep the pass bounded on
+    // untrusted input (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`).
+    let mut emitted: usize = 0;
+
     for id in fixed_ids {
         let Some(node) = doc.get_node(id) else {
             continue;
@@ -2770,6 +2777,9 @@ pub fn append_position_fixed_fragments(
         entry.fragments.clear();
         entry.is_repeat = true;
         for page_index in 0..pages {
+            if emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                break;
+            }
             entry.fragments.push(Fragment {
                 page_index,
                 x: x.as_px(),
@@ -2777,6 +2787,7 @@ pub fn append_position_fixed_fragments(
                 width: w.as_px(),
                 height: h.as_px(),
             });
+            emitted += 1;
         }
 
         // fulgur-4m16: emit per-page repeated fragments for every
@@ -2789,7 +2800,11 @@ pub fn append_position_fixed_fragments(
         // entry for the pencil child or v2 never reaches it. The
         // existing root-only fragment carries inline text rendering
         // (fixedpos-001 / 008 ref pattern) but not block descendants.
-        record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages);
+        // Skip the descendant walk entirely once the budget is spent: it would
+        // only traverse the subtree without emitting anything (gemini review).
+        if emitted < crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+            record_fixed_subtree_descendants(geometry, doc, id, (x, y), pages, &mut emitted);
+        }
     }
 
     // Don't allocate empty entries for nodes without fragments.
@@ -2819,9 +2834,11 @@ fn record_fixed_subtree_descendants(
     fixed_root_id: usize,
     root_stored_xy: (f32, f32),
     pages: u32,
+    emitted: &mut usize,
 ) {
     use ::style::properties::longhands::position::computed_value::T as Pos;
 
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         geometry: &mut PaginationGeometryTable,
         doc: &BaseDocument,
@@ -2830,6 +2847,7 @@ fn record_fixed_subtree_descendants(
         root_stored_xy: (f32, f32),
         pages: u32,
         depth: usize,
+        emitted: &mut usize,
     ) {
         if depth >= crate::MAX_DOM_DEPTH {
             return;
@@ -2845,14 +2863,26 @@ fn record_fixed_subtree_descendants(
         let entry = geometry.entry(node_id).or_default();
         entry.fragments.clear();
         entry.is_repeat = true;
-        for page_index in 0..pages.max(1) {
-            entry.fragments.push(Fragment {
-                page_index,
-                x: stored_x.as_px(),
-                y: stored_y.as_px(),
-                width: w.as_px(),
-                height: h.as_px(),
-            });
+        // Zero-area fragments draw nothing, so skipping them is
+        // output-preserving and removes the most common fixed-subtree
+        // amplifier (empty structural wrappers). The aggregate `emitted`
+        // budget is the hard bound on the residual O(descendants × pages).
+        if w > 0.0 || h > 0.0 {
+            for page_index in 0..pages.max(1) {
+                if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                    // Budget spent: return rather than break so the rest of
+                    // this subtree is not walked at all (gemini review).
+                    return;
+                }
+                entry.fragments.push(Fragment {
+                    page_index,
+                    x: stored_x.as_px(),
+                    y: stored_y.as_px(),
+                    width: w.as_px(),
+                    height: h.as_px(),
+                });
+                *emitted += 1;
+            }
         }
 
         let children: Vec<usize> = {
@@ -2892,6 +2922,7 @@ fn record_fixed_subtree_descendants(
                 root_stored_xy,
                 pages,
                 depth + 1,
+                emitted,
             );
         }
     }
@@ -2933,6 +2964,7 @@ fn record_fixed_subtree_descendants(
             root_stored_xy,
             pages,
             1,
+            emitted,
         );
     }
 }
@@ -2979,6 +3011,12 @@ pub fn append_position_absolute_body_direct_fragments(
     // so this pass runs for every body-direct abs — not just when body
     // collapses to zero.
     let body_offset_xy = body_origin_in_px(doc);
+
+    // Aggregate budget across all body-direct absolute subtrees: each node is
+    // recorded once per intersected page, so many page-spanning absolutes are
+    // O(nodes × pages). Cap the retained total (shared with the fixed pass via
+    // `crate::MAX_SUBTREE_PAGE_FRAGMENTS`).
+    let mut emitted: usize = 0;
 
     let body_children = body.children.clone();
     let body_has_in_flow_content = body_children.iter().any(|&child_id| {
@@ -3037,6 +3075,7 @@ pub fn append_position_absolute_body_direct_fragments(
             page_stride_px,
             pages,
             !body_has_in_flow_content,
+            &mut emitted,
         );
     }
 
@@ -3063,6 +3102,7 @@ fn record_subtree_fragments_at_offset(
     page_stride_px: f32,
     total_pages: u32,
     may_extend_pages: bool,
+    emitted: &mut usize,
 ) {
     #[allow(clippy::too_many_arguments)]
     fn walk(
@@ -3091,6 +3131,7 @@ fn record_subtree_fragments_at_offset(
         cb_anchor: (f32, f32),
         cb_size: (f32, f32),
         depth: usize,
+        emitted: &mut usize,
     ) {
         if depth >= crate::MAX_DOM_DEPTH {
             return;
@@ -3280,6 +3321,16 @@ fn record_subtree_fragments_at_offset(
                 entry.fragments.clear();
                 entry.is_repeat = false;
                 for page_index in first_page..=last_page {
+                    // Aggregate budget: each node emits one fragment per
+                    // intersected page, so a subtree of many page-spanning
+                    // absolutes is O(nodes × pages). Stop past the cap
+                    // (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`) — shared with the
+                    // fixed pass. Return rather than break so the remaining
+                    // subtree is not walked once the budget is spent (gemini
+                    // review).
+                    if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                        return;
+                    }
                     let is_monolithic_continuation =
                         monolithic_adjust > 0.0 && page_index > first_page;
                     let stored_y = if is_monolithic_continuation {
@@ -3300,6 +3351,7 @@ fn record_subtree_fragments_at_offset(
                         width: w.as_px(),
                         height: stored_h.as_px(),
                     });
+                    *emitted += 1;
                 }
                 descendant_total_pages = descendant_total_pages.max(last_page.saturating_add(1));
             }
@@ -3382,6 +3434,7 @@ fn record_subtree_fragments_at_offset(
                             child_cb_anchor,
                             child_cb_size,
                             depth + 1,
+                            emitted,
                         );
                         continue;
                     }
@@ -3414,6 +3467,7 @@ fn record_subtree_fragments_at_offset(
                 child_cb_anchor,
                 child_cb_size,
                 depth + 1,
+                emitted,
             );
             if has_contain_size(child) {
                 monolithic_y_adjust += (child.final_layout.size.height - page_h_px).max(0.0);
@@ -3440,6 +3494,7 @@ fn record_subtree_fragments_at_offset(
         (0.0, 0.0),
         (0.0, 0.0),
         0,
+        emitted,
     );
 }
 
@@ -5226,6 +5281,92 @@ h2 { string-set: chapter-title content(text); }
     }
 
     #[test]
+    fn fixed_zero_area_descendant_emits_no_fragments() {
+        // A zero-area fixed descendant draws nothing, so emitting one repeated
+        // fragment per page for it is pure amplification. Skipping zero-area
+        // fragments is output-preserving and removes a fixed-subtree amplifier.
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="position: fixed; top:0; width:100px; height:100px">
+                <div style="width:0; height:0"></div>
+                <div style="width:10px; height:10px"></div>
+              </div>
+              <div style="height:1200px"></div>
+            </body></html>
+        "#;
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
+        let zero_area_repeated = geom
+            .values()
+            .filter(|g| g.is_repeat)
+            .flat_map(|g| g.fragments.iter())
+            .filter(|f| f.width.to_f32() <= 0.0 && f.height.to_f32() <= 0.0)
+            .count();
+        assert_eq!(
+            zero_area_repeated, 0,
+            "zero-area fixed descendant must not emit repeated fragments"
+        );
+    }
+
+    #[test]
+    fn fixed_subtree_fragment_total_is_bounded() {
+        // Security regression: a `position: fixed` root and every in-flow
+        // descendant each emit one fragment per page → O(nodes × pages).
+        // The aggregate MAX_SUBTREE_PAGE_FRAGMENTS budget caps the retained
+        // total regardless of how many descendants the subtree has.
+        let mut kids = String::new();
+        for _ in 0..20_000 {
+            kids.push_str(r#"<div style="height:1px">x</div>"#);
+        }
+        let html = format!(
+            r#"<html><body style="margin:0">
+              <div style="position: fixed; top:0; width:50px; height:50px">{kids}</div>
+              <div style="height:100000px"></div>
+            </body></html>"#
+        );
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+        let total: usize = geom
+            .values()
+            .filter(|g| g.is_repeat)
+            .map(|g| g.fragments.len())
+            .sum();
+        assert!(
+            total <= crate::MAX_SUBTREE_PAGE_FRAGMENTS,
+            "fixed fragment total must be bounded, got {total}"
+        );
+    }
+
+    #[test]
+    fn absolute_subtree_fragment_total_is_bounded() {
+        // Security regression (same class as fixed-subtree fragments): the
+        // body-direct absolute pass records, for every node in each absolute
+        // subtree, one fragment per page the node intersects
+        // (`first_page..=last_page`, bounded per-node by MAX_PAGES). Many
+        // page-spanning absolute elements amplify to O(nodes × pages). The
+        // aggregate MAX_SUBTREE_PAGE_FRAGMENTS budget caps the retained total.
+        let mut sibs = String::new();
+        for _ in 0..15_000 {
+            sibs.push_str(
+                r#"<div style="position:absolute; top:0; width:10px; height:200000px"></div>"#,
+            );
+        }
+        let html = format!(r#"<html><body style="margin:0">{sibs}</body></html>"#);
+        let engine = crate::Engine::builder().build();
+        let (_, geom) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+        let total: usize = geom.values().map(|g| g.fragments.len()).sum();
+        // The absolute pass is capped at MAX_SUBTREE_PAGE_FRAGMENTS; the sum
+        // also counts incidental non-absolute fragments (root/body/in-flow),
+        // which are themselves bounded by MAX_PAGES (a single in-flow flow).
+        // Uncapped this scenario emits ~3M fragments, so the budget clearly
+        // fired.
+        assert!(
+            total <= crate::MAX_SUBTREE_PAGE_FRAGMENTS + crate::MAX_PAGES as usize,
+            "absolute fragment total must be bounded, got {total}"
+        );
+    }
+
+    #[test]
     fn position_absolute_body_direct_tiny_overflow_reaches_next_page() {
         let html = r#"
             <html><body style="margin:0">
@@ -5304,6 +5445,7 @@ h2 { string-set: chapter-title content(text); }
             f32::MAX,
             3,
             true,
+            &mut 0,
         );
 
         let pages: Vec<u32> = geom

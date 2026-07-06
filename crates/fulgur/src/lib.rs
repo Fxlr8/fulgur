@@ -36,6 +36,92 @@ pub(crate) const MAX_DOM_DEPTH: usize = 512;
 /// `MAX_TILES` defensive bounds.
 pub(crate) const MAX_PAGES: u32 = 10_000;
 
+/// Maximum number of columns a single multi-column container is laid out
+/// across, regardless of the CSS `column-count` / `column-width` the input
+/// requests. CSS accepts `column-count` up to `i32::MAX`, and a small
+/// `column-width` on a wide container derives an equally large used count —
+/// neither is bounded by the spec.
+///
+/// The used count `n` is a **multiplier on retained layout metadata**: the
+/// multicol hook allocates one `vec![0.0; n]` per column group (`col_heights`)
+/// and, for every paragraph that splits across columns, an `n`-length
+/// `column_slices` vector padded with placeholders for unused columns (its
+/// length equals `n` by the `ParagraphSplitEntry` contract). A single
+/// `<div style="column-count:2000000000">x</div>` therefore forces one ~8 GB
+/// `col_heights` allocation, and the split path amplifies to
+/// O(`column_count` × paragraph_count) — an unbounded, attacker-controllable
+/// memory-exhaustion DoS on a server-side renderer of untrusted HTML/CSS.
+///
+/// Clamping the resolved count at the single choke point
+/// ([`multicol_layout::resolve_column_layout`]) bounds every downstream `n`
+/// sink at once (`col_heights`, `column_slices`, `slice_lines_by_budget`) and
+/// keeps the total metadata input-proportional (`n` is a small constant, so
+/// the split path stays O(paragraph_count)). 64 is far above any legitimate
+/// print layout — real multi-column text rarely exceeds a handful of columns —
+/// so no realistic document is affected; a pathological explicit or
+/// width-derived count is merely clamped (the columns collapse to zero width,
+/// as they already would past the container's capacity). Sibling of the
+/// [`MAX_DOM_DEPTH`] / [`MAX_PAGES`] defensive bounds.
+pub(crate) const MAX_COLUMN_COUNT: u32 = 64;
+
+/// Maximum number of CSS gradient color stops retained per background layer.
+/// CSS accepts an unbounded stop list (`linear-gradient(c0, c1, …, cN)`), and
+/// convert clones the resolved `Vec<GradientStop>` into every element's
+/// [`crate::draw_primitives::BackgroundLayer`] — so a rule like
+/// `* { background: linear-gradient(<N stops>) }` retains O(elements × N).
+/// For repeating gradients the draw-time period expansion in
+/// `background::expand_repeating_stops` further materializes
+/// `total_copies × stops.len()` entries (`total_copies` is already bounded by
+/// its own `MAX_PERIODS`), so bounding `stops.len()` here keeps that product
+/// bounded too.
+///
+/// Clamping the stop count at the convert-side choke points that build the
+/// vector (`resolve_color_stops` for linear/radial, plus the conic loop)
+/// bounds both the retained per-layer vector and the downstream repeating
+/// expansion at once. 256 stops is far beyond any legitimate gradient — real
+/// designs use a handful — so no realistic document changes output; excess
+/// stops are truncated (clamp-and-warn). Sibling of the [`MAX_COLUMN_COUNT`]
+/// multicol bound.
+pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
+
+/// Maximum byte length of a CSS named page (`page: <custom-ident>` /
+/// `@page <name>`). A CSS `<custom-ident>` is length-unbounded, and the name
+/// `String` is retained in the parsed `ColumnProps`, cloned into the column
+/// style table, and cloned again per node while walking used page names
+/// (`blitz_adapter::walk_used_page_names`) — so a huge name amplifies to
+/// O(nodes × name_len) retained bytes on untrusted CSS.
+///
+/// Capping the name at its single construction site (`parse_page_value`)
+/// bounds every downstream clone at once. 256 bytes is far beyond any real
+/// page name (`cover`, `landscape-table`, …); a longer ident is truncated at
+/// a UTF-8 char boundary (clamp-and-warn). Sibling of the [`MAX_GRADIENT_STOPS`]
+/// bound.
+pub(crate) const MAX_PAGE_NAME_BYTES: usize = 256;
+
+/// Aggregate upper bound on per-page subtree fragments emitted by the two
+/// out-of-flow pagination passes that record one `Fragment` per page per node
+/// of a subtree:
+///
+/// - `pagination_layout::append_position_fixed_fragments` — a `position: fixed`
+///   root and every in-flow descendant repeat on **every** page.
+/// - `pagination_layout::append_position_absolute_body_direct_fragments` — each
+///   node of a body-direct `position: absolute` subtree is recorded once per
+///   page it intersects (`first_page..=last_page`).
+///
+/// In both, the page axis is already bounded by [`MAX_PAGES`], but the node
+/// axis is not: a subtree with many descendants — or many page-spanning
+/// absolute / fixed elements — amplifies to O(nodes × pages) retained
+/// `Fragment`s plus a matching per-page render loop on untrusted input.
+///
+/// Each pass threads a single running counter and stops emitting once it hits
+/// this budget (excess fragments are dropped — the content simply stops
+/// repeating past the cap). Combined with skipping zero-area fixed fragments
+/// (which draw nothing, so the skip is output-preserving), this bounds both
+/// passes in memory and time. 1M fragments (~tens of MiB) is far above any
+/// realistic running header/footer or absolute layout over a long document.
+/// Sibling of the [`MAX_PAGE_NAME_BYTES`] bound.
+pub(crate) const MAX_SUBTREE_PAGE_FRAGMENTS: usize = 1_000_000;
+
 /// Upper bound on the **output bytes** materialized for a single resolved
 /// counter chain (`counters(name, sep, style)`), applied inside
 /// [`gcpm::counter::format_counter_chain`] so it covers every call site
