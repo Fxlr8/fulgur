@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.30.0] - 2026-07-06
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(tagged): avoid panic on CSS list-item link runs by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/592
+* harden: bound attacker-controllable layout-metadata multipliers (multicol/gradient/page-name/fixed/absolute) by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/594
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.29.0...v0.30.0
+
 ## [0.29.0] - 2026-07-05
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
