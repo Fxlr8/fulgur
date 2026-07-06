@@ -5330,3 +5330,69 @@ fn test_render_counters_sibling_reset_is_bounded_smoke() {
         page_count(&pdf)
     );
 }
+
+/// Regression guard: a non-semantic CSS list item (`display:list-item` on a
+/// non-`<li>` element) that contains a hyperlink used to panic under tagged
+/// output. `drawables.list_items` is populated for CSS list-item behaviour,
+/// including non-`<li>` elements, but `li_lbody_ids` is only populated for
+/// semantic `<li>` (`PdfTag::Li`), so `draw_list_item_with_block`'s per-run
+/// tagging path hit `.expect("list-item paragraph must have an LBody id")`
+/// on the missing LBody entry. `<div style="display:list-item"><a href>`
+/// with tagging enabled reproduced a hard panic (CLI exit 101); default
+/// (untagged) output rendered fine. The fix falls back to the node's own id
+/// (matching the plain block-paragraph link-run path) when there is no LBody
+/// remap for the node.
+#[test]
+fn test_tagged_css_list_item_with_link_does_not_panic() {
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(
+            "<html><body>\
+             <div style=\"display:list-item; margin-left:40px\">\
+             <a href=\"https://example.com\">x</a></div>\
+             </body></html>",
+        )
+        .expect("tagged CSS list-item containing a link must not panic");
+    assert!(!pdf.is_empty(), "PDF should be non-empty");
+}
+
+/// Guard for every per-run tagging sink: a link run whose owning element has
+/// no `SemanticEntry` must not be wired into the struct tree. `classify_element`
+/// returns `None` for `<a>`, custom elements and `<body>`, so a link-bearing
+/// element that is itself the paragraph / inline-root node (rather than a child
+/// of a `<p>` / `<div>`) has neither an LBody id nor a semantic entry. Wiring
+/// the link span under such a node marks it "wired" while its content never
+/// enters the tag tree, so Krilla panics in `serialize` ("annotation identifier
+/// ... doesn't appear in the tag tree"). Every rendering path — `dispatch_fragment`
+/// block / paragraph, multicol slices, `draw_under_clip`, list item — routes the
+/// per-run node through `run_tag_target`, which returns `None` for these and
+/// keeps the link annotation untagged. Reported by Codex Review on #592 across
+/// two rounds (list item, then the clipped / block paths).
+#[test]
+fn test_tagged_semanticless_link_runs_do_not_panic() {
+    // Each body is a link-bearing element with no semantic entry that is itself
+    // the paragraph node, exercising a distinct per-run tagging sink.
+    let bodies = [
+        // `<a>` that is itself a CSS list item (list-item path).
+        r#"<a href="https://example.com" style="display:list-item; margin-left:40px">x</a>"#,
+        // Custom element list item wrapping a link.
+        r#"<x-foo style="display:list-item"><a href="https://example.com">x</a></x-foo>"#,
+        // Clipped CSS list item (draw_under_clip).
+        r#"<a href="https://example.com" style="display:list-item; overflow:hidden">x</a>"#,
+        // Block-level `<a>` (block-with-inner-content path).
+        r#"<a href="https://example.com" style="display:block">x</a>"#,
+        // Clipped block-level `<a>` (draw_under_clip block path).
+        r#"<a href="https://example.com" style="display:block; overflow:hidden">x</a>"#,
+        // Plain inline `<a>` as the sole body content (paragraph path).
+        r#"<a href="https://example.com">x</a>"#,
+    ];
+    for body in bodies {
+        let pdf = Engine::builder()
+            .tagged(true)
+            .build()
+            .render(&format!("<html><body>{body}</body></html>"))
+            .unwrap_or_else(|e| panic!("tagged render must not fail for {body:?}: {e:?}"));
+        assert!(!pdf.is_empty(), "PDF should be non-empty for {body:?}");
+    }
+}
