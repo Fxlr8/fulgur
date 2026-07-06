@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.31.0] - 2026-07-06
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(fixed/absolute): reduce subtree fragment budget to aggregate cap only by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/595
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.30.0...v0.31.0
+
 ## [0.30.0] - 2026-07-06
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
