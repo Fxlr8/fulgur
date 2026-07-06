@@ -45,7 +45,7 @@ pub(super) fn convert(
     // descendants in `draw_with_opacity`, so the dual case is covered
     // there and recording it again would double-track.
     let opacity_scope = !clipping && opacity < 1.0;
-    let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
+    let mark = (clipping || opacity_scope).then(|| out.draw_mark());
 
     // Always insert the block entry — the v2 dispatcher silently no-ops
     // when neither paint nor clip nor opacity applies, so leaving an
@@ -59,11 +59,10 @@ pub(super) fn convert(
     // Walk pseudo + absolutely-positioned descendants.
     pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
 
-    if let Some(before) = snapshot {
-        let after = collect_drawables_node_ids(out);
-        let descendants: Vec<usize> = after
-            .difference(&before)
-            .copied()
+    if let Some(mark) = mark {
+        let descendants: Vec<usize> = out
+            .drawn_since(mark)
+            .into_iter()
             .filter(|&id| id != node_id)
             .collect();
         if let Some(entry) = out.block_styles.get_mut(&node_id) {

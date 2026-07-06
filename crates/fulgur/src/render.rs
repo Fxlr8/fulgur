@@ -396,7 +396,7 @@ fn build_page_skip_sets(
 
     let mut clipped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
-    for (&node_id, block) in &drawables.block_styles {
+    for (&node_id, block) in drawables.block_styles.iter() {
         // Exclude body and root: body's only fragment lives on
         // page 0 (so `draw_under_clip(body)` only fires there) and
         // root is never recorded in `geometry`. Including either
@@ -417,7 +417,7 @@ fn build_page_skip_sets(
 
     let mut opacity_wrapped_descendants: std::collections::BTreeSet<usize> =
         std::collections::BTreeSet::new();
-    for (&node_id, block) in &drawables.block_styles {
+    for (&node_id, block) in drawables.block_styles.iter() {
         if !block.opacity_descendants.is_empty()
             && Some(node_id) != drawables.body_id
             && Some(node_id) != drawables.root_id

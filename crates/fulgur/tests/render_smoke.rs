@@ -1016,6 +1016,35 @@ fn render_v2_smoke_list_item_overflow_clip_with_opacity() {
 }
 
 #[test]
+fn render_v2_smoke_many_opacity_clip_transform_scopes_are_bounded() {
+    // fulgur-vrkv hardening: every clip / opacity / transform / inline-box
+    // scope used to snapshot-diff *all* accumulated drawables to compute its
+    // descendant list, making a document of N such sibling scopes O(N²).
+    // `TrackedMap`'s insertion log makes each scope O(its own subtree).
+    // This drives all six migrated sinks at once (block opacity, block clip,
+    // table clip, list-item opacity, transform, inline-box) with many
+    // siblings so the linear path is exercised end-to-end; correctness of the
+    // descendant sets themselves is pinned byte-for-byte by fulgur-vrt.
+    let n = 40;
+    let mut body = String::from("<ul>");
+    for _ in 0..n {
+        body.push_str(r#"<li style="opacity:.99">x</li>"#);
+    }
+    body.push_str("</ul>");
+    for _ in 0..n {
+        body.push_str(r#"<div style="opacity:.99">o</div>"#);
+        body.push_str(r#"<div style="overflow:hidden"><span>c</span></div>"#);
+        body.push_str(r#"<div style="transform:translateX(1px)">t</div>"#);
+        body.push_str(r#"<p><span style="display:inline-block;opacity:.9">i</span></p>"#);
+        body.push_str(r#"<table style="overflow:hidden"><tr><td>y</td></tr></table>"#);
+    }
+    let html = format!("<!DOCTYPE html><html><body>{body}</body></html>");
+    let engine = fulgur::engine::Engine::builder().build();
+    let pdf = engine.render(&html).expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
 fn render_v2_smoke_overflow_clip_inside_transform() {
     // Regression for PR #309 follow-up Devin: an `overflow:hidden`
     // descendant of a `transform` ancestor must enter

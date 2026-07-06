@@ -46,7 +46,7 @@ pub(super) fn try_convert(
         || pseudo::node_has_absolute_pseudo(doc, node);
     let clipping_pre = needs_block_pre && style.has_overflow_clip();
     let opacity_scope_pre = needs_block_pre && !clipping_pre && opacity < 1.0;
-    let pre_snapshot = (clipping_pre || opacity_scope_pre).then(|| collect_drawables_node_ids(out));
+    let pre_mark = (clipping_pre || opacity_scope_pre).then(|| out.draw_mark());
 
     let paragraph_opt = extract_paragraph(doc, node, ctx, depth, out);
     let content_box = compute_content_box(node, &style);
@@ -137,11 +137,10 @@ pub(super) fn try_convert(
             );
             // Register pseudo content (block-pseudo images + abs children).
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
-            if let Some(before) = pre_snapshot.as_ref() {
-                let after = collect_drawables_node_ids(out);
-                let descendants: Vec<usize> = after
-                    .difference(before)
-                    .copied()
+            if let Some(mark) = pre_mark {
+                let descendants: Vec<usize> = out
+                    .drawn_since(mark)
+                    .into_iter()
                     .filter(|&id| id != node_id)
                     .collect();
                 if let Some(entry) = out.block_styles.get_mut(&node_id) {
@@ -197,11 +196,10 @@ pub(super) fn try_convert(
                 },
             );
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
-            if let Some(before) = pre_snapshot.as_ref() {
-                let after = collect_drawables_node_ids(out);
-                let descendants: Vec<usize> = after
-                    .difference(before)
-                    .copied()
+            if let Some(mark) = pre_mark {
+                let descendants: Vec<usize> = out
+                    .drawn_since(mark)
+                    .into_iter()
                     .filter(|&id| id != node_id)
                     .collect();
                 if let Some(entry) = out.block_styles.get_mut(&node_id) {
@@ -544,19 +542,17 @@ pub(super) fn extract_paragraph(
                             continue;
                         }
                     }
-                    // Snapshot before recursing so we can compute the
-                    // inline-box descendant set for the v2 dispatcher's
-                    // skip table.
-                    let before = collect_drawables_node_ids(out);
+                    // Mark before recursing so we can compute the inline-box
+                    // descendant set for the v2 dispatcher's skip table.
+                    let mark = out.draw_mark();
                     let content = convert_inline_box_node(doc, node_id, ctx, depth, out);
-                    let after = collect_drawables_node_ids(out);
                     // Record the descendants the paragraph render path
                     // owns under its offset transform. Filter against
                     // already-recorded skip entries so nested inline-boxes
                     // don't double-register.
-                    let descendants: Vec<crate::drawables::NodeId> = after
-                        .difference(&before)
-                        .copied()
+                    let descendants: Vec<crate::drawables::NodeId> = out
+                        .drawn_since(mark)
+                        .into_iter()
                         .filter(|id| *id != node_id)
                         .filter(|id| !out.inline_box_subtree_skip.contains(id))
                         .collect();

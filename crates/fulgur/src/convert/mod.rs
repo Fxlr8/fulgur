@@ -269,26 +269,8 @@ fn extract_root_dir_rtl(doc: &HtmlDocument) -> bool {
         .is_some_and(|s| matches!(s.get_inherited_box().clone_direction(), Dir::Rtl))
 }
 
-/// Snapshot the union of `NodeId` keys currently present in `out`'s
-/// per-NodeId maps. Used by `record_transform`, `block::convert`,
-/// `table::try_convert`, and `inline_root::extract_paragraph` to compute
-/// `descendants = after - before` so wrappers (transform / clip / opacity /
-/// inline-box) can list every node added by walking their inner subtree.
-pub(super) fn collect_drawables_node_ids(
-    out: &crate::drawables::Drawables,
-) -> std::collections::BTreeSet<usize> {
-    let mut ids = std::collections::BTreeSet::new();
-    ids.extend(out.block_styles.keys().copied());
-    ids.extend(out.paragraphs.keys().copied());
-    ids.extend(out.images.keys().copied());
-    ids.extend(out.svgs.keys().copied());
-    ids.extend(out.tables.keys().copied());
-    ids.extend(out.list_items.keys().copied());
-    ids
-}
-
 /// O(1) probe answering "did *any* per-NodeId map grow?" — sums `.len()`
-/// across the same six maps `collect_drawables_node_ids` unions. Callers
+/// across the same six maps `Drawables::draw_mark` / `drawn_since` track. Callers
 /// that only need the boolean "produced anything?" answer (not the
 /// descendant set) should compare this value before/after a recursion
 /// instead of constructing two `BTreeSet<usize>`s. Convert never removes
@@ -392,12 +374,12 @@ pub(super) fn convert_node(
     // copying every NodeId already inserted, summing to ~N²/2 inserts
     // for N nodes). Gate the snapshot on the transform check so the
     // common case stays O(N). (fulgur-v1cm)
-    let before = node_has_transform(doc, node_id).then(|| collect_drawables_node_ids(out));
+    let mark = node_has_transform(doc, node_id).then(|| out.draw_mark());
     convert_node_inner(doc, node_id, ctx, depth, out);
     record_multicol_rule(doc, node_id, ctx, out);
     convert_multicol_paragraph_slices(doc, node_id, ctx, out);
-    if let Some(before) = before {
-        record_transform(doc, node_id, &before, out);
+    if let Some(mark) = mark {
+        record_transform(doc, node_id, mark, out);
     }
 }
 
@@ -599,15 +581,15 @@ fn convert_node_inner(
 }
 
 /// Register a `TransformEntry` for `node_id` if its computed style
-/// resolves to a non-identity transform. `before` is the set of
-/// `NodeId`s present in `out` at the start of this node's walk; the
-/// difference between that and the post-walk set (excluding `node_id`
-/// itself) is the strict descendant list the render pass needs to paint
-/// inside the transform's `push_transform` / `pop` group.
+/// resolves to a non-identity transform. `mark` was captured before this
+/// node's walk; the `NodeId`s inserted since then (excluding `node_id`
+/// itself) are the strict descendant list the render pass needs to paint
+/// inside the transform's `push_transform` / `pop` group. See
+/// [`crate::drawables::Drawables::drawn_since`].
 fn record_transform(
     doc: &BaseDocument,
     node_id: usize,
-    before: &std::collections::BTreeSet<usize>,
+    mark: crate::drawables::DrawMark,
     out: &mut crate::drawables::Drawables,
 ) {
     let Some(node) = doc.get_node(node_id) else {
@@ -640,10 +622,9 @@ fn record_transform(
     else {
         return;
     };
-    let after = collect_drawables_node_ids(out);
-    let descendants: Vec<usize> = after
-        .difference(before)
-        .copied()
+    let descendants: Vec<usize> = out
+        .drawn_since(mark)
+        .into_iter()
         .filter(|&id| id != node_id)
         .collect();
     out.transforms.insert(

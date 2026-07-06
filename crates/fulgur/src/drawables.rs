@@ -28,6 +28,106 @@ use std::collections::BTreeMap;
 /// `pagination_layout::PaginationGeometryTable`'s key.
 pub type NodeId = usize;
 
+/// A `BTreeMap<NodeId, V>` that also records the *order* keys were inserted,
+/// so a caller can recover "which NodeIds were inserted since an earlier
+/// point" in O(inserted-since) time instead of scanning the whole map.
+///
+/// ## Why this exists (fulgur-vrkv)
+///
+/// Several convert passes need the set of drawable NodeIds produced while
+/// converting one node's subtree — the clip / opacity / transform *descendant*
+/// lists and the inline-box skip table. The original implementation
+/// snapshot-diffed *every* drawable map before and after the recursion
+/// (`collect_drawables_node_ids`): O(total drawables) per scope, and therefore
+/// O(N²) across a document with N such scopes (e.g. N sibling
+/// `opacity < 1` blocks). `fulgur-v1cm` gated the transform snapshot and
+/// `fulgur-vrkv` replaced the boolean "did anything change?" probes with the
+/// O(1) `drawables_total_len`, but the passes that need the actual *set* of
+/// new NodeIds were left on the quadratic path.
+///
+/// `TrackedMap` makes that set recoverable in O(inserted-since):
+/// [`insert`](TrackedMap::insert) appends to an insertion log,
+/// [`Drawables::draw_mark`] captures the current log lengths, and
+/// [`Drawables::drawn_since`] unions the six logs' tails.
+///
+/// ## Invariants that keep PDF output byte-identical
+///
+/// - `insert` is the *only* way to add a key: there is no `DerefMut`, so any
+///   other mutation path (`.entry`, `.extend`, `iter_mut`) fails to compile
+///   rather than silently bypassing the log. `get_mut` mutates an existing
+///   entry's value and never adds a key, so it does not log.
+/// - Convert never removes entries, so the maps are append-only and a log's
+///   tail after a mark is exactly the keys inserted since that mark.
+/// - [`Drawables::drawn_since`] returns keys **sorted ascending,
+///   deduplicated** — matching the old `BTreeSet::difference` output so the
+///   descendant `Vec`s (which drive painter-order PDF emission) keep the same
+///   byte layout.
+#[derive(Debug, Clone)]
+pub struct TrackedMap<V> {
+    map: BTreeMap<NodeId, V>,
+    /// Append-only log of every key passed to `insert`, in call order. May
+    /// contain duplicates when a key is re-inserted (overwritten); readers of
+    /// a tail deduplicate via `Drawables::drawn_since`.
+    order: Vec<NodeId>,
+}
+
+impl<V> Default for TrackedMap<V> {
+    fn default() -> Self {
+        Self {
+            map: BTreeMap::new(),
+            order: Vec::new(),
+        }
+    }
+}
+
+impl<V> std::ops::Deref for TrackedMap<V> {
+    type Target = BTreeMap<NodeId, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl<V> TrackedMap<V> {
+    /// Insert `value` for `key`, recording the insertion in the order log.
+    /// Deliberately shadows `BTreeMap::insert` (otherwise reachable only via a
+    /// `DerefMut` this type intentionally does not provide) so every
+    /// insertion — current or future — is logged automatically.
+    pub fn insert(&mut self, key: NodeId, value: V) -> Option<V> {
+        self.order.push(key);
+        self.map.insert(key, value)
+    }
+
+    /// Mutable access to an existing entry's value. Adds no key, so it is not
+    /// logged. Returns `None` when `key` is absent.
+    pub fn get_mut(&mut self, key: &NodeId) -> Option<&mut V> {
+        self.map.get_mut(key)
+    }
+
+    /// Current insertion-log length (a mark for [`Self::since`]). Distinct
+    /// from the map's `len` — the log counts insertion *events*, including
+    /// re-inserts of an existing key.
+    fn mark(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Keys inserted after `mark`, in raw call order (may contain duplicates).
+    fn since(&self, mark: usize) -> &[NodeId] {
+        &self.order[mark..]
+    }
+}
+
+/// Opaque snapshot of every tracked map's insertion-log length, captured by
+/// [`Drawables::draw_mark`] and consumed by [`Drawables::drawn_since`].
+#[derive(Debug, Clone, Copy)]
+pub struct DrawMark {
+    block_styles: usize,
+    paragraphs: usize,
+    images: usize,
+    svgs: usize,
+    tables: usize,
+    list_items: usize,
+}
+
 // ── Placeholder entry types ──────────────────────────────────────────
 //
 // Each PR in the Phase 4 sequence replaces one of these with the real
@@ -361,8 +461,8 @@ pub struct Drawables {
     /// and `body_offset_pt` for the margin offset), then skipping
     /// body in the main dispatch loop to avoid double-painting.
     pub body_id: Option<NodeId>,
-    pub block_styles: BTreeMap<NodeId, BlockEntry>,
-    pub paragraphs: BTreeMap<NodeId, ParagraphEntry>,
+    pub block_styles: TrackedMap<BlockEntry>,
+    pub paragraphs: TrackedMap<ParagraphEntry>,
     /// Per-source-paragraph multicol slicing emitted by
     /// `convert::convert_multicol_paragraph_slices` from
     /// `multicol_layout::MulticolGeometry::paragraph_splits`. When a
@@ -370,10 +470,10 @@ pub struct Drawables {
     /// one entry per non-empty column slice at the slice origin instead of
     /// the default single-rectangle path that uses `paragraphs[node_id]`.
     pub paragraph_slices: BTreeMap<NodeId, ParagraphSlicesEntry>,
-    pub images: BTreeMap<NodeId, ImageEntry>,
-    pub svgs: BTreeMap<NodeId, SvgEntry>,
-    pub tables: BTreeMap<NodeId, TableEntry>,
-    pub list_items: BTreeMap<NodeId, ListItemEntry>,
+    pub images: TrackedMap<ImageEntry>,
+    pub svgs: TrackedMap<SvgEntry>,
+    pub tables: TrackedMap<TableEntry>,
+    pub list_items: TrackedMap<ListItemEntry>,
     pub multicol_rules: BTreeMap<NodeId, MulticolRuleEntry>,
     pub transforms: BTreeMap<NodeId, TransformEntry>,
     pub bookmark_anchors: BTreeMap<NodeId, BookmarkAnchorEntry>,
@@ -417,13 +517,13 @@ impl Default for Drawables {
             root_dir_rtl: false,
             root_id: None,
             body_id: None,
-            block_styles: BTreeMap::new(),
-            paragraphs: BTreeMap::new(),
+            block_styles: TrackedMap::default(),
+            paragraphs: TrackedMap::default(),
             paragraph_slices: BTreeMap::new(),
-            images: BTreeMap::new(),
-            svgs: BTreeMap::new(),
-            tables: BTreeMap::new(),
-            list_items: BTreeMap::new(),
+            images: TrackedMap::default(),
+            svgs: TrackedMap::default(),
+            tables: TrackedMap::default(),
+            list_items: TrackedMap::default(),
             multicol_rules: BTreeMap::new(),
             transforms: BTreeMap::new(),
             bookmark_anchors: BTreeMap::new(),
@@ -441,6 +541,41 @@ impl Default for Drawables {
 impl Drawables {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Capture the current insertion-log position of every tracked map. Pass
+    /// the result to [`Self::drawn_since`] after converting a subtree to
+    /// recover the NodeIds inserted in between. O(1).
+    pub fn draw_mark(&self) -> DrawMark {
+        DrawMark {
+            block_styles: self.block_styles.mark(),
+            paragraphs: self.paragraphs.mark(),
+            images: self.images.mark(),
+            svgs: self.svgs.mark(),
+            tables: self.tables.mark(),
+            list_items: self.list_items.mark(),
+        }
+    }
+
+    /// NodeIds inserted into any tracked map since `mark`, **sorted ascending
+    /// and deduplicated**.
+    ///
+    /// Drop-in replacement for the old
+    /// `collect_drawables_node_ids(out).difference(&before)` snapshot diff:
+    /// identical result set *and* order (both yield ascending unique keys),
+    /// but O(inserted-since) instead of O(total drawables). The append-only
+    /// invariant (convert never removes entries) makes the log tail equal to
+    /// the set difference; see [`TrackedMap`]. Callers still apply their own
+    /// `id != node_id` / skip-set filters on top.
+    pub fn drawn_since(&self, mark: DrawMark) -> Vec<NodeId> {
+        let mut ids: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
+        ids.extend(self.block_styles.since(mark.block_styles).iter().copied());
+        ids.extend(self.paragraphs.since(mark.paragraphs).iter().copied());
+        ids.extend(self.images.since(mark.images).iter().copied());
+        ids.extend(self.svgs.since(mark.svgs).iter().copied());
+        ids.extend(self.tables.since(mark.tables).iter().copied());
+        ids.extend(self.list_items.since(mark.list_items).iter().copied());
+        ids.into_iter().collect()
     }
 
     /// 合成 NodeId を 1 つ割り当てる。
@@ -553,5 +688,96 @@ mod tests {
         assert!(id2 > id3, "IDs must decrease");
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
+    }
+
+    // ── TrackedMap / draw_mark / drawn_since (fulgur-vrkv) ─────────────
+
+    fn para() -> ParagraphEntry {
+        ParagraphEntry {
+            lines: Vec::new(),
+            opacity: 1.0,
+            visible: true,
+            id: None,
+        }
+    }
+
+    fn list_item() -> ListItemEntry {
+        ListItemEntry {
+            marker: ListItemMarker::Text {
+                lines: Vec::new(),
+                width: 0.0_f32.as_pt(),
+            },
+            marker_line_height: 12.0_f32.as_pt(),
+            opacity: 1.0,
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn drawn_since_returns_only_the_tail_sorted_and_unique() {
+        let mut d = Drawables::new();
+        d.paragraphs.insert(7, para());
+        d.paragraphs.insert(3, para());
+        let mark = d.draw_mark();
+        // Insert descendants out of key order; a duplicate re-insert too.
+        d.paragraphs.insert(30, para());
+        d.paragraphs.insert(10, para());
+        d.paragraphs.insert(30, para()); // re-insert same key
+        // Only post-mark keys, ascending, deduplicated — matches the old
+        // `BTreeSet::difference` output the consumers relied on.
+        assert_eq!(d.drawn_since(mark), vec![10, 30]);
+    }
+
+    #[test]
+    fn drawn_since_is_independent_of_pre_mark_size() {
+        // The anti-quadratic guarantee: work done per scope depends only on
+        // what was inserted *since* the mark, never on how much accumulated
+        // before it. A document of N such scopes is therefore O(total nodes),
+        // not O(N²). Two marks over identical post-mark inserts but wildly
+        // different pre-mark sizes must yield the same result.
+        let mut small = Drawables::new();
+        small.paragraphs.insert(1, para());
+        let m_small = small.draw_mark();
+        small.paragraphs.insert(1000, para());
+
+        let mut big = Drawables::new();
+        for id in 0..500 {
+            big.paragraphs.insert(id, para());
+        }
+        let m_big = big.draw_mark();
+        big.paragraphs.insert(1000, para());
+
+        assert_eq!(small.drawn_since(m_small), vec![1000]);
+        assert_eq!(big.drawn_since(m_big), vec![1000]);
+    }
+
+    #[test]
+    fn drawn_since_unions_all_tracked_maps() {
+        let mut d = Drawables::new();
+        let mark = d.draw_mark();
+        d.paragraphs.insert(5, para());
+        d.list_items.insert(2, list_item());
+        d.paragraphs.insert(9, para());
+        // Keys from different maps merge into one ascending unique list.
+        assert_eq!(d.drawn_since(mark), vec![2, 5, 9]);
+    }
+
+    #[test]
+    fn drawn_since_empty_when_nothing_inserted_after_mark() {
+        let mut d = Drawables::new();
+        d.paragraphs.insert(1, para());
+        let mark = d.draw_mark();
+        assert!(d.drawn_since(mark).is_empty());
+    }
+
+    #[test]
+    fn tracked_map_reads_pass_through_via_deref() {
+        let mut d = Drawables::new();
+        d.paragraphs.insert(42, para());
+        // len / get / contains_key / keys reach BTreeMap through Deref.
+        assert_eq!(d.paragraphs.len(), 1);
+        assert!(d.paragraphs.contains_key(&42));
+        assert!(d.paragraphs.get(&42).is_some());
+        assert_eq!(d.paragraphs.keys().copied().collect::<Vec<_>>(), vec![42]);
     }
 }
