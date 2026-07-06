@@ -2861,6 +2861,9 @@ fn record_fixed_subtree_descendants(
         let w = node.final_layout.size.width;
         let h = node.final_layout.size.height;
 
+        let entry = geometry.entry(node_id).or_default();
+        entry.fragments.clear();
+        entry.is_repeat = true;
         // Per-page repeat fragments, bounded by the aggregate `emitted` budget
         // (the hard cap on O(descendants × pages)). Use `break`, not `return`,
         // and do not skip zero-area nodes: the walk must visit and clear every
@@ -2869,34 +2872,18 @@ fn record_fixed_subtree_descendants(
         // and a zero-size wrapper's fragment can still scope a visible child via
         // transform / opacity dispatch, which reads the wrapper's geometry
         // (Codex review).
-        //
-        // Once the budget is spent, do NOT `or_default()` a fresh entry for the
-        // remaining nodes — that would grow the geometry map to O(subtree) even
-        // though every such entry ends up empty (dropped by the later
-        // `retain`). Only clear an already-present entry so no stale fragment
-        // from the earlier pass survives; this keeps the retained map bounded
-        // by the budget, not the subtree size (gemini review).
-        if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-            if let Some(entry) = geometry.get_mut(&node_id) {
-                entry.fragments.clear();
+        for page_index in 0..pages.max(1) {
+            if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                break;
             }
-        } else {
-            let entry = geometry.entry(node_id).or_default();
-            entry.fragments.clear();
-            entry.is_repeat = true;
-            for page_index in 0..pages.max(1) {
-                if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                    break;
-                }
-                entry.fragments.push(Fragment {
-                    page_index,
-                    x: stored_x.as_px(),
-                    y: stored_y.as_px(),
-                    width: w.as_px(),
-                    height: h.as_px(),
-                });
-                *emitted += 1;
-            }
+            entry.fragments.push(Fragment {
+                page_index,
+                x: stored_x.as_px(),
+                y: stored_y.as_px(),
+                width: w.as_px(),
+                height: h.as_px(),
+            });
+            *emitted += 1;
         }
 
         let children: Vec<usize> = {
@@ -3331,51 +3318,42 @@ fn record_subtree_fragments_at_offset(
                 } else {
                     final_y_for_paging
                 };
-                // Aggregate budget: each node emits one fragment per intersected
-                // page, so a subtree of many page-spanning absolutes is
-                // O(nodes × pages). Stop past the cap
-                // (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`) — shared with the fixed
-                // pass. Use `break`, not `return`: the walk must keep visiting
-                // (and clearing) the rest of the subtree so no stale fragments
-                // survive from an earlier pass (Codex review). Once the budget
-                // is spent, only clear an already-present entry rather than
-                // `or_default()`-ing a fresh one, so the retained geometry map
-                // stays bounded by the budget, not the subtree size (gemini
-                // review).
-                if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                    if let Some(entry) = geometry.get_mut(&node_id) {
-                        entry.fragments.clear();
+                let entry = geometry.entry(node_id).or_default();
+                entry.fragments.clear();
+                entry.is_repeat = false;
+                for page_index in first_page..=last_page {
+                    // Aggregate budget: each node emits one fragment per
+                    // intersected page, so a subtree of many page-spanning
+                    // absolutes is O(nodes × pages). Stop past the cap
+                    // (`crate::MAX_SUBTREE_PAGE_FRAGMENTS`) — shared with the
+                    // fixed pass. Use `break`, not `return`: the walk must keep
+                    // visiting (and clearing) the rest of the subtree so no
+                    // stale fragments survive from an earlier pass (Codex
+                    // review).
+                    if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
+                        break;
                     }
-                } else {
-                    let entry = geometry.entry(node_id).or_default();
-                    entry.fragments.clear();
-                    entry.is_repeat = false;
-                    for page_index in first_page..=last_page {
-                        if *emitted >= crate::MAX_SUBTREE_PAGE_FRAGMENTS {
-                            break;
-                        }
-                        let is_monolithic_continuation =
-                            monolithic_adjust > 0.0 && page_index > first_page;
-                        let stored_y = if is_monolithic_continuation {
-                            -body_offset.1
-                        } else {
-                            paging_origin_y - (page_index as f32) * page_stride_px - body_offset.1
-                        };
-                        let stored_h = if is_monolithic_continuation {
-                            let consumed = (page_index - first_page) as f32 * page_h_px;
-                            (h_for_paging - consumed).clamp(0.0, page_h_px)
-                        } else {
-                            h
-                        };
-                        entry.fragments.push(Fragment {
-                            page_index,
-                            x: stored_x.as_px(),
-                            y: stored_y.as_px(),
-                            width: w.as_px(),
-                            height: stored_h.as_px(),
-                        });
-                        *emitted += 1;
-                    }
+                    let is_monolithic_continuation =
+                        monolithic_adjust > 0.0 && page_index > first_page;
+                    let stored_y = if is_monolithic_continuation {
+                        -body_offset.1
+                    } else {
+                        paging_origin_y - (page_index as f32) * page_stride_px - body_offset.1
+                    };
+                    let stored_h = if is_monolithic_continuation {
+                        let consumed = (page_index - first_page) as f32 * page_h_px;
+                        (h_for_paging - consumed).clamp(0.0, page_h_px)
+                    } else {
+                        h
+                    };
+                    entry.fragments.push(Fragment {
+                        page_index,
+                        x: stored_x.as_px(),
+                        y: stored_y.as_px(),
+                        width: w.as_px(),
+                        height: stored_h.as_px(),
+                    });
+                    *emitted += 1;
                 }
                 descendant_total_pages = descendant_total_pages.max(last_page.saturating_add(1));
             }
