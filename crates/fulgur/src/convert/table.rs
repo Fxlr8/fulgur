@@ -48,7 +48,7 @@ fn convert_table(
         },
     );
 
-    let snapshot = clipping.then(|| collect_drawables_node_ids(out));
+    let mark = clipping.then(|| out.draw_mark());
 
     // Walk table children to recurse cells.
     for &child_id in &node.children {
@@ -59,11 +59,10 @@ fn convert_table(
         collect_table_cells(doc, child_id, is_thead, ctx, depth, out);
     }
 
-    if let Some(before) = snapshot {
-        let after = collect_drawables_node_ids(out);
-        let descendants: Vec<usize> = after
-            .difference(&before)
-            .copied()
+    if let Some(mark) = mark {
+        let descendants: Vec<usize> = out
+            .drawn_since(mark)
+            .into_iter()
             .filter(|&id| id != node.id)
             .collect();
         if let Some(entry) = out.tables.get_mut(&node.id) {

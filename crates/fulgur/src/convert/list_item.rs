@@ -61,9 +61,9 @@ pub(super) fn try_convert(
         let content_box = compute_content_box(node, &style);
         let clipping = style.has_overflow_clip();
         let opacity_scope = !clipping && opacity < 1.0;
-        let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
+        let mark = (clipping || opacity_scope).then(|| out.draw_mark());
         build_list_item_body(doc, node, style, visible, content_box, ctx, depth, out);
-        record_li_clip_opacity_descendants(node_id, clipping, snapshot, out);
+        record_li_clip_opacity_descendants(node_id, clipping, mark, out);
         return true;
     }
 
@@ -112,9 +112,9 @@ pub(super) fn try_convert(
             let content_box = compute_content_box(node, &style);
             let clipping = style.has_overflow_clip();
             let opacity_scope = !clipping && opacity < 1.0;
-            let snapshot = (clipping || opacity_scope).then(|| collect_drawables_node_ids(out));
+            let mark = (clipping || opacity_scope).then(|| out.draw_mark());
             build_list_item_body(doc, node, style, visible, content_box, ctx, depth, out);
-            record_li_clip_opacity_descendants(node_id, clipping, snapshot, out);
+            record_li_clip_opacity_descendants(node_id, clipping, mark, out);
             return true;
         }
     }
@@ -214,10 +214,10 @@ pub(super) fn try_convert(
             // Snapshot existing paragraph ids before the child walk so
             // `inject_marker_into_first_paragraph` only considers
             // paragraphs registered for *this* list-item's subtree.
-            // Without the snapshot, `out.paragraphs.iter_mut().next()`
-            // picks the lowest NodeId in the entire document (e.g. an
-            // earlier `<p>` or a previous `<li>`), prepending the
-            // marker to unrelated content.
+            // Without the snapshot, the first paragraph key would be the
+            // lowest NodeId in the entire document (e.g. an earlier `<p>`
+            // or a previous `<li>`), prepending the marker to unrelated
+            // content.
             let pre_paragraph_ids: std::collections::BTreeSet<usize> =
                 out.paragraphs.keys().copied().collect();
             positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
@@ -288,11 +288,19 @@ fn inject_marker_into_first_paragraph(
     pre_existing_ids: &std::collections::BTreeSet<usize>,
     item: LineItem,
 ) -> bool {
-    let Some((_, entry)) = out
+    // `keys()` iterates ascending (BTreeMap via `Deref`), so the first key
+    // not in `pre_existing_ids` is the lowest new-paragraph NodeId — the same
+    // entry `iter_mut().find(..)` used to land on. `get_mut` then takes the
+    // single mutable borrow (`TrackedMap` has no `DerefMut`/`iter_mut`).
+    let Some(target_id) = out
         .paragraphs
-        .iter_mut()
-        .find(|(id, _)| !pre_existing_ids.contains(id))
+        .keys()
+        .copied()
+        .find(|id| !pre_existing_ids.contains(id))
     else {
+        return false;
+    };
+    let Some(entry) = out.paragraphs.get_mut(&target_id) else {
         return false;
     };
     let Some(first_line) = entry.lines.first_mut() else {
@@ -431,20 +439,19 @@ fn build_list_item_body(
 }
 
 /// Fill in `clip_descendants` / `opacity_descendants` on an already-inserted
-/// `BlockEntry` keyed by `node_id`, using the before/after snapshot diff.
-/// `snapshot` is `Some` only when the caller decided this node has a clip
-/// or opacity scope worth tracking.
+/// `BlockEntry` keyed by `node_id`, using the NodeIds inserted since `mark`.
+/// `mark` is `Some` only when the caller decided this node has a clip or
+/// opacity scope worth tracking. See [`crate::drawables::Drawables::drawn_since`].
 fn record_li_clip_opacity_descendants(
     node_id: usize,
     clipping: bool,
-    snapshot: Option<std::collections::BTreeSet<usize>>,
+    mark: Option<crate::drawables::DrawMark>,
     out: &mut crate::drawables::Drawables,
 ) {
-    let Some(before) = snapshot else { return };
-    let after = collect_drawables_node_ids(out);
-    let descendants: Vec<usize> = after
-        .difference(&before)
-        .copied()
+    let Some(mark) = mark else { return };
+    let descendants: Vec<usize> = out
+        .drawn_since(mark)
+        .into_iter()
         .filter(|&id| id != node_id)
         .collect();
     if let Some(entry) = out.block_styles.get_mut(&node_id) {
@@ -685,7 +692,7 @@ mod tests {
     // ── record_li_clip_opacity_descendants ────────────────────────────
 
     #[test]
-    fn record_none_snapshot_is_noop() {
+    fn record_none_mark_is_noop() {
         let mut out = Drawables::new();
         out.block_styles.insert(1, make_block_entry());
         record_li_clip_opacity_descendants(1, true, None, &mut out);
@@ -696,15 +703,13 @@ mod tests {
     #[test]
     fn record_clipping_true_fills_clip_descendants_and_excludes_self() {
         let mut out = Drawables::new();
-        out.block_styles.insert(10, make_block_entry()); // parent
-        out.block_styles.insert(20, make_block_entry()); // child 1
-        out.block_styles.insert(30, make_block_entry()); // child 2
-        // Snapshot captured before the children were walked — only node 10 existed then.
-        let pre: BTreeSet<usize> = [10].into();
-        record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
-        let mut got = out.block_styles[&10].clip_descendants.clone();
-        got.sort_unstable();
-        assert_eq!(got, vec![20usize, 30]);
+        out.block_styles.insert(10, make_block_entry()); // parent (pre-mark)
+        let mark = out.draw_mark();
+        out.block_styles.insert(20, make_block_entry()); // child 1 (post-mark)
+        out.block_styles.insert(30, make_block_entry()); // child 2 (post-mark)
+        record_li_clip_opacity_descendants(10, true, Some(mark), &mut out);
+        // drawn_since already yields ascending unique ids; no sort needed.
+        assert_eq!(out.block_styles[&10].clip_descendants, vec![20usize, 30]);
         assert!(out.block_styles[&10].opacity_descendants.is_empty());
     }
 
@@ -712,9 +717,9 @@ mod tests {
     fn record_clipping_false_fills_opacity_descendants_and_excludes_self() {
         let mut out = Drawables::new();
         out.block_styles.insert(10, make_block_entry());
+        let mark = out.draw_mark();
         out.block_styles.insert(11, make_block_entry());
-        let pre: BTreeSet<usize> = [10].into();
-        record_li_clip_opacity_descendants(10, false, Some(pre), &mut out);
+        record_li_clip_opacity_descendants(10, false, Some(mark), &mut out);
         assert_eq!(out.block_styles[&10].opacity_descendants, vec![11usize]);
         assert!(out.block_styles[&10].clip_descendants.is_empty());
     }
@@ -722,21 +727,22 @@ mod tests {
     #[test]
     fn record_missing_block_entry_does_not_panic() {
         let mut out = Drawables::new();
+        let mark = out.draw_mark();
         out.block_styles.insert(20, make_block_entry());
-        let pre: BTreeSet<usize> = BTreeSet::new();
         // node_id 10 has no entry in block_styles — must not panic.
-        record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
+        record_li_clip_opacity_descendants(10, true, Some(mark), &mut out);
     }
 
     #[test]
-    fn record_excludes_node_id_even_when_snapshot_does_not_contain_it() {
-        // pre is empty, so after − before = {10, 11}. The `.filter(|&id| id != node_id)`
-        // guard must drop 10 so clip_descendants contains only the child.
+    fn record_excludes_node_id_even_when_inserted_after_mark() {
+        // Both 10 and 11 are inserted after the mark, so `drawn_since` yields
+        // {10, 11}. The `.filter(|&id| id != node_id)` guard must drop 10
+        // (self) so clip_descendants contains only the child.
         let mut out = Drawables::new();
+        let mark = out.draw_mark();
         out.block_styles.insert(10, make_block_entry());
         out.block_styles.insert(11, make_block_entry());
-        let pre: BTreeSet<usize> = BTreeSet::new();
-        record_li_clip_opacity_descendants(10, true, Some(pre), &mut out);
+        record_li_clip_opacity_descendants(10, true, Some(mark), &mut out);
         assert_eq!(out.block_styles[&10].clip_descendants, vec![11usize]);
         assert!(out.block_styles[&10].opacity_descendants.is_empty());
     }
