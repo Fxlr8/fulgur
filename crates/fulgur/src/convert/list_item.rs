@@ -242,7 +242,7 @@ pub(super) fn try_convert(
                 // `inject_marker_into_first_paragraph` returns the item back on
                 // failure (no target paragraph) so we can reuse it here without
                 // cloning on the successful path.
-                if let Some(item) = inject_marker_into_first_paragraph(out, mark, item) {
+                if let Err(item) = inject_marker_into_first_paragraph(out, mark, item) {
                     let lines = vec![ShapedLine {
                         height: line_height,
                         baseline: line_height / DEFAULT_LINE_HEIGHT_RATIO,
@@ -281,8 +281,8 @@ pub(super) fn try_convert(
 /// Inject `item` at the start of the first paragraph entry registered
 /// AFTER `mark` was captured.
 ///
-/// Returns `None` on success (item consumed and prepended to the target
-/// paragraph's first line). Returns `Some(item)` on failure (no paragraph
+/// Returns `Ok(())` on success (item consumed and prepended to the target
+/// paragraph's first line). Returns `Err(item)` on failure (no paragraph
 /// inserted since `mark`, or the target paragraph has no lines) — the
 /// caller receives the unmodified item back and can synthesize a
 /// marker-only paragraph without paying a clone on the successful path.
@@ -295,19 +295,20 @@ pub(super) fn try_convert(
 /// excluded). Byte-identical to the old find-first scan under the
 /// append-only, one-insert-per-NodeId invariant on `TrackedMap` in
 /// convert.
+#[must_use = "returns Err(item) on failure; the handed-back item must be reused or explicitly dropped"]
 fn inject_marker_into_first_paragraph(
     out: &mut crate::drawables::Drawables,
     mark: crate::drawables::DrawMark,
     item: LineItem,
-) -> Option<LineItem> {
+) -> Result<(), LineItem> {
     let Some(target_id) = out.min_paragraph_since(mark) else {
-        return Some(item);
+        return Err(item);
     };
     let Some(entry) = out.paragraphs.get_mut(&target_id) else {
-        return Some(item);
+        return Err(item);
     };
     let Some(first_line) = entry.lines.first_mut() else {
-        return Some(item);
+        return Err(item);
     };
     let shift = match &item {
         LineItem::Text(run) => run
@@ -326,7 +327,7 @@ fn inject_marker_into_first_paragraph(
         }
     }
     first_line.items.insert(0, item);
-    None
+    Ok(())
 }
 
 /// Build the body for a list-item node (outside marker / fallback path).
@@ -525,9 +526,7 @@ mod tests {
     fn inject_returns_false_when_paragraphs_is_empty() {
         let mut out = Drawables::new();
         let mark = out.draw_mark();
-        assert!(
-            inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_some()
-        );
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_err());
     }
 
     #[test]
@@ -537,9 +536,7 @@ mod tests {
         // `min_paragraph_since(mark)` must then return None and injection fails.
         out.paragraphs.insert(1, make_para(vec![make_line(vec![])]));
         let mark = out.draw_mark();
-        assert!(
-            inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_some()
-        );
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_err());
     }
 
     #[test]
@@ -547,9 +544,7 @@ mod tests {
         let mut out = Drawables::new();
         let mark = out.draw_mark();
         out.paragraphs.insert(5, make_para(vec![])); // new (post-mark) but no lines
-        assert!(
-            inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_some()
-        );
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_err());
     }
 
     #[test]
@@ -558,9 +553,7 @@ mod tests {
         let mark = out.draw_mark();
         out.paragraphs
             .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 0.0)])]));
-        assert!(
-            inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_none()
-        );
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_ok());
         let first_line = &out.paragraphs[&5].lines[0];
         assert_eq!(first_line.items.len(), 2);
         // Newly-inserted marker is at index 0.
@@ -577,7 +570,7 @@ mod tests {
         // Existing item at x_offset=5.
         out.paragraphs
             .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 5.0)])]));
-        inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0));
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_ok());
         // shift = marker width = 10 → existing item should now be at x_offset = 5 + 10 = 15.
         let LineItem::InlineBox(existing) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected InlineBox at index 1");
@@ -607,7 +600,7 @@ mod tests {
             computed_y: crate::units::Pt::ZERO,
             link: None,
         });
-        assert!(inject_marker_into_first_paragraph(&mut out, mark, image_marker).is_none());
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, image_marker).is_ok());
         // shift = image width = 8 → existing at x_offset=3 → 3 + 8 = 11.
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected InlineBox at index 1");
@@ -652,7 +645,7 @@ mod tests {
             x_offset: crate::units::Pt::ZERO,
             link: None,
         });
-        inject_marker_into_first_paragraph(&mut out, mark, text_marker);
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, text_marker).is_ok());
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected InlineBox at index 1");
         };
@@ -673,9 +666,7 @@ mod tests {
         out.paragraphs
             .insert(10, make_para(vec![make_line(vec![])]));
         out.paragraphs.insert(5, make_para(vec![make_line(vec![])]));
-        assert!(
-            inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_none()
-        );
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_ok());
         // Marker went into node 5 (the lower key).
         assert_eq!(out.paragraphs[&5].lines[0].items.len(), 1);
         assert_eq!(out.paragraphs[&10].lines[0].items.len(), 0);
@@ -778,9 +769,7 @@ mod tests {
         let mark = out.draw_mark();
         out.paragraphs
             .insert(5, make_para(vec![make_line(vec![make_text_run(5.0)])]));
-        assert!(
-            inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_none()
-        );
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_ok());
         // marker InlineBox width = 10 → existing text run shifts from 5 to 15.
         let LineItem::Text(shifted) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected Text at index 1");
@@ -802,7 +791,7 @@ mod tests {
             5,
             make_para(vec![make_line(vec![make_image_item(20.0, 3.0)])]),
         );
-        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(8.0, 0.0)).is_none());
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(8.0, 0.0)).is_ok());
         // marker width = 8 → existing image shifts from 3 to 11.
         let LineItem::Image(shifted) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected Image at index 1");
@@ -827,9 +816,7 @@ mod tests {
         ]);
         let line1 = make_line(vec![inline_box(5.0, 0.0)]); // second line must not shift
         out.paragraphs.insert(5, make_para(vec![line0, line1]));
-        assert!(
-            inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_none()
-        );
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, inline_box(10.0, 0.0)).is_ok());
         let items = &out.paragraphs[&5].lines[0].items;
         // Items at indices 1, 2, 3 are the original three (marker inserted at 0).
         let LineItem::Text(t) = &items[1] else {
@@ -886,7 +873,7 @@ mod tests {
             x_offset: crate::units::Pt::ZERO,
             link: None,
         });
-        assert!(inject_marker_into_first_paragraph(&mut out, mark, zero_glyph_marker).is_none());
+        assert!(inject_marker_into_first_paragraph(&mut out, mark, zero_glyph_marker).is_ok());
         // shift = 0 → existing InlineBox stays at x_offset=7.
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
             panic!("expected InlineBox at index 1");
