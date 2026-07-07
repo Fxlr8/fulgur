@@ -111,7 +111,7 @@ if let Err(item) = inject_marker_into_first_paragraph(out, mark, item) {
   2. または [ast-grep](https://ast-grep.github.io/) で
      `pattern: 'if !$FN($$$, $ARG.clone(), $$$) { $$$ }'` 等の AST パターンで検索
 
-  Tests の `assert!(func(x))` → `.is_none()` / `assert!(!func(x))` → `.is_some()` 移行も同時に。
+  Tests の `assert!(func(x))` → `.is_ok()` / `assert!(!func(x))` → `.is_err()` 移行も同時に。
 
 ## Judgment Calls
 
