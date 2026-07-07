@@ -585,6 +585,18 @@ impl Drawables {
         ids
     }
 
+    /// Minimum paragraph `NodeId` inserted since `mark`. `None` if no paragraph
+    /// was inserted after `mark`. **O(paragraphs inserted since mark)**.
+    ///
+    /// Drop-in replacement for the old
+    /// `paragraphs.keys().copied().find(|id| !pre.contains(id))` scan (which was
+    /// O(all paragraphs)) — same NodeId under the convert invariant that each
+    /// DOM NodeId is inserted at most once per map, so the `since` tail cannot
+    /// contain an id that was already in the map before `mark`. See [`TrackedMap`].
+    pub fn min_paragraph_since(&self, mark: DrawMark) -> Option<NodeId> {
+        self.paragraphs.since(mark.paragraphs).iter().copied().min()
+    }
+
     /// 合成 NodeId を 1 つ割り当てる。
     /// `usize::MAX / 2` から始まり降順に割り当てるので DOM NodeId と衝突しない。
     pub fn alloc_synthetic_id(&mut self) -> NodeId {
@@ -786,5 +798,50 @@ mod tests {
         assert!(d.paragraphs.contains_key(&42));
         assert!(d.paragraphs.get(&42).is_some());
         assert_eq!(d.paragraphs.keys().copied().collect::<Vec<_>>(), vec![42]);
+    }
+
+    // ── min_paragraph_since (fulgur-un8f) ─────────────────────────────
+
+    fn block_entry() -> BlockEntry {
+        BlockEntry {
+            style: crate::draw_primitives::BlockStyle::default(),
+            opacity: 1.0,
+            visible: true,
+            id: None,
+            layout_size: None,
+            clip_descendants: vec![],
+            opacity_descendants: vec![],
+        }
+    }
+
+    #[test]
+    fn min_paragraph_since_none_when_no_paragraphs_inserted_after_mark() {
+        let mut d = Drawables::default();
+        d.paragraphs.insert(5, para());
+        let mark = d.draw_mark();
+        // 挿入なし → None
+        assert_eq!(d.min_paragraph_since(mark), None);
+    }
+
+    #[test]
+    fn min_paragraph_since_returns_lowest_new_node_id() {
+        let mut d = Drawables::default();
+        d.paragraphs.insert(1, para()); // pre-mark
+        let mark = d.draw_mark();
+        d.paragraphs.insert(10, para()); // 挿入順に依存せず
+        d.paragraphs.insert(5, para());
+        d.paragraphs.insert(20, para());
+        // 挿入順 (10, 5, 20) だが min は 5
+        assert_eq!(d.min_paragraph_since(mark), Some(5));
+    }
+
+    #[test]
+    fn min_paragraph_since_ignores_other_maps() {
+        let mut d = Drawables::default();
+        let mark = d.draw_mark();
+        d.block_styles.insert(1, block_entry());
+        d.paragraphs.insert(7, para());
+        // block_styles は無視、paragraphs のみ
+        assert_eq!(d.min_paragraph_since(mark), Some(7));
     }
 }
