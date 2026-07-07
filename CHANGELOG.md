@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.32.0] - 2026-07-07
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden: gate PyPI/RubyGems publish on a semver release tag by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/600
+### Bug Fixes
+* fix(column_css): linear-time adjacent-sibling matching in cascade walk by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/601
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.31.0...v0.32.0
+
 ## [0.31.0] - 2026-07-06
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
