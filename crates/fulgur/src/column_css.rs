@@ -865,38 +865,62 @@ fn matches_compound(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
     })
 }
 
+/// Match a complex selector against `node`, given `node`'s previous *element*
+/// sibling (the nearest preceding sibling that is an element, or `None` when
+/// there is none — text/comment siblings are skipped by the caller).
+///
+/// The previous element sibling is supplied by the caller so this stays
+/// O(selector): the cascade [`walk`] threads it in document order, which keeps
+/// a flat sibling list linear. Resolving it here instead — by scanning the
+/// parent's child list on every rule check — is what made a wide sibling list
+/// O(n^2).
+fn matches_complex_with_prev(
+    sel: &ComplexSelector,
+    node: &blitz_dom::Node,
+    previous_element_sibling: Option<&blitz_dom::Node>,
+) -> bool {
+    if !matches_compound(&sel.subject, node) {
+        return false;
+    }
+    match (&sel.prev_sibling, previous_element_sibling) {
+        // No adjacent-sibling constraint: the subject match is sufficient.
+        (None, _) => true,
+        // `E + F` requires an element immediately before the subject.
+        (Some(_), None) => false,
+        (Some(sibling_sel), Some(prev)) => matches_compound(sibling_sel, prev),
+    }
+}
+
+/// Test-only convenience wrapper that resolves `node`'s previous element
+/// sibling from the document (an O(siblings) scan) before delegating to
+/// [`matches_complex_with_prev`]. Production code never takes this path — the
+/// cascade [`walk`] threads the previous element sibling in O(1); this exists
+/// so the matcher's per-node DOM behaviour can be unit-tested in isolation.
+#[cfg(test)]
 pub(crate) fn matches_complex(
     sel: &ComplexSelector,
     node: &blitz_dom::Node,
     doc: &blitz_html::HtmlDocument,
 ) -> bool {
-    if !matches_compound(&sel.subject, node) {
-        return false;
-    }
-    match &sel.prev_sibling {
-        None => true,
-        Some(sibling_sel) => {
-            let Some(parent_id) = node.parent else {
-                return false;
-            };
-            let Some(parent) = doc.get_node(parent_id) else {
-                return false;
-            };
-            let siblings = &parent.children;
-            let Some(pos) = siblings.iter().position(|&id| id == node.id) else {
-                return false;
-            };
-            for &prev_id in siblings[..pos].iter().rev() {
-                let Some(prev_node) = doc.get_node(prev_id) else {
-                    continue;
-                };
-                if prev_node.element_data().is_some() {
-                    return matches_compound(sibling_sel, prev_node);
-                }
-            }
-            false
-        }
-    }
+    matches_complex_with_prev(sel, node, previous_element_sibling(node, doc))
+}
+
+/// Resolve `node`'s previous element sibling by scanning its parent's child
+/// list backwards from `node`, skipping non-element (text/comment) siblings.
+/// O(siblings); test-only — the cascade [`walk`] computes this incrementally
+/// in document order instead of rescanning per node.
+#[cfg(test)]
+fn previous_element_sibling<'a>(
+    node: &blitz_dom::Node,
+    doc: &'a blitz_html::HtmlDocument,
+) -> Option<&'a blitz_dom::Node> {
+    let parent = doc.get_node(node.parent?)?;
+    let pos = parent.children.iter().position(|&id| id == node.id)?;
+    parent.children[..pos]
+        .iter()
+        .rev()
+        .filter_map(|&id| doc.get_node(id))
+        .find(|n| n.element_data().is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -999,31 +1023,44 @@ pub(crate) fn build_column_style_table(
 ) -> ColumnStyleTable {
     let mut table = ColumnStyleTable::new();
     let root = doc.root_element();
-    walk(doc, root.id, stylesheet_rules, &mut table, 0);
+    // The root element has no previous sibling.
+    walk(doc, root.id, None, stylesheet_rules, &mut table, 0);
     table
 }
 
+/// Recurse into `node_id`, folding matching rules into `table`.
+///
+/// Returns whether the visited node is an element, so the caller's child loop
+/// can advance its previous-element-sibling marker without re-fetching the
+/// child (the loop already pays for the `get_node` inside this call). A node
+/// skipped by the depth guard or an unresolved id returns `false`; that only
+/// diverges from "is this really an element" at `depth == MAX_DOM_DEPTH`, where
+/// every sibling is likewise cut off before it could consume the marker, so
+/// the marker value is never observed and the result is unchanged.
 fn walk(
     doc: &blitz_html::HtmlDocument,
     node_id: usize,
+    previous_element_sibling_id: Option<usize>,
     rules: &[StyleRule],
     table: &mut ColumnStyleTable,
     depth: usize,
-) {
+) -> bool {
     if depth >= crate::MAX_DOM_DEPTH {
-        return;
+        return false;
     }
     let Some(node) = doc.get_node(node_id) else {
-        return;
+        return false;
     };
 
-    if node.element_data().is_some() {
+    let is_element = node.element_data().is_some();
+    if is_element {
+        let previous_element_sibling = previous_element_sibling_id.and_then(|id| doc.get_node(id));
         let mut props = ColumnStyleProps::default();
         for rule in rules {
             if rule
                 .selectors
                 .iter()
-                .any(|sel| matches_complex(sel, node, doc))
+                .any(|sel| matches_complex_with_prev(sel, node, previous_element_sibling))
             {
                 props.merge(rule.props.clone());
             }
@@ -1039,9 +1076,25 @@ fn walk(
         }
     }
 
+    // Recurse in document order, carrying each child's previous *element*
+    // sibling forward. Non-element children (text/comment) do not advance the
+    // marker, so `E + F` skips them exactly as the old backward scan did — but
+    // without rescanning the child list per node.
+    let mut prev_child_element_id = None;
     for &child_id in &node.children {
-        walk(doc, child_id, rules, table, depth + 1);
+        if walk(
+            doc,
+            child_id,
+            prev_child_element_id,
+            rules,
+            table,
+            depth + 1,
+        ) {
+            prev_child_element_id = Some(child_id);
+        }
     }
+
+    is_element
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,6 +1410,32 @@ mod tests {
         rec(doc, root.id, 0, pred)
     }
 
+    /// Collect every node id (in document order) whose node satisfies `pred`.
+    fn collect_in_document_order<F>(doc: &blitz_html::HtmlDocument, pred: F) -> Vec<usize>
+    where
+        F: Fn(&blitz_dom::Node) -> bool + Copy,
+    {
+        fn rec<F: Fn(&blitz_dom::Node) -> bool + Copy>(
+            doc: &blitz_html::HtmlDocument,
+            id: usize,
+            pred: F,
+            out: &mut Vec<usize>,
+        ) {
+            let Some(node) = doc.get_node(id) else {
+                return;
+            };
+            if pred(node) {
+                out.push(id);
+            }
+            for &c in &node.children {
+                rec(doc, c, pred, out);
+            }
+        }
+        let mut out = Vec::new();
+        rec(doc, doc.root_element().id, pred, &mut out);
+        out
+    }
+
     #[test]
     fn matches_node_by_tag_class_and_id() {
         let doc = build_doc(
@@ -1534,6 +1613,106 @@ mod tests {
         let table = build_column_style_table(&doc, &rules);
         // Nothing matches `.mc`, so the table should be empty.
         assert!(table.is_empty());
+    }
+
+    /// Regression guard for the linear-time adjacent-sibling cascade.
+    ///
+    /// A flat document of many `<div>` siblings with `* + * { column-fill:
+    /// auto }` must assign the property to exactly the elements that have a
+    /// preceding element sibling — every div except the first — and to no
+    /// other div. The pre-refactor matcher recomputed each node's position
+    /// inside its parent's child list on every rule check (`siblings.iter()
+    /// .position(...)`), making a flat sibling list O(n^2); the cascade walk
+    /// now threads the previous element sibling in O(1). This pins the
+    /// *result set* so the linear rewrite cannot silently change which nodes
+    /// match. Timing is deliberately not asserted — the complexity guarantee
+    /// is structural (there is no longer a per-node sibling scan), and a
+    /// wall-clock threshold would be flaky.
+    #[test]
+    fn adjacent_sibling_cascade_matches_every_element_after_the_first() {
+        const N: usize = 400;
+        let mut body = String::with_capacity(N * "<div></div>".len());
+        for _ in 0..N {
+            body.push_str("<div></div>");
+        }
+        let html = format!("<html><body>{body}</body></html>");
+        let doc = build_doc(&html);
+
+        let rules = parse_stylesheet("* + * { column-fill: auto; }");
+        let table = build_column_style_table(&doc, &rules);
+
+        let divs = collect_in_document_order(&doc, |n| {
+            n.element_data()
+                .is_some_and(|e| e.name.local.as_ref() == "div")
+        });
+        assert_eq!(divs.len(), N, "all {N} divs must be present in the DOM");
+
+        // The first div has no preceding element sibling → no match.
+        assert!(
+            !table.contains_key(&divs[0]),
+            "first div must not match `* + *`"
+        );
+        // Every subsequent div has a preceding element sibling → matches.
+        for (i, id) in divs.iter().enumerate().skip(1) {
+            let props = table
+                .get(id)
+                .unwrap_or_else(|| panic!("div #{i} missing from column style table"));
+            assert_eq!(
+                props.fill,
+                Some(ColumnFill::Auto),
+                "div #{i} should match `* + *`"
+            );
+        }
+    }
+
+    /// End-to-end guard for the threaded text-skip in the cascade walk.
+    ///
+    /// `walk` advances its previous-element-sibling marker only on element
+    /// children, so text and comment nodes between two elements must not break
+    /// an `E + F` match. The unit test `matches_complex_adjacent_sibling_skips
+    /// _text_nodes` covers this only through the test-only backward scan; this
+    /// exercises the *production* threading (`build_column_style_table`) with
+    /// both a text node and a comment interspersed among the siblings.
+    #[test]
+    fn adjacent_sibling_cascade_skips_text_and_comment_siblings() {
+        let html = r#"<html><body>
+            <p id="a"></p>
+            some text
+            <p id="b"></p>
+            <!-- a comment -->
+            <p id="c"></p>
+        </body></html>"#;
+        let doc = build_doc(html);
+
+        let rules = parse_stylesheet("p + p { column-fill: auto; }");
+        let table = build_column_style_table(&doc, &rules);
+
+        let id_of = |want: &str| {
+            find_node_with(&doc, |n| {
+                n.element_data()
+                    .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                    == Some(want)
+            })
+            .unwrap_or_else(|| panic!("#{want}"))
+        };
+
+        // #a has no preceding element sibling → no match.
+        assert!(
+            !table.contains_key(&id_of("a")),
+            "#a must not match `p + p`"
+        );
+        // #b's previous element sibling is #a across the text node → match.
+        assert_eq!(
+            table.get(&id_of("b")).and_then(|p| p.fill),
+            Some(ColumnFill::Auto),
+            "#b must match `p + p` across the text node"
+        );
+        // #c's previous element sibling is #b across the comment node → match.
+        assert_eq!(
+            table.get(&id_of("c")).and_then(|p| p.fill),
+            Some(ColumnFill::Auto),
+            "#c must match `p + p` across the comment node"
+        );
     }
 
     // -------- inline-style helpers used by break-after / break-before tests ----
