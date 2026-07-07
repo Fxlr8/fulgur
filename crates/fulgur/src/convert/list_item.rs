@@ -1132,6 +1132,56 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    // try_convert branch 3 (inside marker, non-inline-root): empty <li> with a
+    // bundled font that covers the bullet character. `find_marker_font` returns
+    // Some this time, so `empty_li_marker_item = Some(LineItem::Text(...))`, and
+    // the standalone marker-paragraph path (lines 177-204) is executed.
+    // Without a bundled font (see `smoke_inside_empty_li_with_marker`),
+    // `find_marker_font` returns None and the inner `if let Some(item)` body
+    // is never entered — those lines stay at coverage count=0.
+    #[test]
+    fn smoke_inside_empty_li_with_bundled_font_triggers_marker_paragraph() {
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.fonts.push(font_data);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul style="list-style-position:inside">
+                    <li></li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 3 (inside marker, non-inline-root): empty <li> where the
+    // marker is a list-style-image resolved as an InlineImage rather than a
+    // Text run. `resolve_inside_image_marker` returns Some, so the first arm of
+    // the `or_else` chain is taken and the image is used as the standalone
+    // marker item. Exercises the `LineItem::Image` path via `.map(LineItem::Image)`.
+    #[test]
+    fn smoke_inside_empty_li_with_image_marker() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"ul { list-style-position: inside; list-style-image: url("dot.png"); }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul>
+                    <li></li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     // try_convert branch 2 (fallback display:list-item): a <div> styled with
     // `display:list-item` and a bundled `list-style-image` hits the fallback
     // path (lines 76-118) that exists for non-<li> elements.
