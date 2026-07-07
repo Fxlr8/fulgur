@@ -568,14 +568,21 @@ impl Drawables {
     /// the set difference; see [`TrackedMap`]. Callers still apply their own
     /// `id != node_id` / skip-set filters on top.
     pub fn drawn_since(&self, mark: DrawMark) -> Vec<NodeId> {
-        let mut ids: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
+        // Collect the six tails into a flat `Vec`, then `sort_unstable` +
+        // `dedup` to get the same ascending-unique result a `BTreeSet` would
+        // — but with one contiguous allocation instead of a per-node B-tree
+        // allocation, which matters precisely because this runs once per
+        // clip/opacity/transform scope. Tails are typically small.
+        let mut ids: Vec<NodeId> = Vec::new();
         ids.extend(self.block_styles.since(mark.block_styles).iter().copied());
         ids.extend(self.paragraphs.since(mark.paragraphs).iter().copied());
         ids.extend(self.images.since(mark.images).iter().copied());
         ids.extend(self.svgs.since(mark.svgs).iter().copied());
         ids.extend(self.tables.since(mark.tables).iter().copied());
         ids.extend(self.list_items.since(mark.list_items).iter().copied());
-        ids.into_iter().collect()
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// 合成 NodeId を 1 つ割り当てる。
