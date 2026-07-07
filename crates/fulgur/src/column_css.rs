@@ -1028,6 +1028,15 @@ pub(crate) fn build_column_style_table(
     table
 }
 
+/// Recurse into `node_id`, folding matching rules into `table`.
+///
+/// Returns whether the visited node is an element, so the caller's child loop
+/// can advance its previous-element-sibling marker without re-fetching the
+/// child (the loop already pays for the `get_node` inside this call). A node
+/// skipped by the depth guard or an unresolved id returns `false`; that only
+/// diverges from "is this really an element" at `depth == MAX_DOM_DEPTH`, where
+/// every sibling is likewise cut off before it could consume the marker, so
+/// the marker value is never observed and the result is unchanged.
 fn walk(
     doc: &blitz_html::HtmlDocument,
     node_id: usize,
@@ -1035,15 +1044,16 @@ fn walk(
     rules: &[StyleRule],
     table: &mut ColumnStyleTable,
     depth: usize,
-) {
+) -> bool {
     if depth >= crate::MAX_DOM_DEPTH {
-        return;
+        return false;
     }
     let Some(node) = doc.get_node(node_id) else {
-        return;
+        return false;
     };
 
-    if node.element_data().is_some() {
+    let is_element = node.element_data().is_some();
+    if is_element {
         let previous_element_sibling = previous_element_sibling_id.and_then(|id| doc.get_node(id));
         let mut props = ColumnStyleProps::default();
         for rule in rules {
@@ -1072,21 +1082,19 @@ fn walk(
     // without rescanning the child list per node.
     let mut prev_child_element_id = None;
     for &child_id in &node.children {
-        walk(
+        if walk(
             doc,
             child_id,
             prev_child_element_id,
             rules,
             table,
             depth + 1,
-        );
-        if doc
-            .get_node(child_id)
-            .is_some_and(|child| child.element_data().is_some())
-        {
+        ) {
             prev_child_element_id = Some(child_id);
         }
     }
+
+    is_element
 }
 
 // ---------------------------------------------------------------------------
