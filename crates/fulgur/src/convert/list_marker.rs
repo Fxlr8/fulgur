@@ -544,6 +544,28 @@ mod tests {
         assert_eq!(idx, 0);
     }
 
+    // find_marker_font: when the bundle contains a single-face font (NotoSans) that
+    // does NOT cover the marker character, the inner TTC loop's `else { break }`
+    // (lines 297-299) is triggered at the second `from_index` call:
+    //   idx=0: from_index succeeds; charmap.map(U+E000) is None → continue.
+    //   idx=1: from_index fails (single-face, no sub-font 1) → else { break }.
+    // No Drawables fallback → returns None.
+    //
+    // U+E000 is the first Private Use Area codepoint; standard fonts never map it.
+    #[test]
+    fn find_marker_font_single_face_font_missing_char_hits_ttc_break() {
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = AssetBundle::new();
+        bundle.fonts.push(Arc::clone(&font_data));
+        let drawables = Drawables::new();
+
+        let result = find_marker_font(&Marker::Char('\u{E000}'), Some(&bundle), &drawables);
+        assert!(
+            result.is_none(),
+            "U+E000 (Private Use Area) must not be found in NotoSans or empty drawables"
+        );
+    }
+
     // ── shape_marker_with_skrifa ──────────────────────────────────────────────
 
     #[test]
