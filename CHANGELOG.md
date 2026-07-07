@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.33.0] - 2026-07-07
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* perf(convert): read cb_padding_box borders from final_layout directly by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/602
+* fix(inspect): cap Parent-chain traversal to break cyclic loops by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/604
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.32.0...v0.33.0
+
 ## [0.32.0] - 2026-07-07
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
