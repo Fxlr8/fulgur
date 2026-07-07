@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -279,8 +280,14 @@ fn resolve_page_resources(
     page_id: lopdf::ObjectId,
 ) -> Option<lopdf::Dictionary> {
     // Walk the page's Parent chain to find an inherited Resources dictionary.
+    // Track visited object IDs so malformed inputs with cyclic /Parent references
+    // (e.g. A -> B -> A) cannot spin this loop indefinitely.
+    let mut visited = HashSet::new();
     let mut current_id = page_id;
     loop {
+        if !visited.insert(current_id) {
+            return None;
+        }
         let dict = match doc.get_object(current_id) {
             Ok(lopdf::Object::Dictionary(d)) => d.clone(),
             _ => return None,
@@ -291,8 +298,8 @@ fn resolve_page_resources(
             }
         }
         match dict.get(b"Parent").and_then(|p| p.as_reference()) {
-            Ok(parent_id) if parent_id != current_id => current_id = parent_id,
-            _ => return None,
+            Ok(parent_id) => current_id = parent_id,
+            Err(_) => return None,
         }
     }
 }
@@ -967,5 +974,39 @@ mod tests {
         assert_eq!(result.metadata.creator, None);
         assert_eq!(result.metadata.created_at, None);
         assert_eq!(result.metadata.modified_at, None);
+    }
+
+    /// Cyclic /Parent chain (A -> B -> A, no /Resources anywhere) must terminate.
+    /// Without a visited-set cap, `resolve_page_resources` alternates between the two
+    /// parent dictionaries forever.
+    #[test]
+    fn resolve_page_resources_stops_on_multi_node_parent_cycle() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::new();
+        // Page 1 -> Pages 2 -> Pages 3 -> Pages 2 (cycle, none have /Resources).
+        doc.objects.insert(
+            (1, 0),
+            Object::Dictionary(dictionary! {
+                "Type" => "Page",
+                "Parent" => Object::Reference((2, 0)),
+            }),
+        );
+        doc.objects.insert(
+            (2, 0),
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Parent" => Object::Reference((3, 0)),
+            }),
+        );
+        doc.objects.insert(
+            (3, 0),
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Parent" => Object::Reference((2, 0)),
+            }),
+        );
+
+        assert_eq!(resolve_page_resources(&doc, (1, 0)), None);
     }
 }
