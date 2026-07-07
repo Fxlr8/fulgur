@@ -234,14 +234,44 @@ jobs:
             "
           '
 
+  verify-release-tag:
+    name: Verify release tag
+    # RubyGems publish must only run for a real `vX.Y.Z` release tag. `release`
+    # events fire for a Release published on ANY tag name, and `github.event_name
+    # == 'release'` alone does not prove the tag is a semver `v*` tag or that the
+    # release came from the gated release-plz path. The RestrictReleaseTag ruleset
+    # restricts creation of `v[0-9]*.[0-9]*.[0-9]*` tags to the release App, so
+    # requiring a semver tag here ties this publish to the same gated namespace as
+    # crates.io / npm (release.yml's `setup` job does the equivalent check). A
+    # Release published on a non-semver tag — which the ruleset does NOT cover — is
+    # rejected before publish. See docs/RELEASE_SETUP.md.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject non-semver release tag
+        # $GITHUB_REF_NAME is a runner-set env var, not a ${{ }} template, so the
+        # attacker-influenced tag name cannot inject shell. Keep it quoted.
+        # Validate the FULL tag INCLUDING the leading `v`. A bare `1.2.3` tag is
+        # NOT covered by the RestrictReleaseTag ruleset (`v[0-9]*.[0-9]*.[0-9]*`),
+        # so it must not pass here either — do not strip `v` first. (release.yml's
+        # `setup` can strip `v` because its `push: tags: v*` trigger already
+        # guarantees the prefix; `release:published` is tag-name-agnostic.)
+        run: |
+          if ! echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Refusing to publish: release tag '$GITHUB_REF_NAME' is not a vX.Y.Z release tag"
+            exit 1
+          fi
+          echo "Release tag OK: $GITHUB_REF_NAME"
+
   # NOTE: RubyGems publish は release イベント (release.yml がタグから発火) のみ。
   # workflow_dispatch からは任意の ref を push できないようにする (security)。
   # RubyGems には TestPyPI 相当が無いため、workflow_dispatch は build + smoke
   # のみ実行し、OIDC / credential フローの実動作検証は初回本番リリースで行う。
-  # See docs/RELEASE_SETUP.md.
+  # 加えて verify-release-tag が semver `v*` タグを要求し、非 semver タグの Release
+  # からの publish を塞ぐ。See docs/RELEASE_SETUP.md.
   publish:
     name: Publish to RubyGems
-    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test, smoke-test-musl]
+    needs: [build-source-gem, smoke-test-source-gem, build-precompiled, smoke-test, smoke-test-musl, verify-release-tag]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment: rubygems

@@ -225,11 +225,24 @@ Release flow:
    (App token) + npm. Publishing the Release fires `release:published`. No further
    approval — ② already authorized the release.
 4. `release-python.yml` / `release-ruby.yml` publish to PyPI / RubyGems on
-   `release:published`.
+   `release:published`, **but only after their `verify-release-tag` job confirms
+   the tag is a `vX.Y.Z` semver tag** (the equivalent of `release.yml`'s `setup`
+   job for npm).
 
-The OIDC claim scope (repo + workflow + environment) is independent of reviewer
-settings — `if: github.event_name == 'release'` separately blocks publishing from
-arbitrary refs.
+`if: github.event_name == 'release'` proves only the *trigger type* — it does
+**not** prove the tag is a `v*` tag or that the release came from the gated
+`release.yml` path. A GitHub Release can be published on *any* tag name, and the
+`release-python.yml` / `release-ruby.yml` workflows fire on `release:published`
+regardless of tag pattern. So each `publish` job additionally requires its
+`verify-release-tag` job to pass (tag must match
+`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$`),
+and the `RestrictReleaseTag` ruleset (control #4 below) restricts creation of
+`v[0-9]*.[0-9]*.[0-9]*` tags to the release App. Together these tie the PyPI /
+RubyGems publish to the same App-created, gated `v*` namespace as crates.io / npm
+— a Release published on a non-semver tag (which the ruleset does not cover) is
+rejected before any registry credential is requested. The OIDC claim scope
+(repo + workflow + environment) is independent of reviewer settings and is not
+what enforces this.
 
 ### Security controls (partly GitHub settings, not code)
 
@@ -247,15 +260,31 @@ Environments / Rules) and re-check after edits:
    ruleset's *bypass list* (e.g. the Repository Admin role) sidesteps ① and #3, so
    keep that list to trusted maintainers only.
 4. **A `v*` tag-protection ruleset** (`RestrictReleaseTag`) restricting tag
-   *creation* to the release App. This is the load-bearing control against the one
-   path the gates above can't see: a `v*` tag pushed **directly** to the repo,
-   which bypasses `release-plz.yml` entirely and lands straight on `release.yml` →
-   GitHub Release + npm + PyPI + RubyGems.
+   *creation* to the release App. It targets `refs/tags/v[0-9]*.[0-9]*.[0-9]*` and
+   is the load-bearing control against the one path the gates above can't see: a
+   `v*` tag pushed **directly** to the repo, which bypasses `release-plz.yml`
+   entirely and lands straight on `release.yml` → GitHub Release + npm.
+5. **The `verify-release-tag` job gates PyPI / RubyGems publish in code.**
+   `release.yml` (→ npm) is safe from a rogue tag because it triggers on
+   `push: tags: v*` **and** its `setup` job validates strict semver, so a
+   non-release tag never reaches its publish jobs. `release-python.yml` /
+   `release-ruby.yml`, by contrast, trigger on `release:published`, which is
+   **tag-name-agnostic** — a GitHub Release created on any tag (e.g. `evil`,
+   `vX`, or a bare `1.2.3`), a name that #4's ruleset does **not** restrict,
+   would otherwise reach their `publish` jobs on `if: github.event_name ==
+   'release'` alone. Each `publish` job therefore `needs:` a `verify-release-tag`
+   job that rejects any tag not matching
+   `^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$` (the leading `v` is required —
+   the same prefix #4 restricts), tying these publishes to the same App-created
+   `v*` namespace #4 protects. This is an **in-code** control (visible
+   in the workflow YAML), not a settings one.
 
-> Status as of 2026-07-02: #1, #2, #3 and #4 are live. #2 = the `crates-io`
+> Status as of 2026-07-07: #1, #2, #3, #4 and #5 are live. #2 = the `crates-io`
 > environment with required reviewers (verified via
-> `gh api repos/fulgur-rs/fulgur/environments/crates-io`); `release` has no
-> reviewers (`…/environments/release` → `[]`). #4 = `RestrictReleaseTag` (bypass =
+> `gh api repos/fulgur-rs/fulgur/environments/crates-io`); `release`, `pypi` and
+> `rubygems` have no reviewers (`…/environments/<name>` → `protection_rules: []`)
+> — the PyPI / RubyGems publish path is gated by #5 (`verify-release-tag`) + #4
+> instead. #4 = `RestrictReleaseTag`, targeting `v[0-9]*.[0-9]*.[0-9]*` (bypass =
 > `fulgur-release-bot` App only, no admin blanket bypass).
 >
 > **Rollout caveat (crates.io TP):** this workflow stamps the OIDC subject

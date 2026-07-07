@@ -1,8 +1,19 @@
 # Versioning Policy & Release Pipeline Simplification — Design
 
 **Date:** 2026-04-26
-**Status:** Approved for implementation
+**Status:** Superseded in part — see note below
 **Scope:** バージョニング方針切替 + release pipeline の approve / skip / changelog 簡略化
+
+> **Superseding note (2026-07-07):** §2.1 のゲート集約 (`pypi` / `rubygems` の
+> `required_reviewers` を剥がし承認を単一ゲートに寄せる) は、**実装時により堅牢な形へ
+> 発展した**。実際に着地したモデルは docs/RELEASE_SETUP.md が正 (source of truth):
+> 承認ゲートは `crates-io` environment (②) に集約しつつ、下流の PyPI / RubyGems publish は
+> **`verify-release-tag` job で semver `v*` タグを要求**し、`RestrictReleaseTag` ruleset
+> (`v[0-9]*.[0-9]*.[0-9]*` の作成を release App に限定) と併せて gated `v*` namespace に
+> 束ねている。**本 doc 中の「`if: github.event_name == 'release'` が任意 ref からの publish を
+> ブロックする」という趣旨の記述は誤りで、正しくは `verify-release-tag` + `RestrictReleaseTag`
+> が担保する。** この doc は当時の設計意図の記録 (flow) として残す — 現行の運用は必ず
+> docs/RELEASE_SETUP.md を参照すること。
 
 ## 背景
 
