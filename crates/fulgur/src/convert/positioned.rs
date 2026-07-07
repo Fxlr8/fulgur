@@ -81,15 +81,16 @@ pub(super) struct AbsCb {
 }
 
 fn cb_padding_box(node: &Node) -> ((Px, Px), (Px, Px)) {
-    let style = extract_block_style(node, None);
-    let bl_pt = style.border_widths[3];
-    let br_pt = style.border_widths[1];
-    let bt_pt = style.border_widths[0];
-    let bb_pt = style.border_widths[2];
+    // Reads border widths straight from Taffy's layout instead of routing
+    // through `extract_block_style`, which also clones/iterates
+    // attacker-controlled `box-shadow` lists. `resolve_cb_for_absolute` calls
+    // this per ancestor per node with an absolute pseudo, so a full-style
+    // extraction here amplifies box-shadow processing by the ancestor walk.
+    let border = node.final_layout.border;
     let sz = node.final_layout.size;
-    let pb_w = (sz.width.as_px() - (bl_pt + br_pt).in_px()).max(Px::ZERO);
-    let pb_h = (sz.height.as_px() - (bt_pt + bb_pt).in_px()).max(Px::ZERO);
-    ((pb_w, pb_h), (bl_pt.in_px(), bt_pt.in_px()))
+    let pb_w = (sz.width - border.left - border.right).max(0.0).as_px();
+    let pb_h = (sz.height - border.top - border.bottom).max(0.0).as_px();
+    ((pb_w, pb_h), (border.left.as_px(), border.top.as_px()))
 }
 
 fn resolve_cb_for_absolute(
