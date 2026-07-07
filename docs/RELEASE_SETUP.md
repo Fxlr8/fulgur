@@ -234,7 +234,8 @@ Release flow:
 `release.yml` path. A GitHub Release can be published on *any* tag name, and the
 `release-python.yml` / `release-ruby.yml` workflows fire on `release:published`
 regardless of tag pattern. So each `publish` job additionally requires its
-`verify-release-tag` job to pass (tag must match `^v[0-9]+\.[0-9]+\.[0-9]+…$`),
+`verify-release-tag` job to pass (tag must match
+`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$`),
 and the `RestrictReleaseTag` ruleset (control #4 below) restricts creation of
 `v[0-9]*.[0-9]*.[0-9]*` tags to the release App. Together these tie the PyPI /
 RubyGems publish to the same App-created, gated `v*` namespace as crates.io / npm
@@ -269,11 +270,13 @@ Environments / Rules) and re-check after edits:
    non-release tag never reaches its publish jobs. `release-python.yml` /
    `release-ruby.yml`, by contrast, trigger on `release:published`, which is
    **tag-name-agnostic** — a GitHub Release created on any tag (e.g. `evil`,
-   `vX`), a name #4's ruleset does **not** restrict, would otherwise reach their
-   `publish` jobs on `if: github.event_name == 'release'` alone. Each `publish`
-   job therefore `needs:` a `verify-release-tag` job that rejects any tag not
-   matching `^v[0-9]+\.[0-9]+\.[0-9]+…$`, tying these publishes to the same
-   App-created `v*` namespace #4 protects. This is an **in-code** control (visible
+   `vX`, or a bare `1.2.3`), a name that #4's ruleset does **not** restrict,
+   would otherwise reach their `publish` jobs on `if: github.event_name ==
+   'release'` alone. Each `publish` job therefore `needs:` a `verify-release-tag`
+   job that rejects any tag not matching
+   `^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$` (the leading `v` is required —
+   the same prefix #4 restricts), tying these publishes to the same App-created
+   `v*` namespace #4 protects. This is an **in-code** control (visible
    in the workflow YAML), not a settings one.
 
 > Status as of 2026-07-07: #1, #2, #3, #4 and #5 are live. #2 = the `crates-io`

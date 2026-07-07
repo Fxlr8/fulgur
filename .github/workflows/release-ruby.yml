@@ -251,9 +251,13 @@ jobs:
       - name: Reject non-semver release tag
         # $GITHUB_REF_NAME is a runner-set env var, not a ${{ }} template, so the
         # attacker-influenced tag name cannot inject shell. Keep it quoted.
+        # Validate the FULL tag INCLUDING the leading `v`. A bare `1.2.3` tag is
+        # NOT covered by the RestrictReleaseTag ruleset (`v[0-9]*.[0-9]*.[0-9]*`),
+        # so it must not pass here either — do not strip `v` first. (release.yml's
+        # `setup` can strip `v` because its `push: tags: v*` trigger already
+        # guarantees the prefix; `release:published` is tag-name-agnostic.)
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+          if ! echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "::error::Refusing to publish: release tag '$GITHUB_REF_NAME' is not a vX.Y.Z release tag"
             exit 1
           fi
