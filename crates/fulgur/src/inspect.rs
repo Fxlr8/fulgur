@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::path::Path;
 
+use crate::MAX_PDF_PARENT_DEPTH;
+
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -279,8 +281,12 @@ fn resolve_page_resources(
     page_id: lopdf::ObjectId,
 ) -> Option<lopdf::Dictionary> {
     // Walk the page's Parent chain to find an inherited Resources dictionary.
+    // A fixed depth bound guarantees termination on malformed inputs with cyclic
+    // (`A -> B -> A`) or pathologically long `/Parent` references, without needing
+    // a heap-allocated visited set — real page trees are shallow enough that
+    // `MAX_PDF_PARENT_DEPTH` is orders of magnitude above any legitimate document.
     let mut current_id = page_id;
-    loop {
+    for _ in 0..MAX_PDF_PARENT_DEPTH {
         let dict = match doc.get_object(current_id) {
             Ok(lopdf::Object::Dictionary(d)) => d.clone(),
             _ => return None,
@@ -291,10 +297,11 @@ fn resolve_page_resources(
             }
         }
         match dict.get(b"Parent").and_then(|p| p.as_reference()) {
-            Ok(parent_id) if parent_id != current_id => current_id = parent_id,
-            _ => return None,
+            Ok(parent_id) => current_id = parent_id,
+            Err(_) => return None,
         }
     }
+    None
 }
 
 fn transform_point(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
@@ -967,5 +974,39 @@ mod tests {
         assert_eq!(result.metadata.creator, None);
         assert_eq!(result.metadata.created_at, None);
         assert_eq!(result.metadata.modified_at, None);
+    }
+
+    /// Cyclic /Parent chain (A -> B -> A, no /Resources anywhere) must terminate.
+    /// Without a visited-set cap, `resolve_page_resources` alternates between the two
+    /// parent dictionaries forever.
+    #[test]
+    fn resolve_page_resources_stops_on_multi_node_parent_cycle() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::new();
+        // Page 1 -> Pages 2 -> Pages 3 -> Pages 2 (cycle, none have /Resources).
+        doc.objects.insert(
+            (1, 0),
+            Object::Dictionary(dictionary! {
+                "Type" => "Page",
+                "Parent" => Object::Reference((2, 0)),
+            }),
+        );
+        doc.objects.insert(
+            (2, 0),
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Parent" => Object::Reference((3, 0)),
+            }),
+        );
+        doc.objects.insert(
+            (3, 0),
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Parent" => Object::Reference((2, 0)),
+            }),
+        );
+
+        assert_eq!(resolve_page_resources(&doc, (1, 0)), None);
     }
 }
