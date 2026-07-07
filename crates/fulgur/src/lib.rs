@@ -152,6 +152,18 @@ pub(crate) const MAX_COUNTER_CHAIN_BYTES: usize = 4 * 1024;
 /// on `separator_len * chain_len`.
 pub(crate) const MAX_COUNTER_CHAIN_ENTRIES: usize = MAX_DOM_DEPTH;
 
+/// Upper bound on how many `/Parent` references [`inspect::resolve_page_resources`]
+/// will follow when looking up an inherited `Resources` dictionary on a PDF page.
+///
+/// Walking the parent chain unconditionally is unsafe on attacker-controlled PDFs
+/// because a cyclic chain (`A -> B -> A`, or any longer cycle) would loop forever;
+/// even a genuinely long non-cyclic chain would consume unbounded work. Real page
+/// trees stay very shallow — Adobe's implementation notes recommend at most 7
+/// levels, and typical documents nest 1–3 deep — so a fixed depth cap terminates
+/// pathological inputs without ever rejecting a legitimate one. Sibling of the
+/// [`MAX_DOM_DEPTH`] defensive traversal bound.
+pub(crate) const MAX_PDF_PARENT_DEPTH: usize = 128;
+
 /// Total-output budget for the generated CSS that
 /// [`blitz_adapter::CounterPass`] injects for resolved pseudo-element
 /// content. Once the accumulated generated CSS reaches this size, further

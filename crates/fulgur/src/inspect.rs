@@ -1,6 +1,7 @@
 use serde::Serialize;
-use std::collections::HashSet;
 use std::path::Path;
+
+use crate::MAX_PDF_PARENT_DEPTH;
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -280,14 +281,12 @@ fn resolve_page_resources(
     page_id: lopdf::ObjectId,
 ) -> Option<lopdf::Dictionary> {
     // Walk the page's Parent chain to find an inherited Resources dictionary.
-    // Track visited object IDs so malformed inputs with cyclic /Parent references
-    // (e.g. A -> B -> A) cannot spin this loop indefinitely.
-    let mut visited = HashSet::new();
+    // A fixed depth bound guarantees termination on malformed inputs with cyclic
+    // (`A -> B -> A`) or pathologically long `/Parent` references, without needing
+    // a heap-allocated visited set — real page trees are shallow enough that
+    // `MAX_PDF_PARENT_DEPTH` is orders of magnitude above any legitimate document.
     let mut current_id = page_id;
-    loop {
-        if !visited.insert(current_id) {
-            return None;
-        }
+    for _ in 0..MAX_PDF_PARENT_DEPTH {
         let dict = match doc.get_object(current_id) {
             Ok(lopdf::Object::Dictionary(d)) => d.clone(),
             _ => return None,
@@ -302,6 +301,7 @@ fn resolve_page_resources(
             Err(_) => return None,
         }
     }
+    None
 }
 
 fn transform_point(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
