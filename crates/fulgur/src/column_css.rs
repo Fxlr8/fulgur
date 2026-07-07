@@ -1657,6 +1657,56 @@ mod tests {
         }
     }
 
+    /// End-to-end guard for the threaded text-skip in the cascade walk.
+    ///
+    /// `walk` advances its previous-element-sibling marker only on element
+    /// children, so text and comment nodes between two elements must not break
+    /// an `E + F` match. The unit test `matches_complex_adjacent_sibling_skips
+    /// _text_nodes` covers this only through the test-only backward scan; this
+    /// exercises the *production* threading (`build_column_style_table`) with
+    /// both a text node and a comment interspersed among the siblings.
+    #[test]
+    fn adjacent_sibling_cascade_skips_text_and_comment_siblings() {
+        let html = r#"<html><body>
+            <p id="a"></p>
+            some text
+            <p id="b"></p>
+            <!-- a comment -->
+            <p id="c"></p>
+        </body></html>"#;
+        let doc = build_doc(html);
+
+        let rules = parse_stylesheet("p + p { column-fill: auto; }");
+        let table = build_column_style_table(&doc, &rules);
+
+        let id_of = |want: &str| {
+            find_node_with(&doc, |n| {
+                n.element_data()
+                    .and_then(|e| crate::blitz_adapter::get_attr(e, "id"))
+                    == Some(want)
+            })
+            .unwrap_or_else(|| panic!("#{want}"))
+        };
+
+        // #a has no preceding element sibling → no match.
+        assert!(
+            !table.contains_key(&id_of("a")),
+            "#a must not match `p + p`"
+        );
+        // #b's previous element sibling is #a across the text node → match.
+        assert_eq!(
+            table.get(&id_of("b")).and_then(|p| p.fill),
+            Some(ColumnFill::Auto),
+            "#b must match `p + p` across the text node"
+        );
+        // #c's previous element sibling is #b across the comment node → match.
+        assert_eq!(
+            table.get(&id_of("c")).and_then(|p| p.fill),
+            Some(ColumnFill::Auto),
+            "#c must match `p + p` across the comment node"
+        );
+    }
+
     // -------- inline-style helpers used by break-after / break-before tests ----
 
     fn parse_inline_style(css: &str) -> ColumnStyleProps {
