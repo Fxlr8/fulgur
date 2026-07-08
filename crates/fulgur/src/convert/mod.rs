@@ -995,7 +995,19 @@ struct ContentBox {
 }
 
 /// Compute the content-box of `node` from its computed style + Taffy layout.
+/// All returned values are in **CSS px** (Blitz/Taffy layout space) — see
+/// `.claude/rules/coordinate-system.md`.
+///
+/// Each inset side runs `.in_px()` on the border and padding operand
+/// *separately* before summing (`(border[i].in_px()) + (padding[i].in_px())`
+/// rather than `(border[i] + padding[i]).in_px()`). This is intentional:
+/// it matches the float-op order that fulgur-m0xl's byte-neutral caller
+/// stopgap performed, so any drift beyond the reordering documented in the
+/// fulgur-bfu9 commit message stays out of the goldens. Do not fold the
+/// two `.in_px()` calls per side into one.
 fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
+    // `border_widths` / `padding` are stored in CSS TRBL order:
+    // [0]=top, [1]=right, [2]=bottom, [3]=left.
     let left_inset = style.border_widths[3].in_px() + style.padding[3].in_px();
     let top_inset = style.border_widths[0].in_px() + style.padding[0].in_px();
     let right_inset = style.border_widths[1].in_px() + style.padding[1].in_px();
