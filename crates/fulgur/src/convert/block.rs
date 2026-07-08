@@ -52,7 +52,7 @@ pub(super) fn convert(
     // unstyled entry costs nothing and keeps abs/fixed descendants able
     // to look up their CB at render time. Mirrors v1's behavior of
     // always emitting a `BlockPageable` for container nodes.
-    insert_block_entry(node, style.clone(), width, height, out);
+    insert_block_entry(node, style, width, height, out);
 
     // Walk in-flow children.
     positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
