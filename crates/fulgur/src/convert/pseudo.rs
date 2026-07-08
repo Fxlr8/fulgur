@@ -2,7 +2,7 @@ use super::inline_root;
 use super::positioned::{is_absolutely_positioned, walk_absolute_children};
 use super::replaced::{make_image_entry, resolve_image_dimensions};
 use super::*;
-use crate::units::F32Units;
+use crate::units::{F32Units, Px};
 
 /// Build an `ImageEntry` for a `::before`/`::after` pseudo-element node
 /// whose computed `content` resolves to a single `url(...)` image.
@@ -10,8 +10,8 @@ use crate::units::F32Units;
 /// Returns `None` under the same conditions as the v1 `build_pseudo_image`.
 pub(super) fn build_pseudo_image_entry(
     pseudo_node: &Node,
-    parent_content_width: Pt,
-    parent_content_height: Pt,
+    parent_content_width: Px,
+    parent_content_height: Px,
     assets: Option<&AssetBundle>,
 ) -> Option<crate::drawables::ImageEntry> {
     let assets = assets?;
@@ -152,8 +152,8 @@ fn build_block_pseudo_image_entries(
         }
         let entry = build_pseudo_image_entry(
             pseudo,
-            parent_cb.width.as_pt(),
-            parent_cb.height.as_pt(),
+            parent_cb.width.as_pt().in_px(),
+            parent_cb.height.as_pt().in_px(),
             assets,
         )?;
         Some((id, entry))
@@ -166,8 +166,8 @@ fn build_block_pseudo_image_entries(
 /// `display` is NOT block-outside (i.e. it is inline).
 pub(super) fn build_inline_pseudo_image(
     pseudo_node: &Node,
-    parent_content_width: f32,
-    parent_content_height: f32,
+    parent_content_width: Px,
+    parent_content_height: Px,
     assets: Option<&AssetBundle>,
 ) -> Option<InlineImage> {
     let assets = assets?;
@@ -177,8 +177,8 @@ pub(super) fn build_inline_pseudo_image(
     let format = ImageRender::detect_format(&data)?;
 
     let styles = pseudo_node.primary_styles()?;
-    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width.as_pt());
-    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_content_height.as_pt());
+    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);
+    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_content_height);
     let (w, h) = resolve_image_dimensions(&data, format, css_w, css_h);
     let (opacity, visible) = extract_opacity_visible(pseudo_node);
     let vertical_align = crate::blitz_adapter::extract_vertical_align(pseudo_node);
@@ -255,20 +255,24 @@ pub(super) fn inject_inline_pseudo_images(
 
 /// Resolve a stylo `Size` (`width` / `height`) to an absolute `f32` in pt,
 /// or `None` for `auto` and intrinsic keywords.
-fn resolve_pseudo_size(size: &::style::values::computed::Size, parent_width: Pt) -> Option<f32> {
+///
+/// `basis` is the containing-block extent (width for `width` / `min-width` /
+/// `max-width`, height for the height-axis siblings) in **CSS px** — the
+/// layout-space Stylo's `LengthPercentage::resolve` expects. See
+/// `.claude/rules/coordinate-system.md` ("Stylo length-percentage
+/// resolution"). The return value is in Pt (matches downstream
+/// `make_image_entry` / `resolve_image_dimensions`).
+fn resolve_pseudo_size(size: &::style::values::computed::Size, basis: Px) -> Option<f32> {
     use ::style::values::computed::Length;
     use ::style::values::generics::length::GenericSize;
     match size {
-        GenericSize::LengthPercentage(lp) => {
-            let basis_px = parent_width.in_px();
-            Some(
-                lp.0.resolve(Length::new(basis_px.to_f32()))
-                    .px()
-                    .as_px()
-                    .in_pt()
-                    .to_f32(),
-            )
-        }
+        GenericSize::LengthPercentage(lp) => Some(
+            lp.0.resolve(Length::new(basis.to_f32()))
+                .px()
+                .as_px()
+                .in_pt()
+                .to_f32(),
+        ),
         _ => None,
     }
 }

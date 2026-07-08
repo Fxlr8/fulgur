@@ -447,16 +447,15 @@ pub(super) fn try_build_absolute_pseudo_image(
     if pseudo_style.has_visual_style() {
         return None;
     }
-    let (basis_w_pt, basis_h_pt) = if let Some(cb) = cb {
-        let (w_px, h_px) = cb.padding_box_size;
-        (w_px.in_pt(), h_px.in_pt())
+    let (basis_w, basis_h) = if let Some(cb) = cb {
+        cb.padding_box_size
     } else {
         (
-            parent.final_layout.size.width.as_px().in_pt(),
-            parent.final_layout.size.height.as_px().in_pt(),
+            parent.final_layout.size.width.as_px(),
+            parent.final_layout.size.height.as_px(),
         )
     };
-    pseudo::build_pseudo_image_entry(pseudo, basis_w_pt, basis_h_pt, assets)
+    pseudo::build_pseudo_image_entry(pseudo, basis_w, basis_h, assets)
 }
 
 // `effective_pseudo_size_px` is no longer used — abs/fixed inset
