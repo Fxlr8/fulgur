@@ -614,13 +614,13 @@ pub fn draw_with_opacity(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoxShadow {
     /// Horizontal offset in points.
-    pub offset_x: f32,
+    pub offset_x: crate::units::Pt,
     /// Vertical offset in points.
-    pub offset_y: f32,
+    pub offset_y: crate::units::Pt,
     /// Blur radius in points. Currently unused for rendering (v0.4.5 draws blur=0).
-    pub blur: f32,
+    pub blur: crate::units::Pt,
     /// Spread radius in points. Negative values shrink the shadow.
-    pub spread: f32,
+    pub spread: crate::units::Pt,
     /// Shadow color as RGBA.
     pub color: [u8; 4],
     /// Whether this is an inset shadow. Currently unsupported (skipped at draw time).

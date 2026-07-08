@@ -80,15 +80,19 @@ fn draw_single_box_shadow(
     w: f32,
     h: f32,
 ) {
-    if shadow.blur > 0.0 {
+    let offset_x = shadow.offset_x.to_f32();
+    let offset_y = shadow.offset_y.to_f32();
+    let blur = shadow.blur.to_f32();
+    let spread = shadow.spread.to_f32();
+    if blur > 0.0 {
         draw_blur_box_shadow(canvas, style, shadow, x, y, w, h);
         return;
     }
 
-    let sx = x + shadow.offset_x - shadow.spread;
-    let sy = y + shadow.offset_y - shadow.spread;
-    let sw = w + 2.0 * shadow.spread;
-    let sh = h + 2.0 * shadow.spread;
+    let sx = x + offset_x - spread;
+    let sy = y + offset_y - spread;
+    let sw = w + 2.0 * spread;
+    let sh = h + 2.0 * spread;
     if sw <= 0.0 || sh <= 0.0 {
         return;
     }
@@ -97,7 +101,7 @@ fn draw_single_box_shadow(
     let shadow_path = if style.has_radius() {
         let radii = expand_radii(
             &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
-            shadow.spread,
+            spread,
         );
         crate::draw_primitives::build_rounded_rect_path(sx, sy, sw, sh, &radii)
     } else {
@@ -158,16 +162,19 @@ fn draw_blur_box_shadow(
     w: f32,
     h: f32,
 ) {
-    let blur = shadow.blur;
+    let offset_x = shadow.offset_x.to_f32();
+    let offset_y = shadow.offset_y.to_f32();
+    let blur = shadow.blur.to_f32();
+    let spread = shadow.spread.to_f32();
     if blur <= 0.0 {
         return;
     }
 
     // inner rect: shadow shape after spread
-    let ix = x + shadow.offset_x - shadow.spread;
-    let iy = y + shadow.offset_y - shadow.spread;
-    let iw = w + 2.0 * shadow.spread;
-    let ih = h + 2.0 * shadow.spread;
+    let ix = x + offset_x - spread;
+    let iy = y + offset_y - spread;
+    let iw = w + 2.0 * spread;
+    let ih = h + 2.0 * spread;
     if iw <= 0.0 || ih <= 0.0 {
         return;
     }
@@ -181,7 +188,7 @@ fn draw_blur_box_shadow(
     // Corner radii for the inner rect (after spread)
     let r_inner = expand_radii(
         &style.border_radii.map(|p| p.map(crate::units::Pt::to_f32)),
-        shadow.spread,
+        spread,
     );
 
     let mask_stops = blur_stops_mask(shadow.color[3], 16);

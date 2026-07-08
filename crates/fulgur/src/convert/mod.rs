@@ -45,38 +45,6 @@ mod table;
 
 use self::style::{absolute_to_rgba, extract_block_style, extract_opacity_visible};
 
-/// CSS px → PDF pt conversion factor (1 CSS px = 0.75 PDF pt).
-///
-/// Taffy lays out in CSS px (because we feed Blitz a CSS px viewport), but
-/// the Drawables / Krilla render path works in pt. Values cross the boundary
-/// through [`px_to_pt`] / [`pt_to_px`] and the tuple helpers
-/// [`layout_in_pt`] / [`size_in_pt`].
-// Single source of the px↔pt constant lives in `crate::units`; alias it here
-// so `px_to_pt` / `pt_to_px` and `units::{Px::in_pt, Pt::in_px}` can never
-// drift (fulgur-2map.1).
-const PX_TO_PT: f32 = crate::units::PX_TO_PT;
-
-/// Convert a CSS-px scalar to PDF pt.
-#[inline]
-pub(crate) fn px_to_pt(v: f32) -> f32 {
-    v * PX_TO_PT
-}
-
-/// Convert a PDF-pt scalar to CSS px. Retained only for the `px_to_pt`
-/// roundtrip test: fulgur-sipv.8 retyped the Blitz-viewport feeders to
-/// `units::Px` (`x.as_pt().in_px()`), so this has no production callers.
-/// Removed together with `px_to_pt` once fulgur-sipv.2 drops the last
-/// `px_to_pt` caller (`shadow.rs`).
-///
-/// Kept present via `#[allow(dead_code)]` rather than `#[cfg(test)]` so the
-/// `PX_TO_PT` doc's `[pt_to_px]` link stays symmetric with the still-live
-/// `[px_to_pt]` sibling until fulgur-sipv.2 removes both together.
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn pt_to_px(v: f32) -> f32 {
-    v / PX_TO_PT
-}
-
 /// Convert a Taffy `Layout` (CSS px) to PDF pt as `(x, y, width, height)`.
 #[inline]
 fn layout_in_pt(layout: &taffy::Layout) -> (Pt, Pt, Pt, Pt) {
@@ -1610,28 +1578,5 @@ mod utility_fn_tests {
         let (w, h) = size_in_pt(size);
         assert_eq!(w, 0.0_f32.as_pt());
         assert_eq!(h, 0.0_f32.as_pt());
-    }
-
-    // --- px_to_pt / pt_to_px roundtrip ---
-
-    #[test]
-    fn px_pt_roundtrip() {
-        for &v in &[0.0f32, 1.0, 12.0, 96.0, 595.0] {
-            let roundtripped = pt_to_px(px_to_pt(v));
-            assert!(
-                (roundtripped - v).abs() < 1e-3,
-                "roundtrip failed for {v}: got {roundtripped}"
-            );
-        }
-    }
-
-    #[test]
-    fn px_to_pt_known_values() {
-        // 1 px = 0.75 pt
-        assert_eq!(px_to_pt(1.0), 0.75);
-        // 4 px = 3 pt
-        assert_eq!(px_to_pt(4.0), 3.0);
-        // 96 px (1 in) = 72 pt
-        assert_eq!(px_to_pt(96.0), 72.0);
     }
 }
