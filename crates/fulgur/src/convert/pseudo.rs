@@ -255,12 +255,19 @@ pub(super) fn inject_inline_pseudo_images(
 
 /// Resolve a stylo `Size` (`width` / `height`) to an absolute `f32` in pt,
 /// or `None` for `auto` and intrinsic keywords.
-fn resolve_pseudo_size(size: &::style::values::computed::Size, parent_width: Px) -> Option<f32> {
+///
+/// `basis` is the containing-block extent (width for `width` / `min-width` /
+/// `max-width`, height for the height-axis siblings) in **CSS px** — the
+/// layout-space Stylo's `LengthPercentage::resolve` expects. See
+/// `.claude/rules/coordinate-system.md` ("Stylo length-percentage
+/// resolution"). The return value is in Pt (matches downstream
+/// `make_image_entry` / `resolve_image_dimensions`).
+fn resolve_pseudo_size(size: &::style::values::computed::Size, basis: Px) -> Option<f32> {
     use ::style::values::computed::Length;
     use ::style::values::generics::length::GenericSize;
     match size {
         GenericSize::LengthPercentage(lp) => Some(
-            lp.0.resolve(Length::new(parent_width.to_f32()))
+            lp.0.resolve(Length::new(basis.to_f32()))
                 .px()
                 .as_px()
                 .in_pt()
