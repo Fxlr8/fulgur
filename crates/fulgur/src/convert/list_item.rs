@@ -354,8 +354,8 @@ fn build_list_item_body(
             .and_then(|p| {
                 pseudo::build_inline_pseudo_image(
                     p,
-                    content_box.width,
-                    content_box.height,
+                    content_box.width.as_pt().in_px(),
+                    content_box.height.as_pt().in_px(),
                     ctx.assets,
                 )
             })
@@ -370,8 +370,8 @@ fn build_list_item_body(
             .and_then(|p| {
                 pseudo::build_inline_pseudo_image(
                     p,
-                    content_box.width,
-                    content_box.height,
+                    content_box.width.as_pt().in_px(),
+                    content_box.height.as_pt().in_px(),
                     ctx.assets,
                 )
             })
