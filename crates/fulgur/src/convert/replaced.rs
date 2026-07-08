@@ -79,6 +79,25 @@ fn maybe_insert_block_for_replaced(
 }
 
 /// Resolve CSS width/height against intrinsic image dimensions + aspect ratio.
+///
+/// Return values are in **PDF pt** — every caller (`make_image_entry`,
+/// `build_inline_pseudo_image`) stamps them onto an `ImageEntry` /
+/// `InlineImage` whose `width`/`height` are typed `Pt`. `Some(w)`/`Some(h)`
+/// arguments are already pt (from `size_in_pt(final_layout)` on the
+/// `<img>` / normal-`content:url()` paths, or from `resolve_pseudo_size`
+/// which folds Stylo's CSS-px result through `Px::in_pt()` on the pseudo
+/// path). Aspect is a unit-neutral ratio, so `(Some, None)` / `(None,
+/// Some)` also produce pt.
+///
+/// The `(None, None)` intrinsic fallback is the trap: `decode_dimensions`
+/// returns raw **device px** from the image header, which per CSS Images 3
+/// §5 correspond to CSS px 1-for-1. We fold to pt here so the arm ends up
+/// pt like every other arm — otherwise an auto-sized pseudo
+/// `content: url(pic.png)` (the only production caller that hits this arm;
+/// `<img>` and normal `content:url()` always pass `Some, Some`) would
+/// render at N pt for an N-CSS-px image, i.e. 4/3× larger than the same
+/// image sized explicitly at `width: Npx` (which resolves through the pt
+/// folding path). fulgur-t82j.
 pub(super) fn resolve_image_dimensions(
     data: &[u8],
     format: crate::image::ImageFormat,
@@ -93,7 +112,7 @@ pub(super) fn resolve_image_dimensions(
         (Some(w), Some(h)) => (w, h),
         (Some(w), None) => (w, if aspect > 0.0 { w / aspect } else { w }),
         (None, Some(h)) => (h * aspect, h),
-        (None, None) => (iw, ih),
+        (None, None) => (iw.as_px().in_pt().to_f32(), ih.as_px().in_pt().to_f32()),
     }
 }
 
@@ -112,16 +131,9 @@ pub(super) fn make_image_entry(
     crate::drawables::ImageEntry {
         image_data: data,
         format,
-        // Nominally PDF pt: the `<img>` path and explicitly-sized
-        // `content: url()` pass `Some(content_w/content_h)` (pt, from
-        // `size_in_pt`). But an AUTO-sized pseudo `content: url()`
-        // (`resolve_pseudo_size` returns `None` for `auto`) reaches the
-        // `(None, None)` arm of `resolve_image_dimensions`, which returns
-        // intrinsic decoded *device px* — that path is production-reachable,
-        // not test-only. Tagging `.as_pt()` preserves the existing f32
-        // verbatim (byte-neutral); whether that device-px fallback should be
-        // `px_to_pt`-scaled is a pre-existing unit-provenance question
-        // tracked in fulgur-t82j, out of scope for this migration.
+        // `resolve_image_dimensions` always returns pt (its arms fold
+        // intrinsic device px through CSS-px→pt when `css_w`/`css_h` are
+        // absent — see the arm doc). fulgur-t82j.
         width: w.as_pt(),
         height: h.as_pt(),
         opacity,
@@ -304,6 +316,8 @@ mod tests {
 
     #[test]
     fn test_make_image_entry_intrinsic_fallback() {
+        // 1x1 intrinsic device px → 1 CSS px → 0.75 pt (CSS Images 3 §5).
+        // Reached by auto-sized pseudo `content: url()` — see fulgur-t82j.
         let img = make_image_entry(
             sample_png_arc(),
             crate::image::ImageFormat::Png,
@@ -312,8 +326,8 @@ mod tests {
             0.5,
             false,
         );
-        assert_eq!(img.width.to_f32(), 1.0);
-        assert_eq!(img.height.to_f32(), 1.0);
+        assert_eq!(img.width.to_f32(), 0.75);
+        assert_eq!(img.height.to_f32(), 0.75);
         assert_eq!(img.opacity, 0.5);
         assert!(!img.visible);
     }
@@ -322,12 +336,12 @@ mod tests {
 
     #[test]
     fn resolve_image_dimensions_invalid_data_falls_back_to_1x1_intrinsic() {
-        // Corrupt bytes → decode_dimensions returns Err → unwrap_or((1,1))
-        // With css_w=None, css_h=None the intrinsic size (1,1) is returned.
+        // Corrupt bytes → decode_dimensions returns Err → unwrap_or((1,1)) →
+        // 1 CSS px → 0.75 pt (see arm doc / fulgur-t82j).
         let (w, h) =
             resolve_image_dimensions(b"not-a-png", crate::image::ImageFormat::Png, None, None);
-        assert_eq!(w, 1.0);
-        assert_eq!(h, 1.0);
+        assert_eq!(w, 0.75);
+        assert_eq!(h, 0.75);
     }
 
     #[test]
@@ -337,6 +351,22 @@ mod tests {
             resolve_image_dimensions(b"junk", crate::image::ImageFormat::Png, Some(20.0), None);
         assert_eq!(w, 20.0);
         assert_eq!(h, 20.0);
+    }
+
+    // fulgur-t82j regression: the `(None, None)` arm must return pt, not
+    // device px. This is the arm reached exclusively by the auto-sized
+    // pseudo `content: url()` path (both block and inline). Left as raw
+    // device px, an N-CSS-px intrinsic image renders at N pt (4/3× the
+    // pt size of the equivalent `width: Npx` control that resolves via
+    // `resolve_pseudo_size` → pt). The fold to pt keeps auto and
+    // explicit-size sibling renders spatially consistent.
+    #[test]
+    fn resolve_image_dimensions_intrinsic_arm_folds_device_px_to_pt() {
+        // 1x1 device px intrinsic → 1 CSS px → 0.75 pt.
+        let (w, h) =
+            resolve_image_dimensions(TEST_PNG_1X1, crate::image::ImageFormat::Png, None, None);
+        assert_eq!(w, 0.75, "intrinsic width must be pt, not device px");
+        assert_eq!(h, 0.75, "intrinsic height must be pt, not device px");
     }
 
     // ── DOM-based helpers ────────────────────────────────────────────
