@@ -6637,4 +6637,204 @@ h2 { string-set: chapter-title content(text); }
             "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
         );
     }
+
+    // ── break-after: page in nested block subtree (lines 2263-2279) ─────────────
+
+    /// `break-after: page` on a child inside a non-body container must close
+    /// the parent's current-page fragment and advance page_index, so the
+    /// sibling that follows lands on page 1.
+    #[test]
+    fn fragment_block_subtree_break_after_page_pushes_sibling_to_next_page() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div>
+                <div style="height: 100px; break-after: page"></div>
+                <div style="height: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "break-after: page must push the following sibling onto page 1; geom={geom:?}"
+        );
+    }
+
+    // ── zero-height body-direct children with break (lines 639-668) ─────────────
+
+    /// A zero-height body-direct element with `break-before: page` must fire
+    /// a page break when cursor_y > 0 (lines 643-644).
+    #[test]
+    fn zero_height_body_direct_break_before_page_fires_page_break() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 100px"></div>
+              <div style="height: 0px; break-before: page"></div>
+              <div style="height: 100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "break-before: page on a zero-height body-direct child must advance to page 1; \
+             geom={geom:?}"
+        );
+    }
+
+    /// A zero-height body-direct element with `break-after: page` must fire
+    /// a page break (lines 667-668).
+    #[test]
+    fn zero_height_body_direct_break_after_page_fires_page_break() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 100px"></div>
+              <div style="height: 0px; break-after: page"></div>
+              <div style="height: 100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "break-after: page on a zero-height body-direct child must advance to page 1; \
+             geom={geom:?}"
+        );
+    }
+
+    // ── zero-height nested children with break (lines 1900-1953) ────────────────
+
+    /// A zero-height element inside a block container with `break-before: page`
+    /// must fire a page break and flush a parent fragment (lines 1900-1918).
+    #[test]
+    fn zero_height_nested_break_before_page_fires_page_break() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div>
+                <div style="height: 100px"></div>
+                <div style="height: 0px; break-before: page"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "break-before: page on a zero-height nested child must advance to page 1; \
+             geom={geom:?}"
+        );
+    }
+
+    /// A zero-height element inside a block container with `break-after: page`
+    /// must fire a page break and flush a parent fragment (lines 1936-1953).
+    #[test]
+    fn zero_height_nested_break_after_page_fires_page_break() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div>
+                <div style="height: 100px"></div>
+                <div style="height: 0px; break-after: page"></div>
+                <div style="height: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "break-after: page on a zero-height nested child must advance to page 1; \
+             geom={geom:?}"
+        );
+    }
+
+    // ── record_subtree_walk: position:fixed skip (line 3386) ────────────────────
+
+    /// A `position: fixed` child inside an abs subtree must be skipped by
+    /// `record_subtree_fragments_at_offset`'s walk (line 3386 `continue`).
+    /// The fixed pass handles those separately; the abs walk must not emit them.
+    #[test]
+    fn record_subtree_walk_skips_position_fixed_child() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="abs_root" style="position: absolute; top: 0; left: 0; width: 200px; height: 200px">
+                <div id="fixed_child" style="position: fixed; top: 10px; left: 10px; width: 50px; height: 50px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let abs_id = find_by_id(doc.deref_mut(), "abs_root").expect("abs_root");
+        let fixed_id = find_by_id(doc.deref_mut(), "fixed_child").expect("fixed_child");
+        let mut geom = PaginationGeometryTable::new();
+        super::record_subtree_fragments_at_offset(
+            &mut geom,
+            doc.deref_mut(),
+            abs_id,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            800.0,
+            800.0,
+            1,
+            false,
+            &mut 0,
+        );
+        assert!(
+            !geom.contains_key(&fixed_id),
+            "position:fixed child must not be emitted by the abs subtree walk; \
+             geom keys={:?}",
+            geom.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // ── record_subtree_walk: position:absolute recursion (lines 3387-3441) ──────
+
+    /// A `position: absolute` child nested inside an abs subtree must be
+    /// recursively walked and appear in geometry (lines 3387-3441).
+    #[test]
+    fn record_subtree_walk_recurses_into_nested_position_absolute_child() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="abs_root" style="position: absolute; top: 0; left: 0; width: 200px; height: 200px">
+                <div id="nested_abs" style="position: absolute; top: 10px; left: 10px; width: 80px; height: 80px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let abs_id = find_by_id(doc.deref_mut(), "abs_root").expect("abs_root");
+        let nested_id = find_by_id(doc.deref_mut(), "nested_abs").expect("nested_abs");
+        let mut geom = PaginationGeometryTable::new();
+        super::record_subtree_fragments_at_offset(
+            &mut geom,
+            doc.deref_mut(),
+            abs_id,
+            (0.0, 0.0),
+            (0.0, 0.0),
+            800.0,
+            800.0,
+            1,
+            false,
+            &mut 0,
+        );
+        assert!(
+            geom.contains_key(&nested_id),
+            "position:absolute child must be recursively walked and appear in geometry; \
+             geom keys={:?}",
+            geom.keys().collect::<Vec<_>>()
+        );
+    }
 }
