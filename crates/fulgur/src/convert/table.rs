@@ -37,7 +37,7 @@ fn convert_table(
     out.tables.insert(
         node.id,
         crate::drawables::TableEntry {
-            style: style.clone(),
+            style,
             opacity,
             visible,
             id: extract_block_id(node),
