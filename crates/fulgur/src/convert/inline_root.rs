@@ -57,12 +57,7 @@ pub(super) fn try_convert(
         .and_then(|id| doc.get_node(id))
         .filter(|p| !pseudo::is_block_pseudo(p))
         .and_then(|p| {
-            pseudo::build_inline_pseudo_image(
-                p,
-                content_box.width.as_pt().in_px(),
-                content_box.height.as_pt().in_px(),
-                ctx.assets,
-            )
+            pseudo::build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
         })
         .map(|mut img| {
             pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
@@ -73,12 +68,7 @@ pub(super) fn try_convert(
         .and_then(|id| doc.get_node(id))
         .filter(|p| !pseudo::is_block_pseudo(p))
         .and_then(|p| {
-            pseudo::build_inline_pseudo_image(
-                p,
-                content_box.width.as_pt().in_px(),
-                content_box.height.as_pt().in_px(),
-                ctx.assets,
-            )
+            pseudo::build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
         })
         .map(|mut img| {
             pseudo::attach_link_to_inline_image(&mut img, doc, node.id);

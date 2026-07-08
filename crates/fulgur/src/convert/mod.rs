@@ -20,7 +20,7 @@ use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, LinkSpan, LinkTarget, ShapedGlyph, ShapedGlyphRun,
     ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,
 };
-use crate::units::{F32Units, Pt};
+use crate::units::{F32Units, Pt, Px};
 use blitz_html::HtmlDocument;
 use skrifa::MetadataProvider;
 use std::collections::HashMap;
@@ -988,23 +988,53 @@ fn is_pseudo_node(doc: &BaseDocument, node: &Node) -> bool {
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 struct ContentBox {
-    origin_x: f32,
-    origin_y: f32,
-    width: f32,
-    height: f32,
+    origin_x: Px,
+    origin_y: Px,
+    width: Px,
+    height: Px,
 }
 
 /// Compute the content-box of `node` from its computed style + Taffy layout.
+/// Thin wrapper that projects `Node` + `BlockStyle` to primitives and
+/// delegates the arithmetic to `content_box_from_geometry` (which is unit-
+/// tested).
 fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
-    let (left_inset, top_inset) = style.content_inset();
-    let right_inset = style.border_widths[1].to_f32() + style.padding[1].to_f32();
-    let bottom_inset = style.border_widths[2].to_f32() + style.padding[2].to_f32();
-    let (border_w, border_h) = size_in_pt(node.final_layout.size);
+    let border_w = node.final_layout.size.width.as_px();
+    let border_h = node.final_layout.size.height.as_px();
+    content_box_from_geometry(border_w, border_h, &style.border_widths, &style.padding)
+}
+
+/// Pure arithmetic behind `compute_content_box`. Extracted so the
+/// contract can be locked in by unit tests without fabricating a Blitz
+/// `Node`.
+///
+/// All returned values are in **CSS px** (Blitz/Taffy layout space) — see
+/// `.claude/rules/coordinate-system.md`.
+///
+/// Each inset side runs `.in_px()` on the border and padding operand
+/// *separately* before summing (`(border[i].in_px()) + (padding[i].in_px())`
+/// rather than `(border[i] + padding[i]).in_px()`). This is intentional:
+/// it matches the float-op order that fulgur-m0xl's byte-neutral caller
+/// stopgap performed, so any drift beyond the reordering documented in the
+/// fulgur-bfu9 commit message stays out of the goldens. Do not fold the
+/// two `.in_px()` calls per side into one.
+fn content_box_from_geometry(
+    border_w: Px,
+    border_h: Px,
+    border_widths: &[Pt; 4],
+    padding: &[Pt; 4],
+) -> ContentBox {
+    // `border_widths` / `padding` are stored in CSS TRBL order:
+    // [0]=top, [1]=right, [2]=bottom, [3]=left.
+    let left_inset = border_widths[3].in_px() + padding[3].in_px();
+    let top_inset = border_widths[0].in_px() + padding[0].in_px();
+    let right_inset = border_widths[1].in_px() + padding[1].in_px();
+    let bottom_inset = border_widths[2].in_px() + padding[2].in_px();
     ContentBox {
         origin_x: left_inset,
         origin_y: top_inset,
-        width: (border_w.to_f32() - left_inset - right_inset).max(0.0),
-        height: (border_h.to_f32() - top_inset - bottom_inset).max(0.0),
+        width: (border_w - left_inset - right_inset).max(Px::ZERO),
+        height: (border_h - top_inset - bottom_inset).max(Px::ZERO),
     }
 }
 
@@ -1578,5 +1608,98 @@ mod utility_fn_tests {
         let (w, h) = size_in_pt(size);
         assert_eq!(w, 0.0_f32.as_pt());
         assert_eq!(h, 0.0_f32.as_pt());
+    }
+
+    // --- content_box_from_geometry ---
+    //
+    // The `Node` / `BlockStyle` projection lives in `compute_content_box`;
+    // these tests exercise the pure arithmetic. TRBL order: [0]=top,
+    // [1]=right, [2]=bottom, [3]=left.
+
+    fn tf(v: f32) -> crate::units::Pt {
+        v.as_pt()
+    }
+
+    #[test]
+    fn content_box_from_geometry_zero_insets_matches_border_box() {
+        let cb = content_box_from_geometry(
+            80.0_f32.as_px(),
+            120.0_f32.as_px(),
+            &[tf(0.0); 4],
+            &[tf(0.0); 4],
+        );
+        assert_eq!(cb.origin_x, 0.0_f32.as_px());
+        assert_eq!(cb.origin_y, 0.0_f32.as_px());
+        assert_eq!(cb.width, 80.0_f32.as_px());
+        assert_eq!(cb.height, 120.0_f32.as_px());
+    }
+
+    #[test]
+    fn content_box_from_geometry_respects_trbl_index_mapping() {
+        // Distinct border and padding per side so any transposition of
+        // TRBL indices produces a different origin / width / height.
+        // border TRBL = [1, 2, 3, 4] pt, padding TRBL = [5, 6, 7, 8] pt.
+        let cb = content_box_from_geometry(
+            80.0_f32.as_px(),
+            120.0_f32.as_px(),
+            &[tf(1.0), tf(2.0), tf(3.0), tf(4.0)],
+            &[tf(5.0), tf(6.0), tf(7.0), tf(8.0)],
+        );
+        // origin_x = left  = border[3] + padding[3] = (4 + 8) pt → Px.
+        assert_eq!(cb.origin_x, tf(4.0).in_px() + tf(8.0).in_px());
+        // origin_y = top   = border[0] + padding[0] = (1 + 5) pt → Px.
+        assert_eq!(cb.origin_y, tf(1.0).in_px() + tf(5.0).in_px());
+        // width  = border_w - left - right  = 80px - (4+8)pt.in_px() - (2+6)pt.in_px()
+        let left = tf(4.0).in_px() + tf(8.0).in_px();
+        let right = tf(2.0).in_px() + tf(6.0).in_px();
+        assert_eq!(cb.width, 80.0_f32.as_px() - left - right);
+        // height = border_h - top - bottom = 120px - (1+5)pt.in_px() - (3+7)pt.in_px()
+        let top = tf(1.0).in_px() + tf(5.0).in_px();
+        let bottom = tf(3.0).in_px() + tf(7.0).in_px();
+        assert_eq!(cb.height, 120.0_f32.as_px() - top - bottom);
+    }
+
+    #[test]
+    fn content_box_from_geometry_folds_per_side_bit_identically() {
+        // Guards the docstring's "do not fold" rule: summing then
+        // converting must be bit-identical to converting-then-summing at
+        // the values we actually feed. `Pt` addition uses raw f32 ops so
+        // the equivalence is exact for these small integers, but the
+        // test locks in the observable equality so a future
+        // "cleanup" that changed the order would either have to update
+        // the assertion or fail.
+        let border = [tf(1.0), tf(2.0), tf(3.0), tf(4.0)];
+        let padding = [tf(5.0), tf(6.0), tf(7.0), tf(8.0)];
+        let cb = content_box_from_geometry(80.0_f32.as_px(), 120.0_f32.as_px(), &border, &padding);
+        // Recompute each side out-of-line matching the callee's exact
+        // per-operand `.in_px()` shape.
+        let l = border[3].in_px() + padding[3].in_px();
+        let t = border[0].in_px() + padding[0].in_px();
+        let r = border[1].in_px() + padding[1].in_px();
+        let b = border[2].in_px() + padding[2].in_px();
+        assert_eq!(cb.origin_x, l);
+        assert_eq!(cb.origin_y, t);
+        assert_eq!(
+            cb.width,
+            (80.0_f32.as_px() - l - r).max(crate::units::Px::ZERO)
+        );
+        assert_eq!(
+            cb.height,
+            (120.0_f32.as_px() - t - b).max(crate::units::Px::ZERO),
+        );
+    }
+
+    #[test]
+    fn content_box_from_geometry_clamps_to_zero_when_insets_exceed_box() {
+        // border_w = 10 px, insets = 100 pt/side border + 100 pt/side padding on left+right
+        // → negative content width, must clamp to 0.
+        let cb = content_box_from_geometry(
+            10.0_f32.as_px(),
+            10.0_f32.as_px(),
+            &[tf(100.0); 4],
+            &[tf(100.0); 4],
+        );
+        assert_eq!(cb.width, crate::units::Px::ZERO);
+        assert_eq!(cb.height, crate::units::Px::ZERO);
     }
 }

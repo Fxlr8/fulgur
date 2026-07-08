@@ -150,12 +150,7 @@ fn build_block_pseudo_image_entries(
         if is_absolutely_positioned(pseudo) {
             return None;
         }
-        let entry = build_pseudo_image_entry(
-            pseudo,
-            parent_cb.width.as_pt().in_px(),
-            parent_cb.height.as_pt().in_px(),
-            assets,
-        )?;
+        let entry = build_pseudo_image_entry(pseudo, parent_cb.width, parent_cb.height, assets)?;
         Some((id, entry))
     };
     (load(parent.before), load(parent.after))
