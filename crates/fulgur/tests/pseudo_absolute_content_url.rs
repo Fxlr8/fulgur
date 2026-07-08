@@ -184,7 +184,7 @@ fn absolute_pseudo_with_right_bottom_offsets_by_image_size() {
 
 /// Regression: percentage `width` / `height` on an abs `content: url(...)`
 /// pseudo must resolve against the CB's padding-box in **pt** -- the
-/// `build_pseudo_image` helper does `pt_to_px(parent_width)` internally.
+/// `build_pseudo_image` helper divides by `PX_TO_PT` (pt→px) internally.
 /// Passing CSS-px dims (as `cb.padding_box_size` is documented) makes the
 /// percentage 4/3x too large.
 #[test]
@@ -199,8 +199,8 @@ fn absolute_pseudo_percentage_size_resolves_against_padding_box_in_pt() {
 
     // Parent: position:relative, 400 px wide. CB padding-box width = 400 px = 300 pt.
     // Pseudo: width: 50%; -> expected = 150 pt.
-    // Bug case: basis treated as pt, pt_to_px(400) = ~533, then *50%/2 ->
-    // px_to_pt(266) = 200 pt. (4/3x too large.)
+    // Bug case: basis treated as pt, 400 / 0.75 = ~533 (pt→px), then *50%/2 ->
+    // 266 * 0.75 = 200 pt (px→pt). (4/3x too large.)
     //
     // We do NOT specify height -- let the image use its intrinsic 1px (=1pt)
     // height to keep the assertion focused on width.

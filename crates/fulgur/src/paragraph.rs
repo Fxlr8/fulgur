@@ -821,7 +821,7 @@ pub fn draw_shaped_lines(
                         // opacity on the inline-block are honoured. The
                         // helpers compute descendant positions from
                         // body-relative geometry as
-                        // `margin + body_offset + px_to_pt(frag.x)`, so we
+                        // `margin + body_offset + frag.x.in_pt()`, so we
                         // dispatch at the body-relative `geo_pt` and use
                         // `push_transform(translate(off_x, off_y))` to
                         // shift the whole subtree to the inline-flow

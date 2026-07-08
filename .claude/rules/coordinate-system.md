@@ -7,13 +7,13 @@ Always consult this file when writing or reviewing rendering code.
 ## Unit layers in the pipeline
 
 ```text
-Blitz/Taffy (CSS px) ──px_to_pt()──► Pageable tree / Krilla (PDF pt)
-                     ◄──pt_to_px()──
+Blitz/Taffy (CSS px) ──Px::in_pt()──► Pageable tree / Krilla (PDF pt)
+                     ◄──Pt::in_px()──
 ```
 
 | Layer | Unit | Notes |
 |-------|------|-------|
-| Blitz input (viewport, width) | CSS px | convert with `pt_to_px(v)` before passing |
+| Blitz input (viewport, width) | CSS px | convert pt-valued input via `v.as_pt().in_px()` before passing |
 | Taffy `final_layout` | CSS px | extract via `layout_in_pt()` / `size_in_pt()` |
 | Pageable tree internals | PDF pt | |
 | Krilla Surface | PDF pt | |
@@ -21,7 +21,8 @@ Blitz/Taffy (CSS px) ──px_to_pt()──► Pageable tree / Krilla (PDF pt)
 | `Margin::uniform(v)` | **pt** | |
 | `Margin::uniform_mm(v)` | **mm** | |
 
-Conversion constant: `1 CSS px = 0.75 PDF pt` (`PX_TO_PT = 0.75`, `convert.rs:35`)
+Conversion constant: `1 CSS px = 0.75 PDF pt` (`PX_TO_PT = 0.75`, defined in
+`crates/fulgur/src/units.rs`; applied via `units::Px::in_pt` / `units::Pt::in_px`).
 
 ## Reading the `Px` / `Pt` vocabulary in a diff
 
@@ -56,23 +57,31 @@ docstring (`crates/fulgur/src/units.rs`).
 Forgetting a conversion produces a **4/3× or 3/4× scale bug**.
 
 ```rust
-// WRONG: pass pt value directly
+// WRONG: pass pt value directly (a bare f32 with no unit witness)
 parse_html_with_local_resources(html, config.content_width(), ...)
 
-// CORRECT: convert pt → CSS px first
-parse_html_with_local_resources(html, pt_to_px(config.content_width()), ...)
+// CORRECT: tag as Pt at the source and convert to Px explicitly. The trailing
+// `.to_f32()` is only there because the Blitz FFI still takes bare `f32`;
+// keep the typed hop above it so the unit intent is visible in the diff.
+parse_html_with_local_resources(
+    html,
+    config.content_width().as_pt().in_px().to_f32(),
+    ...,
+)
 ```
 
 ```rust
 // WRONG: use Taffy layout values directly
 let width = node.final_layout.size.width;
 
-// CORRECT: go through px_to_pt / size_in_pt
+// CORRECT: go through the typed size_in_pt / layout_in_pt helpers, which
+// tag Taffy's raw f32 as Px and drop to Pt in one step (Px::in_pt)
 let (width, height) = size_in_pt(node.final_layout.size);
 let (x, y, width, height) = layout_in_pt(&node.final_layout);
 ```
 
-Helper definitions: `convert.rs:37-63`
+Helper definitions: `size_in_pt` / `layout_in_pt` in `crates/fulgur/src/convert/mod.rs`;
+`units::{Px, Pt, F32Units}` and `PX_TO_PT` in `crates/fulgur/src/units.rs`.
 
 ## Exception: `compute_transform` arguments
 

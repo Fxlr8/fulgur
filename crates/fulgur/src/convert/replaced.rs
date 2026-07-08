@@ -361,7 +361,7 @@ mod tests {
     // `resolve_pseudo_size` → pt). The fold to pt keeps auto and
     // explicit-size sibling renders spatially consistent.
     #[test]
-    fn resolve_image_dimensions_intrinsic_arm_folds_device_px_to_pt() {
+    fn resolve_image_dimensions_intrinsic_arm_folds_device_px_via_in_pt() {
         // 1x1 device px intrinsic → 1 CSS px → 0.75 pt.
         let (w, h) =
             resolve_image_dimensions(TEST_PNG_1X1, crate::image::ImageFormat::Png, None, None);

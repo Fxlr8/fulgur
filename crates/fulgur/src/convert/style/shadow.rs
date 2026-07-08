@@ -6,8 +6,8 @@
 //! a `log::warn!`.
 
 use super::{StyleContext, absolute_to_rgba};
-use crate::convert::px_to_pt;
 use crate::draw_primitives::BlockStyle;
+use crate::units::F32Units;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     let shadow_list = ctx.styles.clone_box_shadow();
@@ -22,10 +22,10 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
             continue; // fully transparent — skip
         }
         style.box_shadows.push(crate::draw_primitives::BoxShadow {
-            offset_x: px_to_pt(shadow.base.horizontal.px()),
-            offset_y: px_to_pt(shadow.base.vertical.px()),
-            blur: px_to_pt(blur_px),
-            spread: px_to_pt(shadow.spread.px()),
+            offset_x: shadow.base.horizontal.px().as_px().in_pt(),
+            offset_y: shadow.base.vertical.px().as_px().in_pt(),
+            blur: blur_px.as_px().in_pt(),
+            spread: shadow.spread.px().as_px().in_pt(),
             color: rgba,
             inset: false,
         });
@@ -103,7 +103,7 @@ mod tests {
         );
     }
 
-    /// Non-zero spread radius is stored via `px_to_pt(shadow.spread.px())`.
+    /// Non-zero spread radius is stored via `shadow.spread.px().as_px().in_pt()`.
     /// The shadow is actually drawn, so the PDF must differ from the no-shadow baseline.
     #[test]
     fn shadow_with_spread_radius() {
