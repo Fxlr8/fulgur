@@ -20,7 +20,7 @@ use crate::paragraph::{
     InlineImage, LineFontMetrics, LineItem, LinkSpan, LinkTarget, ShapedGlyph, ShapedGlyphRun,
     ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,
 };
-use crate::units::{F32Units, Pt};
+use crate::units::{F32Units, Pt, Px};
 use blitz_html::HtmlDocument;
 use skrifa::MetadataProvider;
 use std::collections::HashMap;
@@ -988,23 +988,25 @@ fn is_pseudo_node(doc: &BaseDocument, node: &Node) -> bool {
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 struct ContentBox {
-    origin_x: f32,
-    origin_y: f32,
-    width: f32,
-    height: f32,
+    origin_x: Px,
+    origin_y: Px,
+    width: Px,
+    height: Px,
 }
 
 /// Compute the content-box of `node` from its computed style + Taffy layout.
 fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
-    let (left_inset, top_inset) = style.content_inset();
-    let right_inset = style.border_widths[1].to_f32() + style.padding[1].to_f32();
-    let bottom_inset = style.border_widths[2].to_f32() + style.padding[2].to_f32();
-    let (border_w, border_h) = size_in_pt(node.final_layout.size);
+    let left_inset = style.border_widths[3].in_px() + style.padding[3].in_px();
+    let top_inset = style.border_widths[0].in_px() + style.padding[0].in_px();
+    let right_inset = style.border_widths[1].in_px() + style.padding[1].in_px();
+    let bottom_inset = style.border_widths[2].in_px() + style.padding[2].in_px();
+    let border_w = node.final_layout.size.width.as_px();
+    let border_h = node.final_layout.size.height.as_px();
     ContentBox {
         origin_x: left_inset,
         origin_y: top_inset,
-        width: (border_w.to_f32() - left_inset - right_inset).max(0.0),
-        height: (border_h.to_f32() - top_inset - bottom_inset).max(0.0),
+        width: (border_w - left_inset - right_inset).max(Px::ZERO),
+        height: (border_h - top_inset - bottom_inset).max(Px::ZERO),
     }
 }
 
