@@ -74,8 +74,7 @@ use taffy::{
 /// `x`, `y`, `width`, `height` are type-enforced CSS pixels
 /// ([`crate::units::Px`]) — Taffy's native unit — and `y` is measured from
 /// the page's content-box top. The convert / draw layer is responsible for
-/// `px_to_pt` conversion ([`crate::units::Px::in_pt`]) before reaching
-/// Krilla.
+/// px→pt conversion ([`crate::units::Px::in_pt`]) before reaching Krilla.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fragment {
     pub page_index: u32,
