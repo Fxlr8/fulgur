@@ -1866,6 +1866,37 @@ fn render_v2_smoke_li_pseudo_image_outside_marker_no_text() {
 }
 
 #[test]
+fn render_v2_smoke_abs_positioned_pseudo_image() {
+    // Targets `convert/positioned.rs::try_build_absolute_pseudo_image`
+    // (Path A of pseudo image sizing). Guards the Px-basis rewrite in
+    // fulgur-m0xl -- which removed the Px→Pt→Px round-trip through
+    // `AbsCb.padding_box_size` -- so a future refactor cannot silently
+    // re-introduce the conversion pair. VRT / examples do not cover
+    // `position: absolute` × `content: url()` today.
+    let mut bundle = AssetBundle::default();
+    bundle.add_image("dot.png", PR290_PSEUDO_PNG.to_vec());
+    let html = r#"<!DOCTYPE html><html><head><style>
+        .parent { position: relative; width: 100pt; height: 40pt; }
+        .parent::before {
+            content: url("dot.png");
+            position: absolute;
+            top: 4pt;
+            left: 4pt;
+            width: 8pt;
+            height: 8pt;
+        }
+    </style></head><body>
+        <div class="parent"></div>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("v2 render");
+    assert!(!pdf.is_empty());
+}
+
+#[test]
 fn render_v2_smoke_li_with_opacity_records_opacity_descendants() {
     // Targets `convert/list_item.rs:434-435` — the `opacity_descendants`
     // arm of `record_li_clip_opacity_descendants`. The `<li>` has opacity
