@@ -636,7 +636,7 @@ mod tests {
     /// A line with no items (text-only placeholder) and a paragraph-relative
     /// baseline. `baseline` here is the offset from the paragraph top, matching
     /// the convention used by `extract_paragraph` (which stores
-    /// `px_to_pt(parley_metrics.baseline)` — a paragraph-relative value).
+    /// `parley_metrics.baseline.as_px().in_pt()` — a paragraph-relative value).
     fn text_line(height: f32, baseline: f32) -> ShapedLine {
         ShapedLine {
             height: height.as_pt(),

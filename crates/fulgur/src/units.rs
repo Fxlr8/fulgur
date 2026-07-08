@@ -266,7 +266,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn px_to_pt_and_back() {
+    fn px_pt_roundtrip() {
         assert_eq!(Px(4.0).in_pt(), Pt(3.0));
         assert_eq!(Pt(3.0).in_px(), Px(4.0));
     }

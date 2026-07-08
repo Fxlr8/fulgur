@@ -88,7 +88,7 @@ mod tests {
     use style::values::specified::BorderStyle as BS;
 
     #[test]
-    fn resolve_radius_absolute_px_to_pt() {
+    fn resolve_radius_absolute_via_in_pt() {
         // An absolute 8 CSS px radius converts to 8 * 0.75 = 6 pt, and the
         // basis is irrelevant for an absolute length (pass a nonzero basis to
         // prove it is ignored).

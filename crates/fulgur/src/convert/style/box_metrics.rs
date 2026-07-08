@@ -24,7 +24,7 @@ mod tests {
     use crate::draw_primitives::BlockStyle;
 
     #[test]
-    fn px_to_pt_conversion_top_right_bottom_left() {
+    fn px_pt_conversion_top_right_bottom_left() {
         // 1 CSS px = 0.75 pt; pick distinct px values so an off-by-one
         // axis swap would surface in the assertion.
         let layout = taffy::Layout {

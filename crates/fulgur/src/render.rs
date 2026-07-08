@@ -729,7 +729,7 @@ fn draw_v2_page(
 ///
 /// Called by `paragraph::draw_shaped_lines` for `LineItem::InlineBox`.
 /// `(x_pt, y_pt)` is the body-relative dispatch position
-/// (`margin + body_offset + px_to_pt(content_frag.x)`); the active
+/// (`margin + body_offset + content_frag.x.in_pt()`); the active
 /// translate transform shifts the entire subtree to the inline-flow
 /// position computed by the paragraph render path.
 #[allow(clippy::too_many_arguments)]
@@ -1174,7 +1174,7 @@ pub(crate) fn dispatch_fragment(
 /// in PDF pt (per the `ParagraphSlice` doc on `drawables.rs`). Resolve
 /// the container's body-relative page position via
 /// `geometry[container_node_id]` — same shape as the main loop's
-/// `(margin_left_pt + px_to_pt(frag.x), margin_top_pt + px_to_pt(frag.y))`
+/// `(margin_left_pt + frag.x.in_pt(), margin_top_pt + frag.y.in_pt())`
 /// — and add the slice origin. Honour the source paragraph's `visible`
 /// and `opacity` exactly like `draw_paragraph_v2`. `lines` are
 /// pre-rebased (Task 7) so each slice's first line has
@@ -4544,7 +4544,7 @@ mod tests {
 
     #[test]
     fn paragraph_lines_for_page_not_split_returns_all_lines() {
-        // px_to_pt(64px) ≈ 48pt (3 × 16pt lines). Non-split path returns
+        // 64px × 0.75 ≈ 48pt (3 × 16pt lines). Non-split path returns
         // all lines unchanged — baseline values are preserved as-is.
         let lines = vec![
             make_line(16.0, 12.0),
@@ -4565,7 +4565,7 @@ mod tests {
     #[test]
     fn paragraph_lines_for_page_split_first_page_returns_first_lines() {
         // Lines are 12pt each. Fragment heights are in CSS px;
-        // px_to_pt(16px) = 12pt (PX_TO_PT = 0.75), so 16px per line.
+        // 16px × PX_TO_PT (0.75) = 12pt, so 16px per line.
         // Page 0: consumed = 0, baseline unchanged.
         let lines = vec![make_line(12.0, 9.0), make_line(12.0, 21.0)];
         let fragments = vec![
@@ -4827,18 +4827,18 @@ mod tests {
     }
 
     #[test]
-    fn table_box_size_no_layout_size_nonzero_frag_uses_px_to_pt_height() {
-        // frag.height = 40 CSS px → px_to_pt(40) = 30 PDF pt (factor 0.75)
+    fn table_box_size_no_layout_size_nonzero_frag_uses_in_pt_height() {
+        // frag.height = 40 CSS px → 40 × 0.75 = 30 PDF pt (via Px::in_pt)
         let entry = make_table_entry_for_size(None, 150.0, 99.0);
         let frag = make_frag_with_height(40.0);
         let (w, h) = table_box_size(&entry, &frag);
         assert!((w - 150.0).abs() < 0.001, "width falls back to entry.width");
-        assert!((h - 30.0).abs() < 0.01, "height = px_to_pt(frag.height)");
+        assert!((h - 30.0).abs() < 0.01, "height = frag.height.in_pt()");
     }
 
     #[test]
     fn table_box_size_no_layout_size_zero_frag_falls_back_to_cached_height() {
-        // When frag.height is 0, px_to_pt(0) = 0.0 which fails the `> 0.0`
+        // When frag.height is 0, Px(0).in_pt() = Pt(0.0) which fails the `> 0.0`
         // guard, so cached_height is used instead.
         let entry = make_table_entry_for_size(None, 150.0, 55.0);
         let frag = make_frag_with_height(0.0);
@@ -5131,9 +5131,9 @@ mod tests {
     #[test]
     fn paragraph_lines_for_page_split_rebases_inline_image_computed_y() {
         // Two 12pt lines (each corresponds to a 16px CSS-px fragment).
-        // px_to_pt(16px) = 12pt (PX_TO_PT = 0.75).
+        // 16px × PX_TO_PT (0.75) = 12pt.
         // Line 1 contains an Image whose computed_y = 15.0 is paragraph-absolute.
-        // On page 1: consumed = px_to_pt(16px) = 12pt.
+        // On page 1: consumed = Px(16).in_pt() = 12pt.
         // After rebasing: img.computed_y = 15.0 − 12.0 = 3.0.
         let img = crate::paragraph::InlineImage {
             data: Arc::new(vec![]),

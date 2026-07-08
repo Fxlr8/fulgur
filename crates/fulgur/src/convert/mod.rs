@@ -1528,7 +1528,7 @@ mod utility_fn_tests {
     // --- layout_in_pt ---
 
     #[test]
-    fn layout_in_pt_converts_px_to_pt() {
+    fn layout_in_pt_converts_px_pt() {
         // 1 CSS px = 0.75 PDF pt, so 4 px → 3 pt, 100 px → 75 pt.
         let layout = taffy::Layout {
             location: taffy::geometry::Point { x: 4.0, y: 8.0 },
@@ -1558,7 +1558,7 @@ mod utility_fn_tests {
     // --- size_in_pt ---
 
     #[test]
-    fn size_in_pt_converts_px_to_pt() {
+    fn size_in_pt_converts_px_pt() {
         // 80 px → 60 pt, 120 px → 90 pt
         let size = taffy::geometry::Size {
             width: 80.0,
