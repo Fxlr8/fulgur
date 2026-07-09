@@ -3426,7 +3426,7 @@ pub(crate) struct MarginBoxRenderer<'a> {
     pub render_cache: RenderCache,
     /// fulgur-qgy7: per-page implicit `href` for
     /// `target-*(attr(href), ...)` evaluated inside `@page` margin
-    /// boxes. Built once per render pass by `engine::render_pass`.
+    /// boxes. Built once per render pass by `engine::Engine::layout_to_drawables`.
     pub implicit_href_by_page: &'a BTreeMap<usize, String>,
 }
 
