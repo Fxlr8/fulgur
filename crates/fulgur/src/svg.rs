@@ -102,6 +102,7 @@ mod tests {
                     link_collector: None,
                     tag_collector: None,
                     link_run_node_id: None,
+                    in_marked_content: false,
                 };
                 svg.draw(
                     &mut canvas,

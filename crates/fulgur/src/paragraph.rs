@@ -590,15 +590,28 @@ impl RunRegionTracker {
     /// Switch to the region identified by `new_span_ptr`, opening/closing
     /// `start_tagged` regions as needed and recording closed regions on
     /// `canvas.tag_collector`.
+    ///
+    /// When `canvas.in_marked_content` is already set (per-run tagging invoked
+    /// under an outer marked-content sequence — e.g. an inline-box dispatched
+    /// from a tagged block's paragraph), the open is skipped: Krilla's
+    /// `start_tagged` is not nestable and would panic. The run's glyphs / images
+    /// still paint, but this run does not get its own `ParagraphRunItem` entry,
+    /// so any link on the run falls through to `emit_link_annotations`'s
+    /// unwired-fallback path (`add_annotation`) — no `add_tagged_annotation`
+    /// call with an OBJR that would fail the later tag-tree consistency check.
     fn transition_to(&mut self, canvas: &mut Canvas<'_, '_>, new_span_ptr: Option<usize>) {
         if self.open_span_ptr == Some(new_span_ptr) {
             return;
         }
         self.close(canvas);
+        if canvas.in_marked_content {
+            return;
+        }
         use krilla::tagging::{ContentTag, SpanTag};
         let id = canvas
             .surface
             .start_tagged(ContentTag::Span(SpanTag::empty()));
+        canvas.in_marked_content = true;
         self.open_span_ptr = Some(new_span_ptr);
         self.open_identifier = Some(id);
     }
@@ -610,6 +623,7 @@ impl RunRegionTracker {
             return;
         };
         canvas.surface.end_tagged();
+        canvas.in_marked_content = false;
         let id = self
             .open_identifier
             .take()
@@ -1082,6 +1096,7 @@ mod tests {
                 link_collector: Some(&mut lc),
                 tag_collector: None,
                 link_run_node_id: None,
+                in_marked_content: false,
             };
             // Draw origin (5, 7) pt; rect must land at (5+2, 7+3, 20, 10).
             draw_shaped_lines(&mut canvas, &[line], 5.0_f32.as_pt(), 7.0_f32.as_pt(), None);

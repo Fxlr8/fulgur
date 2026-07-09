@@ -578,6 +578,16 @@ pub struct Canvas<'a, 'b> {
     /// `Arc<LinkSpan>` identity gets its own `start_tagged/end_tagged` region
     /// recorded as a `ParagraphRunItem` under that paragraph's NodeId.
     pub link_run_node_id: Option<crate::drawables::NodeId>,
+    /// True while a Krilla marked-content sequence (opened via
+    /// `surface.start_tagged`) is currently open on `surface`. Krilla panics on
+    /// nested `start_tagged` calls (`can't start marked content twice`), so
+    /// every fulgur entry point that opens a sequence must consult and set this
+    /// flag: skip the open when the flag is set (defer to the outer tag as a
+    /// graceful degradation), and pair a successful open with a matching reset
+    /// in the same scope. The three current entry points are
+    /// `render::try_start_tagged`, `render::draw_list_item_marker_tagged`, and
+    /// `paragraph::RunRegionTracker::transition_to`.
+    pub in_marked_content: bool,
 }
 
 /// Run a draw closure wrapped in opacity guards.
@@ -2427,6 +2437,7 @@ mod dp_unit_tests {
             link_collector: None,
             tag_collector: None,
             link_run_node_id: None,
+            in_marked_content: false,
         };
         f(&mut canvas);
     }

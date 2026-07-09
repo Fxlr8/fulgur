@@ -213,6 +213,7 @@ pub fn render_v2(
                     link_collector: Some(&mut link_collector),
                     tag_collector: tag_collector.as_mut(),
                     link_run_node_id: None,
+                    in_marked_content: false,
                 };
                 // Root `<html>` + `<body>` background pre-pass. v1's
                 // `BlockPageable::draw` for these elements paints
@@ -304,6 +305,7 @@ pub fn render_v2(
                 link_collector: Some(&mut link_collector),
                 tag_collector: None,
                 link_run_node_id: None,
+                in_marked_content: false,
             };
             let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
             margin_box_renderer.render_page(
@@ -912,9 +914,16 @@ fn extract_heading_title(para: &crate::drawables::ParagraphEntry) -> String {
 ///
 /// Returns `Some((tag, id))` on success so that `finish_tagged` can close it.
 /// Returns `None` when tagging is disabled, the node has no recognised
-/// semantic entry, or the node carries no paragraph content (pure containers
+/// semantic entry, the node carries no paragraph content (pure containers
 /// must not call `start_tagged` — it is not nestable and would panic on a
-/// second call before `end_tagged`).
+/// second call before `end_tagged`), OR the canvas is already inside an
+/// outer marked-content sequence (`canvas.in_marked_content == true`). The
+/// last case fires when a tagged inline-root block dispatches an inline-box
+/// whose content would itself want a P/Span/LBody tag; nested opens would
+/// panic in Krilla (`can't start marked content twice`), so the inner tag is
+/// dropped and its sub-tree renders as a graceful, untagged extension of the
+/// outer sequence. Link annotations under the skipped tag still land in the
+/// PDF via `emit_link_annotations`'s unwired-fallback path (`add_annotation`).
 fn try_start_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,
@@ -926,8 +935,11 @@ fn try_start_tagged(
     Option<String>,
 )> {
     canvas.tag_collector.as_ref()?;
+    if canvas.in_marked_content {
+        return None;
+    }
     let semantic = drawables.semantics.get(&node_id)?;
-    match &semantic.tag {
+    let result = match &semantic.tag {
         crate::tagging::PdfTag::P | crate::tagging::PdfTag::Span => {
             use krilla::tagging::{ContentTag, SpanTag};
             let id = canvas
@@ -956,7 +968,11 @@ fn try_start_tagged(
             Some((lbody_id, crate::tagging::PdfTag::LBody, id, None))
         }
         _ => None,
+    };
+    if result.is_some() {
+        canvas.in_marked_content = true;
     }
+    result
 }
 
 /// Close a tagged content sequence opened by `try_start_tagged` and record
@@ -980,6 +996,7 @@ fn finish_tagged(
 ) {
     if let Some((record_id, tag, id, heading_title)) = tag_info {
         canvas.surface.end_tagged();
+        canvas.in_marked_content = false;
         canvas
             .tag_collector
             .as_mut()
@@ -3131,6 +3148,13 @@ fn draw_list_item_marker(
 }
 
 /// List-item marker を描画し、タグ付きモードでは Lbl 構造要素でラップする。
+///
+/// When `canvas.in_marked_content` is already set (a nested tagged marker
+/// inside an outer marked-content sequence — e.g. a `<ul><li>...</li></ul>`
+/// dispatched from a tagged block's inline-box), the Lbl tag is skipped so
+/// Krilla's non-nestable `start_tagged` does not panic. The marker glyphs
+/// / image still paint; only the structural Lbl association is dropped for
+/// the nested case (graceful degradation).
 fn draw_list_item_marker_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     li: &crate::drawables::ListItemEntry,
@@ -3143,18 +3167,22 @@ fn draw_list_item_marker_tagged(
         .tag_collector
         .as_ref()
         .and_then(|_| drawables.li_lbl_ids.get(&node_id).copied());
-    let marker_tag_id = lbl_id.map(|_| {
-        canvas
+    let can_open_marker_tag = lbl_id.is_some() && !canvas.in_marked_content;
+    let marker_tag_id = can_open_marker_tag.then(|| {
+        let id = canvas
             .surface
             .start_tagged(krilla::tagging::ContentTag::Span(
                 krilla::tagging::SpanTag::empty(),
-            ))
+            ));
+        canvas.in_marked_content = true;
+        id
     });
 
     draw_list_item_marker(canvas, li, x, y);
 
     if let (Some(lid), Some(id)) = (lbl_id, marker_tag_id) {
         canvas.surface.end_tagged();
+        canvas.in_marked_content = false;
         canvas
             .tag_collector
             .as_mut()
