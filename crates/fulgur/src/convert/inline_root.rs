@@ -2,6 +2,7 @@ use super::*;
 use super::{list_marker, positioned, pseudo};
 use crate::paragraph::{InlineBoxItem, ParagraphRender};
 use crate::units::F32Units;
+use std::sync::Arc;
 
 /// Dispatcher entry for inline-root nodes (those with `node.flags.is_inline_root()`).
 ///
@@ -449,7 +450,11 @@ pub(super) fn extract_paragraph(
     let text_layout = elem_data.inline_layout_data.as_ref()?;
 
     let parley_layout = &text_layout.layout;
-    let text = &text_layout.text;
+    // Materialize the paragraph text as `Arc<str>` once so each `ShapedGlyphRun`
+    // stores a cheap Arc bump instead of a full String clone. All runs of a
+    // paragraph share the same buffer; Blitz owns the original `String` and
+    // drops it with the DOM, so we can't borrow.
+    let text: Arc<str> = Arc::from(text_layout.text.as_str());
 
     let mut shaped_lines = Vec::new();
     let mut accumulated_line_top = crate::units::Pt::ZERO;
@@ -518,7 +523,7 @@ pub(super) fn extract_paragraph(
                     }
 
                     if !glyphs.is_empty() {
-                        let run_text = text.clone();
+                        let run_text = Arc::clone(&text);
                         let run_x_offset = glyph_run.offset().as_px().in_pt();
                         items.push(LineItem::Text(ShapedGlyphRun {
                             font_data: font_arc,
@@ -653,7 +658,7 @@ mod tests {
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
-            text: String::new(),
+            text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
         })

@@ -90,6 +90,12 @@ pub struct LinkSpan {
 }
 
 /// A pre-extracted glyph run (single font + style).
+///
+/// `text` is the paragraph's full source text (identical across every
+/// `ShapedGlyphRun` produced from one paragraph). It is stored as `Arc<str>`
+/// so `extract_paragraph` can bump-clone the same buffer per run rather than
+/// pay a String allocation each time; it is passed by reference to krilla's
+/// `draw_glyphs` and read via `as_str` in `render` — no mutation callers.
 #[derive(Clone, Debug)]
 pub struct ShapedGlyphRun {
     pub font_data: Arc<Vec<u8>>,
@@ -98,7 +104,7 @@ pub struct ShapedGlyphRun {
     pub color: [u8; 4], // RGBA
     pub decoration: TextDecoration,
     pub glyphs: Vec<ShapedGlyph>,
-    pub text: String,
+    pub text: Arc<str>,
     pub x_offset: crate::units::Pt,
     pub link: Option<Arc<LinkSpan>>,
 }
@@ -1487,7 +1493,7 @@ mod tests {
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
-            text: String::from("hi"),
+            text: Arc::from("hi"),
             x_offset: crate::units::Pt::ZERO,
             link: None,
         };
@@ -1528,7 +1534,7 @@ mod tests {
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
-            text: String::new(),
+            text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
         };
@@ -1741,7 +1747,7 @@ mod link_span_tests {
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: Vec::new(),
-            text: String::new(),
+            text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
         };

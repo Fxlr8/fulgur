@@ -724,7 +724,7 @@ fn convert_multicol_paragraph_slices(
             let Some(text_layout) = elem.inline_layout_data.as_ref() else {
                 continue;
             };
-            let text = text_layout.text.clone();
+            let text: std::sync::Arc<str> = std::sync::Arc::from(text_layout.text.as_str());
 
             // Hold the rebroken clone alive across the per-line loop in
             // Case A. In Case B the borrowed reference into Blitz is
@@ -864,7 +864,7 @@ fn convert_multicol_paragraph_slices(
 fn shape_paragraph_glyph_runs(
     doc: &BaseDocument,
     parley_layout: &parley::Layout<blitz_dom::node::TextBrush>,
-    text: &str,
+    text: &std::sync::Arc<str>,
     ctx: &mut ConvertContext<'_>,
 ) -> Vec<ShapedLine> {
     let mut shaped_lines = Vec::new();
@@ -922,7 +922,7 @@ fn shape_paragraph_glyph_runs(
                 }
 
                 if !glyphs.is_empty() {
-                    let run_text = text.to_string();
+                    let run_text = std::sync::Arc::clone(text);
                     let run_x_offset = glyph_run.offset().as_px().in_pt();
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,

@@ -403,7 +403,7 @@ mod tests {
                 y_offset: 0.0,
                 text_range: 0..1,
             }],
-            text: "a".to_string(),
+            text: Arc::from("a"),
             x_offset: 3.0_f32.as_pt(),
             link: None,
         };
@@ -513,7 +513,7 @@ mod tests {
                     text_range: 1..2,
                 },
             ],
-            text: "ab".to_string(),
+            text: Arc::from("ab"),
             x_offset: 2.0_f32.as_pt(),
             link: None,
         };

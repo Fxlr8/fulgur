@@ -901,7 +901,7 @@ fn extract_heading_title(para: &crate::drawables::ParagraphEntry) -> String {
         .iter()
         .flat_map(|line| line.items.iter())
         .filter_map(|item| match item {
-            crate::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+            crate::paragraph::LineItem::Text(run) => Some(run.text.as_ref()),
             _ => None,
         })
         .collect()
@@ -4320,7 +4320,7 @@ mod tests {
             color: [0, 0, 0, 255],
             decoration: crate::paragraph::TextDecoration::default(),
             glyphs: vec![],
-            text: text.to_string(),
+            text: std::sync::Arc::from(text),
             x_offset: crate::units::Pt::ZERO,
             link,
         }
