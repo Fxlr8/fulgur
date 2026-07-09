@@ -696,10 +696,15 @@ impl Engine {
         })
     }
 
-    /// Single render pass: lay out via [`layout_to_drawables`], then serialize
-    /// the pages via the unchanged [`render::render_v2`]. `render`'s 2-pass
-    /// loop is untouched. See [`RenderPassOutput`] for the returned fields.
-    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
+    /// Serialize a fully-laid-out [`LayoutArtifacts`] into a PDF via
+    /// [`render::render_v2`]. On pass 2 of a 2-pass render, callers pass
+    /// `anchor_map = Some(&pass1_map)` so `target-*` resolvers substitute
+    /// real values; on the 1-pass path (no `target-*`) they pass `None`.
+    fn render_artifacts(
+        &self,
+        artifacts: LayoutArtifacts,
+        anchor_map: Option<&AnchorMap>,
+    ) -> Result<Vec<u8>> {
         let LayoutArtifacts {
             drawables,
             pagination_geometry,
@@ -709,15 +714,14 @@ impl Engine {
             counter_ops_for_render,
             html_title,
             implicit_href_map,
-            collected_anchor_map,
-            needs_pass_two,
-        } = self.layout_to_drawables(html, anchor_map)?;
+            ..
+        } = artifacts;
 
         // Re-derive fonts / system_fonts from `&self` — byte-identical to the
         // value `layout_to_drawables` used for parsing.
         let fonts = self.fonts();
 
-        let pdf = crate::render::render_v2(
+        crate::render::render_v2(
             &self.config,
             &pagination_geometry,
             &drawables,
@@ -731,7 +735,16 @@ impl Engine {
             self.serialize_settings.clone(),
             anchor_map,
             &implicit_href_map,
-        )?;
+        )
+    }
+
+    /// Single render pass: lay out via [`layout_to_drawables`], then serialize
+    /// via [`render_artifacts`]. See [`RenderPassOutput`] for the returned fields.
+    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
+        let mut artifacts = self.layout_to_drawables(html, anchor_map)?;
+        let needs_pass_two = artifacts.needs_pass_two;
+        let collected_anchor_map = std::mem::take(&mut artifacts.collected_anchor_map);
+        let pdf = self.render_artifacts(artifacts, anchor_map)?;
         Ok(RenderPassOutput {
             pdf,
             anchor_map: collected_anchor_map,
