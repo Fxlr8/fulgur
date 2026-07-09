@@ -19,24 +19,6 @@ pub struct Engine {
     system_fonts: bool,
 }
 
-/// Result of a single render pass.
-///
-/// - `pdf`: serialized PDF bytes for this pass.
-/// - `anchor_map`: cross-reference table built from this pass's
-///   pagination geometry + counter snapshots, populated only when the
-///   parsed GCPM context contains `target-*` references AND this is
-///   pass 1 of a 2-pass render. Otherwise empty — the DOM walk is
-///   skipped to avoid `element_text` cost on every id'd subtree on the
-///   fast path.
-/// - `needs_pass_two`: mirrors that gate; `true` only for pass 1 of a
-///   2-pass render so `render` can decide whether to call
-///   `render_pass` again with the populated map.
-struct RenderPassOutput {
-    pdf: Vec<u8>,
-    anchor_map: AnchorMap,
-    needs_pass_two: bool,
-}
-
 /// Renderer-agnostic layout result produced by [`Engine::layout`].
 ///
 /// Carries the parse → style → layout → `Drawables` output that both PDF
@@ -139,23 +121,28 @@ impl Engine {
     /// `CounterPass::with_anchor_map` substitute real values instead of
     /// fixed-width placeholders.
     pub fn render(&self, html: &str) -> Result<Vec<u8>> {
-        // Pass 1: render once. `render_pass` parses the full GCPM context
-        // (AssetBundle, <link>-loaded stylesheets, inline <style> blocks)
-        // and reports `needs_pass_two` based on that parsed view, so
-        // `target-counter()` / `target-counters()` / `target-text()`
-        // declared in any of those locations is detected reliably.
-        let RenderPassOutput {
-            pdf,
-            anchor_map,
-            needs_pass_two,
-        } = self.render_pass(html, None)?;
-        if !needs_pass_two {
-            return Ok(pdf);
+        // Pass 1: layout only. `layout_to_drawables` parses the full GCPM
+        // context (AssetBundle, `<link>`-loaded stylesheets, inline `<style>`
+        // blocks) and reports `needs_pass_two` based on that parsed view, so
+        // `target-counter()` / `target-counters()` / `target-text()` declared
+        // in any of those locations is detected reliably.
+        //
+        // Pass 1 does NOT invoke `render_v2` — its PDF output would be
+        // discarded on the 2-pass path (fulgur-6vl0). Mirrors `layout()`'s
+        // 2-pass loop; the final PDF serialization happens exactly once.
+        let pass1 = self.layout_to_drawables(html, None)?;
+        if !pass1.needs_pass_two {
+            return self.render_artifacts(pass1, None);
         }
-        // Pass 2: re-render with the AnchorMap so `target-*` resolvers
-        // substitute resolved values instead of fixed-width placeholders.
-        let RenderPassOutput { pdf: pdf2, .. } = self.render_pass(html, Some(&anchor_map))?;
-        Ok(pdf2)
+        // Pass 2: re-lay-out with the pass-1 AnchorMap so `target-*` resolvers
+        // substitute resolved values instead of fixed-width placeholders, then
+        // serialize once.
+        let LayoutArtifacts {
+            collected_anchor_map: anchor_map,
+            ..
+        } = pass1;
+        let pass2 = self.layout_to_drawables(html, Some(&anchor_map))?;
+        self.render_artifacts(pass2, Some(&anchor_map))
     }
 
     /// Run the full parse → style → layout → convert pipeline for a single
@@ -170,9 +157,10 @@ impl Engine {
     /// `target-*` resolvers in `render::render_v2` can do the same. When
     /// `None`, those resolvers fall back to placeholders / empty strings.
     ///
-    /// This is the single shared layout path: both `render_pass` (which
-    /// serializes the result to PDF) and the public [`layout`](Engine::layout)
-    /// build on it. See [`LayoutArtifacts`] for the returned fields.
+    /// This is the single shared layout path: both [`render`](Engine::render)
+    /// (which feeds the artifacts to `render_artifacts` for PDF serialization)
+    /// and the public [`layout`](Engine::layout) build on it. See
+    /// [`LayoutArtifacts`] for the returned fields.
     fn layout_to_drawables(
         &self,
         html: &str,
@@ -738,20 +726,6 @@ impl Engine {
         )
     }
 
-    /// Single render pass: lay out via [`layout_to_drawables`], then serialize
-    /// via [`render_artifacts`]. See [`RenderPassOutput`] for the returned fields.
-    fn render_pass(&self, html: &str, anchor_map: Option<&AnchorMap>) -> Result<RenderPassOutput> {
-        let mut artifacts = self.layout_to_drawables(html, anchor_map)?;
-        let needs_pass_two = artifacts.needs_pass_two;
-        let collected_anchor_map = std::mem::take(&mut artifacts.collected_anchor_map);
-        let pdf = self.render_artifacts(artifacts, anchor_map)?;
-        Ok(RenderPassOutput {
-            pdf,
-            anchor_map: collected_anchor_map,
-            needs_pass_two,
-        })
-    }
-
     /// Render an HTML string to a PDF file.
     pub fn render_file(&self, html: &str, path: impl AsRef<Path>) -> Result<()> {
         let pdf = self.render(html)?;
@@ -782,10 +756,11 @@ impl Engine {
         let pass1 = self.layout_to_drawables(html, None)?;
         let artifacts = if pass1.needs_pass_two {
             // Retain only the AnchorMap across passes (as `render`'s loop
-            // effectively does — its per-pass drawables/geometry are dropped
-            // inside `render_pass`). Destructure `pass1` so its drawables,
-            // geometry, and GCPM stores are freed before pass 2 allocates,
-            // keeping peak memory single-pass-sized for large raster/OCR inputs.
+            // does — its pass-1 drawables/geometry are dropped when only
+            // `collected_anchor_map` is destructured out). Destructure
+            // `pass1` so its drawables, geometry, and GCPM stores are freed
+            // before pass 2 allocates, keeping peak memory single-pass-sized
+            // for large raster/OCR inputs.
             let LayoutArtifacts {
                 collected_anchor_map,
                 ..
@@ -1022,8 +997,8 @@ impl Engine {
         // absolute_pseudo_with_right_bottom_offsets_by_image_size`.
         // The production path already reads `convert_ctx.pagination_geometry`
         // after convert — `layout_to_drawables` `mem::take`s it into a
-        // `pagination_geometry` local (the same value) that `render_pass` then
-        // hands to `render_v2` — so this matches the production read order.
+        // `pagination_geometry` local (the same value) that `render_artifacts`
+        // then hands to `render_v2` — so this matches the production read order.
         (drawables, convert_ctx.pagination_geometry)
     }
 }
