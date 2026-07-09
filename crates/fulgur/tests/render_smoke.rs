@@ -5525,3 +5525,89 @@ fn test_render_html_huge_page_name_is_bounded() {
     let pdf = Engine::builder().build().render(&html).expect("render");
     assert!(!pdf.is_empty());
 }
+
+#[test]
+fn tagged_li_with_inline_block_child_does_not_panic() {
+    // Security regression (fulgur-z28x): a tagged inline-root list item that
+    // contains an inline-block child used to hit Krilla's non-nestable
+    // start_tagged assertion. `draw_list_item_with_block` opens an LBody
+    // marked-content sequence around the paragraph draw; the paragraph then
+    // dispatches the inline-block via `dispatch_inline_box_content`, which
+    // reaches `dispatch_fragment` and calls `try_start_tagged` again while
+    // the outer LBody MCS is still active — Krilla panics.
+    let html = r#"<!DOCTYPE html><html><body>
+        <ul>
+          <li>outer <span style="display:inline-block">inline block</span> after</li>
+        </ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged li with inline-block must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"));
+}
+
+#[test]
+fn tagged_paragraph_with_inline_block_child_does_not_panic() {
+    // Security regression (fulgur-z28x): the same nested-MCS assertion fires
+    // for a tagged `<p>` (PdfTag::P) containing an inline-block child. Guards
+    // must live at the choke point, not just for the `<li>` LBody branch.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>outer <span style="display:inline-block">inline block</span> after</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged p with inline-block must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"));
+}
+
+#[test]
+fn tagged_li_with_linked_inline_block_child_does_not_panic() {
+    // Security regression (fulgur-z28x): when the inline-block subtree
+    // contains a link, `dispatch_fragment` sets `link_run_node_id` for the
+    // nested paragraph and per-run tagging via `RunRegionTracker::transition_to`
+    // opens a second MCS while the outer LBody sequence is still active. The
+    // full PDF must round-trip: not just past `start_tagged`, but through
+    // serialization — an unwired tagged annotation would panic later in
+    // krilla's tag-tree consistency check.
+    let html = r#"<!DOCTYPE html><html><body>
+        <ul>
+          <li>outer <span style="display:inline-block"><a href="https://example.test/">linked</a></span> after</li>
+        </ul>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged li with linked inline-block must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"));
+}
+
+#[test]
+fn tagged_p_with_nested_list_in_inline_block_does_not_panic() {
+    // Security regression (fulgur-z28x): a tagged `<p>` opens a P MCS, then
+    // dispatches an inline-block containing `<ul><li>`. Rendering the nested
+    // `<li>` reaches `draw_list_item_marker_tagged` while the outer P MCS is
+    // still active — Krilla's marker-tag `start_tagged` would panic on that
+    // second open without the `in_marked_content` guard.
+    let html = r#"<!DOCTYPE html><html><body>
+        <p>outer <span style="display:inline-block"><ul><li>nested</li></ul></span> after</p>
+    </body></html>"#;
+    let pdf = Engine::builder()
+        .tagged(true)
+        .build()
+        .render(html)
+        .expect("tagged p with nested list in inline-block must render");
+    assert!(!pdf.is_empty());
+    let s = String::from_utf8_lossy(&pdf);
+    assert!(s.contains("/StructTreeRoot"));
+}
