@@ -3568,7 +3568,7 @@ fn target_counter_in_toc_renders_page_number() {
 /// `parse_html_with_local_resources`), so the literal `target-*` never
 /// appeared in either signal and pass 2 was silently skipped —
 /// resolved page numbers degraded to `"00"` placeholders. The
-/// post-parse gate inside `render_pass` runs after
+/// post-parse gate inside `layout_to_drawables` runs after
 /// `extend_from(link_gcpm)`, so the decision is made against the merged
 /// GCPM context.
 #[test]
