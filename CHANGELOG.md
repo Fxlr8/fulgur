@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.35.0] - 2026-07-10
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(tagged): guard nested marked-content sequences in tagged PDF path by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/619
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.34.0...v0.35.0
+
 ## [0.34.0] - 2026-07-08
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
