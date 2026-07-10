@@ -173,7 +173,7 @@ pub(super) fn extract_marker_lines(
     };
 
     let marker_text: std::sync::Arc<str> =
-        std::sync::Arc::from(marker_to_string(&list_item_data.marker).as_str());
+        std::sync::Arc::from(marker_to_string(&list_item_data.marker));
 
     let mut shaped_lines = Vec::new();
     let mut max_width = crate::units::Pt::ZERO;
@@ -346,7 +346,7 @@ pub(super) fn shape_marker_with_skrifa(
     font_size: crate::units::Pt,
     color: [u8; 4],
 ) -> Option<ShapedGlyphRun> {
-    let text: std::sync::Arc<str> = std::sync::Arc::from(marker_skrifa_text(marker).as_str());
+    let text: std::sync::Arc<str> = std::sync::Arc::from(marker_skrifa_text(marker));
 
     let font_ref = skrifa::FontRef::from_index(font_data, font_index).ok()?;
     let charmap = font_ref.charmap();
