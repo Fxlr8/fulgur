@@ -641,7 +641,7 @@ mod tests {
                     text_range: 1..2,
                 },
             ],
-            text: "• ".to_string(),
+            text: Arc::from("• "),
             x_offset: crate::units::Pt::ZERO,
             link: None,
         });
@@ -740,7 +740,7 @@ mod tests {
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![],
-            text: String::new(),
+            text: Arc::from(""),
             x_offset: x_offset.as_pt(),
             link: None,
         })
@@ -869,7 +869,7 @@ mod tests {
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
             glyphs: vec![],
-            text: String::new(),
+            text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
         });

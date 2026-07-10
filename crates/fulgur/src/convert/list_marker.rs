@@ -172,7 +172,8 @@ pub(super) fn extract_marker_lines(
         return (Vec::new(), crate::units::Pt::ZERO, crate::units::Pt::ZERO);
     };
 
-    let marker_text = marker_to_string(&list_item_data.marker);
+    let marker_text: std::sync::Arc<str> =
+        std::sync::Arc::from(marker_to_string(&list_item_data.marker));
 
     let mut shaped_lines = Vec::new();
     let mut max_width = crate::units::Pt::ZERO;
@@ -249,7 +250,7 @@ pub(super) fn extract_marker_lines(
                         color,
                         decoration: Default::default(),
                         glyphs,
-                        text: marker_text.clone(),
+                        text: std::sync::Arc::clone(&marker_text),
                         x_offset: glyph_run.offset().as_px().in_pt(),
                         link: None,
                     }));
@@ -345,7 +346,7 @@ pub(super) fn shape_marker_with_skrifa(
     font_size: crate::units::Pt,
     color: [u8; 4],
 ) -> Option<ShapedGlyphRun> {
-    let text = marker_skrifa_text(marker);
+    let text: std::sync::Arc<str> = std::sync::Arc::from(marker_skrifa_text(marker));
 
     let font_ref = skrifa::FontRef::from_index(font_data, font_index).ok()?;
     let charmap = font_ref.charmap();
@@ -515,7 +516,7 @@ mod tests {
                 y_offset: 0.0,
                 text_range: 0..1,
             }],
-            text: "A".to_string(),
+            text: Arc::from("A"),
             x_offset: crate::units::Pt::ZERO,
             link: None,
         };
@@ -595,7 +596,7 @@ mod tests {
         assert!(result.is_some());
         let run = result.unwrap();
         assert_eq!(run.glyphs.len(), 2, "bullet + trailing space = 2 glyphs");
-        assert_eq!(run.text, "• ");
+        assert_eq!(&*run.text, "• ");
         assert_eq!(run.font_size.to_f32(), 12.0);
         assert_eq!(run.color, [255, 0, 0, 255]);
         assert_eq!(run.font_index, 0);
@@ -616,7 +617,7 @@ mod tests {
         assert!(result.is_some());
         let run = result.unwrap();
         assert_eq!(run.glyphs.len(), 3, "\"1. \" = 3 chars = 3 glyphs");
-        assert_eq!(run.text, "1. ");
+        assert_eq!(&*run.text, "1. ");
     }
 
     #[test]

@@ -50,7 +50,7 @@ fn paragraph_run_text(entry: &fulgur::drawables::ParagraphEntry) -> String {
         .iter()
         .flat_map(|line| line.items.iter())
         .filter_map(|item| match item {
-            fulgur::paragraph::LineItem::Text(run) => Some(run.text.as_str()),
+            fulgur::paragraph::LineItem::Text(run) => Some(run.text.as_ref()),
             _ => None,
         })
         .collect()
