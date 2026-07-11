@@ -227,6 +227,13 @@ jobs:
           # missing (e.g. a hotfix release where CHANGELOG hasn't been
           # touched); the fallback preserves the pre-SSoT behaviour so a
           # legacy edge case can't ship an empty Release body.
+          # Drop the release-notes:auto marker HTML comments from the extracted
+          # body: they are aux-sync machinery, not release content, and would
+          # otherwise leak into `gh release view --json body` and the Edit-
+          # release pane (GitHub's Markdown renderer hides them, but the raw
+          # body carries them). Stripping also makes the emptiness guard below
+          # correctly recognise an auto-block with no PRs and no hand-adds as
+          # empty and fall back to generate-notes.
           NOTES=$(awk -v ver="$VERSION" '
             BEGIN { in_sec = 0 }
             /^## \[/ {
@@ -237,7 +244,7 @@ jobs:
               }
             }
             in_sec { print }
-          ' CHANGELOG.md)
+          ' CHANGELOG.md | grep -v '^<!-- release-notes:auto:' || true)
           if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
             echo "::warning::CHANGELOG.md has no section for $VERSION; falling back to generate-notes"
             NOTES=$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="v$VERSION" --jq .body)
