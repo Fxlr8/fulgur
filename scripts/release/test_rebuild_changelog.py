@@ -201,3 +201,23 @@ def test_cli_end_to_end(tmp_path):
     assert AUTO_BEGIN in result.stdout
     assert "* fresh fix" in result.stdout
     assert "## [0.30.0] - 2026-07-01" in result.stdout
+
+
+def test_golden_current_changelog(tmp_path):
+    """本物の CHANGELOG.md を PR ブランチ + origin 両方として使い、
+    marker 追加前の初回 aux-sync を再現。missing-markers 経路で全内容が保持されることを確認。"""
+    repo_root = Path(__file__).resolve().parents[2]
+    changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    auto = "### Bug Fixes\n* fresh test fix\n"
+
+    result = rebuild_changelog(
+        version="0.99.0", date="2026-07-11",
+        auto_notes=auto, pr_changelog=changelog, origin_changelog=changelog,
+    )
+
+    assert result.index("## [0.99.0] - 2026-07-11") < result.index("## [0.34.0]")
+    assert AUTO_BEGIN in result
+    assert "## [0.34.0]" in result
+    assert "## [0.27.0]" in result
+    assert "GHSA-395p-pj7r-jm42" in result
