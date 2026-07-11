@@ -9,3 +9,7 @@ website/.venv
 
 # wasm-pack build artifacts (regenerated locally; not checked in)
 examples/wasm-demo/pkg/
+
+# Python bytecode caches (pytest under scripts/release/, mkdocs plugins, etc.)
+__pycache__/
+*.pyc
