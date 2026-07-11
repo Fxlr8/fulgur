@@ -199,33 +199,31 @@ jobs:
           # Drop the API's "## What's Changed" preamble so the label categories
           # nest cleanly under "## [VERSION] - DATE" as H3.
           sed -i "/^## What's Changed$/d" RELEASE_NOTES.md
-          # Capture origin/main's committed CHANGELOG up front via a plain
-          # assignment so `set -e` aborts the job if the ref can't be read. A
-          # piped `git show ... | awk` would instead mask a git-show failure (awk
-          # gets empty stdin, prints nothing, exits 0) and silently truncate the
-          # whole changelog to just the new section. Don't fix that with a global
-          # `set -o pipefail` — the version-extract `grep | head | sed` above would
-          # SIGPIPE-abort the release under it.
-          OLD_CHANGELOG=$(git show origin/main:CHANGELOG.md)
-          {
-            echo "# Changelog"
-            echo
-            echo "All notable changes to this project will be documented in this file."
-            echo
-            echo "## [$VERSION] - $DATE"
-            echo
-            cat RELEASE_NOTES.md
-            echo
-            # Base the history on origin/main's committed CHANGELOG (captured
-            # above), NOT the PR branch's working copy. release-pr has no if-gate
-            # and re-runs on every push to main, so the `gh pr checkout` working
-            # copy may already carry this release's prepended section from an
-            # earlier run. Reading origin/main keeps re-runs idempotent (no stacked
-            # duplicate "## [VERSION]" sections) and drops the old top-of-file header.
-            printf '%s\n' "$OLD_CHANGELOG" | awk '/^## \[/{found=1} found'
-          } > CHANGELOG.tmp
+
+          # Capture origin/main's committed CHANGELOG to a file so
+          # rebuild_changelog.py can read it by path. A plain `git show > file`
+          # is fine under `set -e`: if the ref can't be read, git exits
+          # non-zero and the step aborts before the script consumes an empty
+          # file. Reading origin/main (not the PR working copy) is what keeps
+          # re-runs idempotent — release-pr has no if-gate and re-runs on
+          # every push to main, and the `gh pr checkout` copy may already
+          # carry this release's section from an earlier run.
+          git show origin/main:CHANGELOG.md > /tmp/origin_CHANGELOG.md
+
+          # Rebuild CHANGELOG.md preserving marker-outside hand-adds
+          # (PREAMBLE / POSTAMBLE around the auto:begin/end markers). See
+          # scripts/release/README.md for the marker convention. Missing
+          # markers => full section treated as postamble + ::warning:: to
+          # stderr; safe fallback, no data loss.
+          python3 scripts/release/rebuild_changelog.py \
+            --version "$VERSION" \
+            --date "$DATE" \
+            --auto-notes RELEASE_NOTES.md \
+            --pr-changelog CHANGELOG.md \
+            --origin-changelog /tmp/origin_CHANGELOG.md \
+            > CHANGELOG.tmp
           mv CHANGELOG.tmp CHANGELOG.md
-          rm -f RELEASE_NOTES.md
+          rm -f RELEASE_NOTES.md /tmp/origin_CHANGELOG.md
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
