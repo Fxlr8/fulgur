@@ -887,6 +887,39 @@ mod tests {
         assert_eq!(out.paragraphs[&5].lines[0].items.len(), 2);
     }
 
+    // ── inject shift calculation: Image and Text-with-glyphs marker arms ────
+
+    #[test]
+    fn inject_image_as_marker_uses_image_width_for_shift() {
+        // When the MARKER item is LineItem::Image, shift = img.width (8 pt).
+        // This exercises the `LineItem::Image(img) => img.width` arm in the
+        // shift-calculation match — untested by the other inject tests which
+        // all use InlineBox or zero-glyph Text as the marker.
+        let mut out = Drawables::new();
+        let mark = out.draw_mark();
+        out.paragraphs
+            .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 5.0)])]));
+
+        assert!(
+            inject_marker_into_first_paragraph(&mut out, mark, make_image_item(8.0, 0.0)).is_ok()
+        );
+
+        // shift = image width 8 pt → existing InlineBox moves from 5 to 13.
+        let LineItem::InlineBox(shifted) = &out.paragraphs[&5].lines[0].items[1] else {
+            panic!("expected InlineBox at index 1");
+        };
+        assert!(
+            (shifted.x_offset.to_f32() - 13.0).abs() < 0.001,
+            "expected x_offset 13.0, got {:?}",
+            shifted.x_offset
+        );
+        // Marker image is now at index 0.
+        assert!(matches!(
+            &out.paragraphs[&5].lines[0].items[0],
+            LineItem::Image(_)
+        ));
+    }
+
     // ── smoke tests via Engine::render_html (Blitz-dependent paths) ──────────
     //
     // These exercises cover branches in `try_convert` and `build_list_item_body`
@@ -1214,6 +1247,78 @@ mod tests {
             .render(
                 r#"<!doctype html><html><body>
                 <div class="li-item">Fallback item length lh</div>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 2 (fallback display:list-item): a <div> styled with
+    // `display:list-item` but WITHOUT `list-style-image`.  `resolve_list_marker`
+    // returns `None` (no image URL in the CSS / no matching asset), so the outer
+    // `if let Some(marker)` arm is not taken and the function exits the branch-2
+    // block without registering a `ListItemEntry` or returning `true`.  The element
+    // then falls through all three branches and `try_convert` returns `false`,
+    // leaving it to the normal block-convert path.  Previously untested: the
+    // branch-2 fall-through path where `resolve_list_marker` returns `None`.
+    #[test]
+    fn smoke_fallback_display_list_item_without_image_falls_through() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><body>
+            <div style="display:list-item">Fallback without image marker</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 3 (inside marker, non-inline-root, non-empty children):
+    // when `list-style-image` is set AND `list-style-position: inside`, and the
+    // `<li>` has a block child (making it non-inline-root), the non-empty-children
+    // path at line ~226 computes `marker_item` via
+    // `resolve_inside_image_marker(...).map(LineItem::Image)`.  When successful,
+    // `inject_marker_into_first_paragraph` is called with a `LineItem::Image`,
+    // exercising the `LineItem::Image(img) => img.width` arm of the shift
+    // calculation — distinct from the `empty_li_marker_item` path which registers
+    // a standalone paragraph without calling `inject_marker_into_first_paragraph`.
+    #[test]
+    fn smoke_inside_nonempty_li_with_image_marker_injects_image() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"ul { list-style-position: inside; list-style-image: url("dot.png"); }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul>
+                    <li><p>Block child makes li non-inline-root</p></li>
+                </ul>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_list_item_body (outside marker, inline-root): both a ::before AND a
+    // ::after inline image are present simultaneously.  `pseudo::inject_inline_pseudo_images`
+    // is called with both `before_inline = Some(...)` and `after_inline = Some(...)`.
+    // The existing tests only have one pseudo at a time; this one exercises the
+    // path where `before_inline.is_some() && after_inline.is_some()` is true inside
+    // the `if let Some(mut paragraph) = paragraph_opt` arm.
+    #[test]
+    fn smoke_outside_marker_with_both_before_and_after_inline_images() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(
+            r#"li::before { content: url("dot.png"); width: 8px; height: 8px; }
+               li::after  { content: url("dot.png"); width: 8px; height: 8px; }"#,
+        );
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <ul><li>Item with both before and after images</li></ul>
                 </body></html>"#,
             )
             .expect("render failed");
