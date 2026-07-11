@@ -835,6 +835,21 @@ git commit -m "ci(release-plz): switch aux-sync to rebuild_changelog.py (fulgur-
 
 - Modify: `.github/workflows/release.yml:203-209`
 
+**Step 0: checkout ステップの追加 (前提)**
+
+`release` job は Unit 2 以前は `gh api generate-notes` (pure API) で notes を作っていたため
+repo checkout を持っていない。awk で `CHANGELOG.md` を読むように変えるなら **同じ job に
+`actions/checkout` を足す必要がある** — さもないと `awk: cannot open file` で `set -e` 下で
+publish step が empty-notes fallback より前にハードフェイルし、`gh release edit --draft=false`
+に到達せず Release が draft のまま止まる (release-python.yml / release-ruby.yml の連鎖も
+起動しない)。
+
+`push: tags: 'v*'` トリガなので tag は起動時点で存在する。checkout の `ref` は
+`v${{ needs.setup.outputs.version }}` で明示 pin し、その release commit と同一の
+CHANGELOG.md を読ませる。sparse-checkout で `CHANGELOG.md` だけに絞る (`cone-mode: false`
+にしないと root file pattern がマッチしないので注意)。他ステップと同じ pinned SHA
+(`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`, `actions/checkout@v7.0.0`) を使うこと。
+
 **Step 1: 現状把握**
 
 ```bash
