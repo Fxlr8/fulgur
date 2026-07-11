@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 import pytest
 from rebuild_changelog import rebuild_changelog, AUTO_BEGIN, AUTO_END
@@ -173,3 +174,30 @@ def test_auto_notes_updated_postamble_stable():
     assert "* fix A" in result
     assert "* fix B (new PR)" in result
     assert "GHSA-yyyy" in result
+
+
+def test_cli_end_to_end(tmp_path):
+    """CLI で subprocess 経由に呼び出しても正しい出力が stdout に出る。"""
+    auto_path = tmp_path / "RELEASE_NOTES.md"
+    auto_path.write_text("### Bug Fixes\n* fresh fix\n")
+    pr_path = tmp_path / "CHANGELOG.md"
+    pr_path.write_text(HEADER + "\n## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old\n")
+    origin_path = tmp_path / "origin_CHANGELOG.md"
+    origin_path.write_text(pr_path.read_text())
+
+    script = Path(__file__).parent / "rebuild_changelog.py"
+    result = subprocess.run(
+        [
+            "python3", str(script),
+            "--version", "0.31.0",
+            "--date", "2026-07-11",
+            "--auto-notes", str(auto_path),
+            "--pr-changelog", str(pr_path),
+            "--origin-changelog", str(origin_path),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    assert "## [0.31.0] - 2026-07-11" in result.stdout
+    assert AUTO_BEGIN in result.stdout
+    assert "* fresh fix" in result.stdout
+    assert "## [0.30.0] - 2026-07-01" in result.stdout

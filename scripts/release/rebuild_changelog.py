@@ -4,8 +4,10 @@ See docs/plans/2026-07-11-changelog-marker-ssot.md and bd show fulgur-v94v.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
+from pathlib import Path
 
 HEADER = (
     "# Changelog\n\n"
@@ -85,3 +87,35 @@ def rebuild_changelog(
     section_out = "".join(parts)
 
     return HEADER + "\n" + section_out + "\n" + history
+
+
+def _read_file(path: str) -> str:
+    if path == "-":
+        return sys.stdin.read()
+    return Path(path).read_text(encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Rebuild CHANGELOG.md preserving marker-outside hand-adds."
+    )
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--date", required=True)
+    parser.add_argument("--auto-notes", required=True, help="Path to fresh generate-notes body")
+    parser.add_argument("--pr-changelog", required=True, help="Path to PR branch CHANGELOG.md")
+    parser.add_argument("--origin-changelog", required=True, help="Path to origin/main CHANGELOG.md")
+    args = parser.parse_args(argv)
+
+    result = rebuild_changelog(
+        version=args.version,
+        date=args.date,
+        auto_notes=_read_file(args.auto_notes),
+        pr_changelog=_read_file(args.pr_changelog),
+        origin_changelog=_read_file(args.origin_changelog),
+    )
+    sys.stdout.write(result)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
