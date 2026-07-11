@@ -72,3 +72,51 @@ def test_rerun_with_postamble_preserved():
     security_idx = result.index("GHSA-xxxx")
     next_ver_idx = result.index("## [0.30.0]")
     assert end_idx < security_idx < next_ver_idx
+
+
+def test_rerun_with_preamble_preserved():
+    """auto:begin の前に手書きされた migration note が保持される。"""
+    auto_notes = "### Bug Fixes\n* fix A\n"
+    origin = HEADER + "\n## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old fix\n"
+    pr = (
+        HEADER + "\n"
+        "## [0.31.0] - 2026-07-11\n\n"
+        "> Migration note: this release bumps MSRV to 1.85.\n\n"
+        f"{AUTO_BEGIN}\n"
+        "### Bug Fixes\n* fix A\n"
+        f"{AUTO_END}\n\n"
+        "## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old fix\n"
+    )
+
+    result = rebuild_changelog(
+        version="0.31.0", date="2026-07-11",
+        auto_notes=auto_notes, pr_changelog=pr, origin_changelog=origin,
+    )
+
+    assert "Migration note" in result
+    version_idx = result.index("## [0.31.0]")
+    migration_idx = result.index("Migration note")
+    begin_idx = result.index(AUTO_BEGIN)
+    assert version_idx < migration_idx < begin_idx
+
+
+def test_rerun_with_both_preserved():
+    """PREAMBLE + POSTAMBLE 両方保持される。"""
+    auto_notes = "### Bug Fixes\n* fix A\n"
+    origin = HEADER + "\n## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old fix\n"
+    pr = (
+        HEADER + "\n"
+        "## [0.31.0] - 2026-07-11\n\n"
+        "> Migration note\n\n"
+        f"{AUTO_BEGIN}\n### Bug Fixes\n* fix A\n{AUTO_END}\n\n"
+        "### Security\n* GHSA-xxxx\n\n"
+        "## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old fix\n"
+    )
+
+    result = rebuild_changelog(
+        version="0.31.0", date="2026-07-11",
+        auto_notes=auto_notes, pr_changelog=pr, origin_changelog=origin,
+    )
+
+    assert "Migration note" in result
+    assert "GHSA-xxxx" in result
