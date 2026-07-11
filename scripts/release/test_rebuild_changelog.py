@@ -147,3 +147,29 @@ def test_missing_markers_fallback(capsys):
     captured = capsys.readouterr()
     assert "::warning::" in captured.err
     assert "missing" in captured.err.lower() or "marker" in captured.err.lower()
+
+
+def test_auto_notes_updated_postamble_stable():
+    """新しい PR がマージされて auto notes が更新されても POSTAMBLE は安定。"""
+    origin = HEADER + "\n## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old fix\n"
+
+    pr_v1 = rebuild_changelog(
+        version="0.31.0", date="2026-07-11",
+        auto_notes="### Bug Fixes\n* fix A\n",
+        pr_changelog=origin, origin_changelog=origin,
+    )
+
+    pr_with_hand = pr_v1.replace(
+        f"{AUTO_END}\n",
+        f"{AUTO_END}\n\n### Security\n* GHSA-yyyy\n",
+    )
+
+    result = rebuild_changelog(
+        version="0.31.0", date="2026-07-11",
+        auto_notes="### Bug Fixes\n* fix A\n* fix B (new PR)\n",
+        pr_changelog=pr_with_hand, origin_changelog=origin,
+    )
+
+    assert "* fix A" in result
+    assert "* fix B (new PR)" in result
+    assert "GHSA-yyyy" in result
