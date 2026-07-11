@@ -200,12 +200,35 @@ jobs:
           # Upload binaries and publish (App token → release:published が連鎖発火)
           # --clobber: workflow re-run 時 (build 失敗リトライ等) に同名 asset を上書き
           gh release upload "v$VERSION" artifacts/* --clobber --repo "$REPO"
-          # Set the Release body from the PR-based notes (release-notes:* labels
-          # per .github/release.yml) so it matches the root CHANGELOG.md. release-plz
-          # created the draft with a commit-based body (changelog_update is off, so
-          # it's empty/minimal); overwrite it here. This is a release edit — no
-          # commit/push to main — so it does not retrigger release-plz. See fulgur-b0nb.
-          NOTES=$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="v$VERSION" --jq .body)
+          # Set the Release body from the committed CHANGELOG.md so the GH
+          # Release, docs site, and repo history stay in lockstep (SSoT
+          # mirror — fulgur-kf6a). release-plz created the draft with a
+          # commit-based body (changelog_update is off, so it's empty/
+          # minimal); overwrite it here. This is a release edit — no commit/
+          # push to main — so it does not retrigger release-plz. See
+          # fulgur-b0nb.
+          #
+          # Extract the `## [VERSION]` section body (heading excluded),
+          # stopping at the next `## [` heading or EOF. `gh api generate-
+          # notes` remains as a fallback only if the section is empty or
+          # missing (e.g. a hotfix release where CHANGELOG hasn't been
+          # touched); the fallback preserves the pre-SSoT behaviour so a
+          # legacy edge case can't ship an empty Release body.
+          NOTES=$(awk -v ver="$VERSION" '
+            BEGIN { in_sec = 0 }
+            /^## \[/ {
+              if (in_sec) exit
+              if (match($0, /^## \[[^\]]+\]/)) {
+                hdr = substr($0, RSTART, RLENGTH)
+                if (hdr == "## [" ver "]") { in_sec = 1; next }
+              }
+            }
+            in_sec { print }
+          ' CHANGELOG.md)
+          if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
+            echo "::warning::CHANGELOG.md has no section for $VERSION; falling back to generate-notes"
+            NOTES=$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="v$VERSION" --jq .body)
+          fi
           gh release edit "v$VERSION" --notes "$NOTES" --draft=false --repo "$REPO"
 
   publish-npm:
