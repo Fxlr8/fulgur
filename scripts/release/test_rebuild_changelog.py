@@ -121,6 +121,8 @@ def test_rerun_with_both_preserved():
 
     assert "Migration note" in result
     assert "GHSA-xxxx" in result
+    assert result.index("## [0.31.0]") < result.index("Migration note") < result.index(AUTO_BEGIN)
+    assert result.index(AUTO_END) < result.index("GHSA-xxxx") < result.index("## [0.30.0]")
 
 
 def test_missing_markers_fallback(capsys):
