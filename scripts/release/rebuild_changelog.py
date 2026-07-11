@@ -20,13 +20,31 @@ AUTO_END = "<!-- release-notes:auto:end -->"
 _SECTION_HEAD = re.compile(r"^## \[[^\]]+\]", re.M)
 
 
-def _extract_history(changelog: str) -> str:
-    """Return everything from the first `## [` heading to EOF, unchanged."""
+def _extract_history(changelog: str, drop_version: str | None = None) -> str:
+    """Return everything from the first `## [` heading to EOF, unchanged.
+
+    If `drop_version` is given and a matching `## [drop_version]` section exists,
+    that section is skipped (heading through the next `## [` or EOF). This
+    guards against duplication when `origin_changelog` already contains the
+    current release's section (workflow re-run after merge, or unusual manual
+    dispatch).
+    """
     lines = changelog.splitlines(keepends=True)
-    for i, line in enumerate(lines):
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("## [")), None)
+    if start is None:
+        return ""
+    if drop_version is None:
+        return "".join(lines[start:])
+
+    prefix = f"## [{drop_version}]"
+    out: list[str] = []
+    skipping = False
+    for line in lines[start:]:
         if line.startswith("## ["):
-            return "".join(lines[i:])
-    return ""
+            skipping = line.startswith(prefix)
+        if not skipping:
+            out.append(line)
+    return "".join(out)
 
 
 def _extract_version_section(pr_changelog: str, version: str) -> str | None:
@@ -64,7 +82,7 @@ def rebuild_changelog(
     origin_changelog: str,
 ) -> str:
     """Build a new CHANGELOG.md body with the version section wrapped in markers."""
-    history = _extract_history(origin_changelog)
+    history = _extract_history(origin_changelog, drop_version=version)
     section = _extract_version_section(pr_changelog, version)
     if section is not None:
         preamble, postamble, markers_present = _split_around_markers(section)

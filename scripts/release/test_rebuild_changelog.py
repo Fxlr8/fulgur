@@ -1,6 +1,5 @@
 import subprocess
 from pathlib import Path
-import pytest
 from rebuild_changelog import rebuild_changelog, AUTO_BEGIN, AUTO_END
 
 
@@ -223,3 +222,27 @@ def test_golden_current_changelog(tmp_path):
     assert "## [0.34.0]" in result
     assert "## [0.27.0]" in result
     assert "GHSA-395p-pj7r-jm42" in result
+
+
+def test_rebuild_when_version_already_in_origin():
+    """origin_changelog にすでに対象 version セクションが存在する場合、履歴からその
+    セクションが filter され、fresh auto notes セクションが重複せず先頭に載る。"""
+    auto_notes = "### Bug Fixes\n* fresh fix\n"
+    origin = (
+        HEADER + "\n"
+        "## [0.31.0] - 2026-07-05\n\n"
+        "### Bug Fixes\n* stale duplicate\n\n"
+        "## [0.30.0] - 2026-07-01\n\n"
+        "### Bug Fixes\n* old fix\n"
+    )
+
+    result = rebuild_changelog(
+        version="0.31.0", date="2026-07-11",
+        auto_notes=auto_notes, pr_changelog=HEADER + "\n", origin_changelog=origin,
+    )
+
+    assert result.count("## [0.31.0]") == 1
+    assert "* fresh fix" in result
+    assert "* stale duplicate" not in result
+    assert "## [0.30.0] - 2026-07-01" in result
+    assert "* old fix" in result
