@@ -166,6 +166,19 @@ jobs:
     # would imply a gate that isn't there. Publishing this Release fires
     # `release:published`, which triggers release-python.yml / release-ruby.yml.
     steps:
+      # Publish step reads CHANGELOG.md via awk (SSoT mirror, fulgur-kf6a) so we
+      # need the file on disk. `ref: v${{ needs.setup.outputs.version }}` pins
+      # the checkout to the tag that fired this workflow (release-plz just
+      # created it), so we read the exact CHANGELOG that shipped in the
+      # release commit. Sparse-checkout keeps the tree minimal.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: "v${{ needs.setup.outputs.version }}"
+          persist-credentials: false
+          sparse-checkout: |
+            CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           path: artifacts
@@ -200,12 +213,42 @@ jobs:
           # Upload binaries and publish (App token → release:published が連鎖発火)
           # --clobber: workflow re-run 時 (build 失敗リトライ等) に同名 asset を上書き
           gh release upload "v$VERSION" artifacts/* --clobber --repo "$REPO"
-          # Set the Release body from the PR-based notes (release-notes:* labels
-          # per .github/release.yml) so it matches the root CHANGELOG.md. release-plz
-          # created the draft with a commit-based body (changelog_update is off, so
-          # it's empty/minimal); overwrite it here. This is a release edit — no
-          # commit/push to main — so it does not retrigger release-plz. See fulgur-b0nb.
-          NOTES=$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="v$VERSION" --jq .body)
+          # Set the Release body from the committed CHANGELOG.md so the GH
+          # Release, docs site, and repo history stay in lockstep (SSoT
+          # mirror — fulgur-kf6a). release-plz created the draft with a
+          # commit-based body (changelog_update is off, so it's empty/
+          # minimal); overwrite it here. This is a release edit — no commit/
+          # push to main — so it does not retrigger release-plz. See
+          # fulgur-b0nb.
+          #
+          # Extract the `## [VERSION]` section body (heading excluded),
+          # stopping at the next `## [` heading or EOF. `gh api generate-
+          # notes` remains as a fallback only if the section is empty or
+          # missing (e.g. a hotfix release where CHANGELOG hasn't been
+          # touched); the fallback preserves the pre-SSoT behaviour so a
+          # legacy edge case can't ship an empty Release body.
+          # Drop the release-notes:auto marker HTML comments from the extracted
+          # body: they are aux-sync machinery, not release content, and would
+          # otherwise leak into `gh release view --json body` and the Edit-
+          # release pane (GitHub's Markdown renderer hides them, but the raw
+          # body carries them). Stripping also makes the emptiness guard below
+          # correctly recognise an auto-block with no PRs and no hand-adds as
+          # empty and fall back to generate-notes.
+          NOTES=$(awk -v ver="$VERSION" '
+            BEGIN { in_sec = 0 }
+            /^## \[/ {
+              if (in_sec) exit
+              if (match($0, /^## \[[^\]]+\]/)) {
+                hdr = substr($0, RSTART, RLENGTH)
+                if (hdr == "## [" ver "]") { in_sec = 1; next }
+              }
+            }
+            in_sec { print }
+          ' CHANGELOG.md | grep -v '^<!-- release-notes:auto:' || true)
+          if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
+            echo "::warning::CHANGELOG.md has no section for $VERSION; falling back to generate-notes"
+            NOTES=$(gh api "repos/$REPO/releases/generate-notes" -f tag_name="v$VERSION" --jq .body)
+          fi
           gh release edit "v$VERSION" --notes "$NOTES" --draft=false --repo "$REPO"
 
   publish-npm:
