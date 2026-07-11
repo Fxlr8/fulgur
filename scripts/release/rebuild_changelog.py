@@ -5,6 +5,7 @@ See docs/plans/2026-07-11-changelog-marker-ssot.md and bd show fulgur-v94v.
 from __future__ import annotations
 
 import re
+import sys
 
 HEADER = (
     "# Changelog\n\n"
@@ -64,7 +65,14 @@ def rebuild_changelog(
     history = _extract_history(origin_changelog)
     section = _extract_version_section(pr_changelog, version)
     if section is not None:
-        preamble, postamble, _ = _split_around_markers(section)
+        preamble, postamble, markers_present = _split_around_markers(section)
+        if not markers_present:
+            print(
+                f"::warning::CHANGELOG section [{version}] lacks auto markers; "
+                "treating full content as postamble (safe fallback). "
+                "Add <!-- release-notes:auto:begin/end --> markers to control regeneration.",
+                file=sys.stderr,
+            )
     else:
         preamble, postamble = "", ""
 

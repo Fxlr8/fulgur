@@ -120,3 +120,30 @@ def test_rerun_with_both_preserved():
 
     assert "Migration note" in result
     assert "GHSA-xxxx" in result
+
+
+def test_missing_markers_fallback(capsys):
+    """marker が無い旧フォーマットのセクションは全内容 POSTAMBLE 化 + stderr warning。"""
+    auto_notes = "### Bug Fixes\n* fresh fix\n"
+    origin = HEADER + "\n## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old fix\n"
+    pr = (
+        HEADER + "\n"
+        "## [0.31.0] - 2026-07-11\n\n"
+        "### Bug Fixes\n* legacy auto item\n\n"
+        "### Security\n* hand-added, no markers\n\n"
+        "## [0.30.0] - 2026-07-01\n\n### Bug Fixes\n* old fix\n"
+    )
+
+    result = rebuild_changelog(
+        version="0.31.0", date="2026-07-11",
+        auto_notes=auto_notes, pr_changelog=pr, origin_changelog=origin,
+    )
+
+    assert "hand-added, no markers" in result
+    assert "* fresh fix" in result
+    assert AUTO_BEGIN in result
+    assert AUTO_END in result
+
+    captured = capsys.readouterr()
+    assert "::warning::" in captured.err
+    assert "missing" in captured.err.lower() or "marker" in captured.err.lower()
