@@ -150,11 +150,10 @@ pub struct PaginationLayoutTree<'a> {
     /// fulgur-k0g0: `break-before` / `break-after` / `break-inside`
     /// per node, harvested by
     /// [`crate::blitz_adapter::extract_column_style_table`]. The table
-    /// is shared with `multicol_layout` (Pageable's
-    /// `extract_pagination_from_column_css` reads the same fields), so
-    /// the pagination fragmenter does not maintain its own break-style
-    /// extraction. `None` means "no break properties set anywhere",
-    /// which the fragmenter treats as all-`Auto`.
+    /// is shared with `multicol_layout`, so the pagination fragmenter
+    /// does not maintain its own break-style extraction. `None` means
+    /// "no break properties set anywhere", which the fragmenter treats
+    /// as all-`Auto`.
     pub(crate) column_styles: Option<&'a crate::column_css::ColumnStyleTable>,
     /// fulgur-s67g Phase 2.2: `position: running()` element instances
     /// registered by [`crate::blitz_adapter::RunningElementPass`].
@@ -389,9 +388,8 @@ impl<'a> PaginationLayoutTree<'a> {
     /// Called from `compute_pagination_layout` after Taffy dispatches
     /// body's layout through the wrapper. Returns the number of
     /// fragments emitted. `0` means either the document has no body or
-    /// the body has no children — both are expected for empty documents
-    /// and the convert-side comparison should treat them as equivalent
-    /// to `Pageable` producing a single empty page.
+    /// the body has no children — both are expected for empty
+    /// documents (a single empty page is still produced downstream).
     ///
     /// Algorithm (block-only, measurement-only):
     ///
@@ -423,25 +421,21 @@ impl<'a> PaginationLayoutTree<'a> {
         let body_x = body_layout.location.x;
 
         // fulgur-s67g Phase 2.3 (counter parity follow-up): record
-        // body itself as a fragment on page 0. Pageable wraps `body`
-        // with `CounterOpWrapperPageable` /
-        // `StringSetWrapperPageable` /
-        // `BookmarkMarkerWrapperPageable` whenever those features are
-        // declared on `body`, and the wrapper's `split` keeps the
-        // marker on the **first** half — so body's own counter-reset
-        // / string-set / bookmark ops fire only on page 0
-        // (`pageable.rs:2829-2840` etc.).
+        // body itself as a fragment on page 0. body's own
+        // counter-reset / string-set / bookmark declarations must fire
+        // only on page 0 (GCPM string-set / counters §3), so they need
+        // to be recorded on the first page and only there.
         //
         // Without this entry the fragmenter's geometry table excludes body
         // entirely; `collect_counter_states` /
         // `collect_string_set_states` / `collect_bookmark_entries`
-        // miss body's ops and the parity gates fire on documents like
-        // `tests/gcpm_integration::test_counter_set` (body has
-        // `counter-reset: chapter` declared on it). The body fragment
-        // sits ahead of every body-direct-child entry in NodeId order
-        // (Blitz allocates ids depth-first during parse, so `body` is
-        // smaller than its descendants), so per-page walks pick up
-        // body's ops first, matching Pageable's tree-walk order.
+        // miss body's ops (e.g. `tests/gcpm_integration::test_counter_set`,
+        // where body carries `counter-reset: chapter`). The body
+        // fragment sits ahead of every body-direct-child entry in
+        // NodeId order (Blitz allocates ids depth-first during parse,
+        // so `body` is smaller than its descendants), so per-page
+        // walks pick up body's ops before descendants — matching the
+        // document tree-walk order the collectors expect.
         self.geometry
             .entry(body_id)
             .or_default()
@@ -497,9 +491,9 @@ impl<'a> PaginationLayoutTree<'a> {
         // in body-content-box coordinates. Used to pick up inter-child
         // gaps (collapsed margins, padding) that Blitz baked into each
         // child's `final_layout.location.y` but the cursor-only walk
-        // would otherwise miss. Pageable accumulates `pc.y + child_h`
-        // from `final_layout.location.y` during convert, so margin gaps
-        // are present in the Pageable side; the fragmenter must match.
+        // would otherwise miss — the child margin gaps must be included
+        // in body's normal-flow height (CSS 2.1 §10.6.3) so per-page
+        // walks match the recorded fragment tops.
         let mut prev_bottom_y_in_body: f32 = 0.0;
         // fulgur-uebl: tracks the used page-name of the previously
         // placed in-flow sibling (`Some(Some(name))` named, `Some(None)`
@@ -519,13 +513,13 @@ impl<'a> PaginationLayoutTree<'a> {
             {
                 continue;
             }
-            // CSS 2.1 §10.6.4: out-of-flow elements (`position: absolute`
-            // / `position: fixed`) do not contribute to their containing
-            // block's normal-flow height. Pageable routes them through
-            // `PositionedChild { out_of_flow: true }` and they never
-            // advance pagination cursors; the fragmenter must match or the
-            // fulgur-cj6u Phase 1.2 parity assertion fires on documents
-            // with abs/fixed body-direct children.
+            // CSS 2.1 §10.6.4 / §9.6: out-of-flow elements
+            // (`position: absolute` / `position: fixed`) do not
+            // contribute to their containing block's normal-flow
+            // height, so the fragmenter must not advance cursors for
+            // them. Abs/fixed children are handled by separate passes
+            // (`append_position_fixed_fragments` and the abs positioning
+            // pipeline in `render`).
             {
                 use ::style::properties::longhands::position::computed_value::T as Pos;
                 let is_out_of_flow = child.primary_styles().is_some_and(|s| {
@@ -592,10 +586,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 // Phase 2.3 fix: zero-height **element** nodes still
                 // need to enter geometry so their counter /
                 // string-set / bookmark markers participate in the
-                // parity walks. Pageable emits these via
-                // `convert::collect_positioned_children`'s dedicated
-                // `emit_*_markers` helpers when a 0×0 child is
-                // encountered (e.g.
+                // per-page metadata walks (e.g.
                 // `<div class="reset" style="..."></div>` carrying a
                 // `counter-set` declaration). The fragment carries
                 // height 0 so it does not advance the cursor — only
@@ -609,13 +600,13 @@ impl<'a> PaginationLayoutTree<'a> {
                 // Bare `<img>` with no explicit dimensions and
                 // pseudo-only `<div>` (rendering only `::before`
                 // content) both arrive here with `child_h == 0` after
-                // Blitz's intrinsic-size collapse, and Pageable
-                // honours their `break-before: page` directive
-                // (`tests/pseudo_only_break_before.rs::bare_img_honours_break_before_page`
-                // and `pseudo_only_inline_root_honours_break_before_page`).
-                // The pre-3.1.5a fragmenter `continue`'d before
-                // reading break properties at all, so the gate
-                // `forced_break_skipped` masked the divergence.
+                // Blitz's intrinsic-size collapse, but their
+                // `break-before: page` directive must still take
+                // effect (CSS Fragmentation §3, forced breaks apply
+                // regardless of the element's own height — see
+                // `tests/pseudo_only_break_before.rs`). An earlier
+                // fragmenter `continue`'d before reading break
+                // properties at all, silently dropping the directive.
                 let zero_break_props = self
                     .column_styles
                     .and_then(|t| t.get(&child_id))
@@ -748,11 +739,10 @@ impl<'a> PaginationLayoutTree<'a> {
                 // the remaining space on the current page strip but
                 // would fit (or at least start fresh) on a new page,
                 // advance the page boundary before calling
-                // `fragment_inline_root`. Mirrors Pageable's
-                // `BlockPageable::split` falling back to `AtIndex`
-                // (split before the child) when the v1 paragraph-pageable
-                // split path (removed in PR 8j-1) could not honour
-                // widow / orphan and returned `None`.
+                // `fragment_inline_root`. This is the "split before
+                // the child" fallback (CSS Fragmentation §4.2, class A
+                // break point) taken when the inline split path can't
+                // honour widow / orphan constraints within the strip.
                 let para_total_h = line_metrics
                     .last()
                     .map(|l| l.1 - line_metrics[0].0)
@@ -800,9 +790,9 @@ impl<'a> PaginationLayoutTree<'a> {
             //
             // The recursion enters from the **current** cursor (not
             // a pre-advanced 0), so an in-place split with `cursor_y
-            // > 0` produces a `WithinChild`-shaped result on the
-            // current page and a tail on the next, matching
-            // Pageable's behaviour.
+            // > 0` produces a within-child fragment on the current
+            // page and a tail on the next (CSS Fragmentation §3,
+            // splits at class B/C break points inside the box).
             //
             // `would_split_block_subtree` is a cheap simulator that
             // walks the DOM children once with the same gap / OOF /
@@ -814,18 +804,19 @@ impl<'a> PaginationLayoutTree<'a> {
             // existing whole-emit path and avoids the children-sum
             // parent-height bug.
             //
-            // `break-inside: avoid` + truly-oversized → still falls
-            // through to splitting (Pageable's `total_height >
-            // page_height` override at `pageable.rs:1165`).
+            // `break-inside: avoid` is overridden when the subtree is
+            // truly oversized (CSS Fragmentation §4.2 "unforced
+            // break"), so we still fall through to splitting.
             let child_node = self.doc.get_node(child_id);
             let has_splittable_children = child_node.is_some_and(|n| !n.children.is_empty());
             // fulgur-7hf5: multicol containers (`column-count > 1` /
             // `column-width: <len>`) distribute children across
             // columns; their DOM children's flow does not match the
             // visual flow `would_split_block_subtree` simulates. Skip
-            // recursion for them — Pageable's `ColumnGroupPageable`
-            // handles their split internally and emits whole when the
-            // multicol box itself fits the strip.
+            // recursion for them — multicol handles its own
+            // fragmentation via `multicol_layout::run_pass`, and the
+            // outer fragmenter treats the multicol container as a
+            // single unit for break decisions.
             //
             // fulgur-916y: multicol containers with a `column-span:
             // all` direct child get an exception — the span subtree
@@ -1097,11 +1088,10 @@ impl<'a> PaginationLayoutTree<'a> {
             //
             // The descendant fragments live on the same page as
             // their ancestor — exact mid-element split inside a
-            // body child is still future work (Phase 3 / Pageable
-            // replacement). Y / width / height come from the
-            // descendant's `final_layout` and are mainly
-            // informational; the parity gates that consume this
-            // geometry today read only `page_index`.
+            // body child is still future work. Y / width / height
+            // come from the descendant's `final_layout` and are
+            // mainly informational; the collectors that consume
+            // this geometry today read only `page_index`.
             record_subtree_descendants(
                 &mut self.geometry,
                 self.doc,
@@ -1400,12 +1390,11 @@ fn would_split_block_subtree(
 /// `column_styles`. Walks the entire DOM subtree, bails at
 /// [`crate::MAX_DOM_DEPTH`].
 ///
-/// Mirrors `BlockPageable::has_forced_break_below()` from `pageable.rs`,
-/// but works on Blitz nodes via the column-style side-table rather
-/// than the converted Pageable tree. Used by `fragment_pagination_root`
-/// and `fragment_block_subtree` to decide whether a body-direct (or
-/// nested) child needs to be entered for break recursion even when it
-/// fits the current page strip whole.
+/// Detects forced page breaks anywhere below `node_id`, working on
+/// Blitz nodes via the column-style side-table. Used by
+/// `fragment_pagination_root` and `fragment_block_subtree` to decide
+/// whether a body-direct (or nested) child needs to be entered for
+/// break recursion even when it fits the current page strip whole.
 fn has_forced_break_below(
     doc: &BaseDocument,
     node_id: usize,
@@ -2226,10 +2215,10 @@ fn fragment_block_subtree(
         }
 
         // Child fits the strip (or is an atomic oversized leaf that
-        // simply overflows below the page bottom — Pageable's same
-        // fallback at `pageable.rs:1252`, `in_flow_count == 1 →
-        // NoSplit`). Emit its fragment and recurse into descendants
-        // on the same page.
+        // simply overflows below the page bottom — with a single
+        // in-flow child there is no valid interior split point, so
+        // the leaf emits whole). Emit its fragment and recurse into
+        // descendants on the same page.
         geometry
             .entry(child_id)
             .or_default()
@@ -2352,28 +2341,23 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// at line edges, append one Fragment per page span to the geometry
 /// table, and return the updated `(page_index, cursor_y, fragments_emitted)`.
 ///
-/// Mirrors the v1 paragraph-pageable split path (removed in PR 8j-1;
-/// see git history): walk lines, track the first line of the current
-/// fragment in `fragment_start_idx`, and split when the cumulative
-/// height in paragraph-local coords would push the bottom past
+/// Walks lines, tracks the first line of the current fragment in
+/// `fragment_start_idx`, and splits when the cumulative height in
+/// paragraph-local coords would push the bottom past
 /// `page_height_px - paragraph_top_in_body`.
 ///
 /// fulgur-s67g Phase 2.1 (widow / orphan): each candidate split point
 /// must leave the **first** fragment with `>= ORPHANS_MIN` lines and
-/// the **remainder** of the paragraph with `>= WIDOWS_MIN` lines.
-/// When neither holds at the natural overflow point, the split is
-/// skipped — subsequent lines accumulate into the current fragment
-/// (overflow-tolerant) until a valid split is found or the paragraph
-/// ends. This matches the v1 Pageable side: the paragraph-pageable
-/// split path (removed in PR 8j-1; see git history) returned `None`
-/// when widows/orphans could not be honoured, which the outer
-/// `BlockPageable::split` resolved by emitting the whole paragraph at
-/// the current position (oversized or pushed to a fresh page by
-/// sibling-driven flow).
+/// the **remainder** of the paragraph with `>= WIDOWS_MIN` lines
+/// (CSS Fragmentation §4.4). When neither holds at the natural
+/// overflow point, the split is skipped — subsequent lines accumulate
+/// into the current fragment (overflow-tolerant) until a valid split
+/// is found or the paragraph ends, in which case the paragraph emits
+/// whole (oversized or pushed to a fresh page by sibling-driven
+/// flow).
 ///
-/// Pageable hard-codes `orphans = widows = 2` via `Pagination::default()`
-/// (`pageable.rs:268-275`). CSS `orphans` / `widows` properties are
-/// not parsed today, so the fragmenter uses the same constants.
+/// CSS `orphans` / `widows` properties are not parsed today, so the
+/// fragmenter uses the CSS 3 Fragmentation defaults (`2` for both).
 ///
 /// Output:
 ///
@@ -2402,8 +2386,7 @@ fn fragment_inline_root(
     page_height_px: f32,
     line_metrics: &[(f32, f32)],
 ) -> (u32, f32, usize) {
-    /// CSS 3 Fragmentation default for `orphans`. Matches Pageable's
-    /// `Pagination::default()`.
+    /// CSS 3 Fragmentation default for `orphans`.
     const ORPHANS_MIN: usize = 2;
     /// CSS 3 Fragmentation default for `widows`.
     const WIDOWS_MIN: usize = 2;
@@ -2432,8 +2415,9 @@ fn fragment_inline_root(
                 // If no future split point honours both constraints,
                 // the loop falls through to "emit final fragment"
                 // below and the paragraph emits as a single oversized
-                // fragment — matching Pageable's `split → None` →
-                // outer-emits-whole fallback.
+                // fragment (CSS Fragmentation §4.4: widows/orphans
+                // constraints are treated as preferences that can be
+                // relaxed to avoid unfulfillable breaks).
                 continue;
             }
 
@@ -3710,12 +3694,6 @@ fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usi
 ///
 /// Returns `max(page_index) + 1` if the table has any fragments, else
 /// `1` (at least one page is always implied).
-///
-/// Used by fulgur-cj6u Phase 1.2 as the fragmenter-side input to a
-/// `paginate(...).len() == implied_page_count(&geometry)` parity
-/// assertion in `render_to_pdf_with_gcpm`. Drift between Pageable's
-/// split decisions and the fragmenter is the regression
-/// signal Phase 2 work needs to chase.
 pub fn implied_page_count(geometry: &PaginationGeometryTable) -> u32 {
     geometry
         .values()
@@ -4708,7 +4686,9 @@ h2 { string-set: chapter-title content(text); }
 
     #[test]
     fn string_set_states_empty_geometry_returns_one_empty_page() {
-        // Mirrors Pageable's "always at least one page" convention.
+        // "Always at least one page" convention: even an empty
+        // geometry yields a single empty per-page state so downstream
+        // consumers can index by page without special-casing zero.
         let geom = PaginationGeometryTable::new();
         let markers = BTreeMap::new();
         let states = super::collect_string_set_states(&geom, &markers);
@@ -4775,8 +4755,8 @@ h2 { string-set: chapter-title content(text); }
     #[test]
     fn position_fixed_with_no_pages_normalises_to_one_page() {
         // append_position_fixed_fragments(geom, doc, 0) should still
-        // emit exactly one fragment per fixed element (the Pageable
-        // "always at least one page" convention applied to fixed
+        // emit exactly one fragment per fixed element (the "always
+        // at least one page" convention applied to fixed
         // repetition).
         let html = r#"
             <html><body>
