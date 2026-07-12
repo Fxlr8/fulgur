@@ -1,10 +1,10 @@
 //! Integration tests for CSS page-break-after / page-break-before wiring (fulgur-lje5).
 //!
-//! The split algorithm (`BlockPageable::find_split_point`) now detects forced
-//! breaks at arbitrary nesting depth by recursively calling `split()` on each
-//! child even when the child fits within the available page height. This means
-//! both the 4-div overflow scenario and the simpler 2-div non-overflow scenario
-//! correctly honour `page-break-after: always` / `break-after: page`.
+//! The split algorithm detects forced breaks at arbitrary nesting depth by
+//! recursively descending each child even when the child fits within the
+//! available page height. This means both the 4-div overflow scenario and the
+//! simpler 2-div non-overflow scenario correctly honour
+//! `page-break-after: always` / `break-after: page`.
 
 use fulgur::{Engine, Margin, PageSize};
 

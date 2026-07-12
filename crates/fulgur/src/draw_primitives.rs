@@ -567,7 +567,7 @@ impl Default for TagCollector {
 }
 
 /// Wrapper around Krilla Surface for drawing commands.
-/// This decouples Pageable types from Krilla's concrete Surface type.
+/// This decouples drawable payloads from Krilla's concrete Surface type.
 pub struct Canvas<'a, 'b> {
     pub surface: &'a mut krilla::surface::Surface<'b>,
     pub bookmark_collector: Option<&'a mut BookmarkCollector>,

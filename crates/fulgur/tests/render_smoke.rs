@@ -690,7 +690,7 @@ fn position_fixed_inside_absolute_relayouts_against_viewport() {
     // first Taffy pass collapses Fixed → Absolute and sizes the fixed
     // element against the abs's narrow box. The %PDF byte check only
     // proves engine completion; the structural assertion is the real
-    // regression guard — we walk the Pageable tree, find every
+    // regression guard — we walk the drawable tree, find every
     // out-of-flow `ParagraphRender`, and assert the fixed text laid
     // itself out as a single line. Without `relayout_position_fixed`,
     // Parley shapes the long sentence at the abs's ~37.5pt width and
@@ -1507,7 +1507,7 @@ fn render_v2_smoke_positioned_child_height_field_paths() {
     // and `let pseudo_h_pt = ...` assignments need coverage to satisfy
     // codecov patch threshold. This consolidated render exercises:
     //
-    // - inline_root paragraph wrapped in BlockPageable (inline_root.rs:122 / 187)
+    // - inline_root paragraph wrapped in a block drawable (inline_root.rs:122 / 187)
     // - list_item paragraph + inline marker (list_item.rs:204, 268, 378, 433)
     // - block pseudo `::before` / `::after` images (pseudo.rs:253, 263)
     // - abs-positioned pseudo (positioned.rs:631)

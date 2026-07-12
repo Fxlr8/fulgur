@@ -91,13 +91,13 @@ fn count_blocks_with_size(
 /// flattened — flattening recurses into `collect_positioned_children`,
 /// which now skips abs descendants. Without the flatten guard, the abs
 /// would never reach a `build_absolute_children` hoist and would
-/// silently disappear from the Pageable tree.
+/// silently disappear from the drawable tree.
 ///
 /// `assert!(!pdf.is_empty())` and `page_count == 1` are *not* sufficient
 /// oracles here — both stay true even when the abs child is dropped,
 /// because krilla always serialises a complete PDF and the surrounding
-/// in-flow text alone fills one page. We instead inspect the Pageable
-/// tree directly and assert a 30×30 pt out-of-flow `BlockPageable`
+/// in-flow text alone fills one page. We instead inspect the drawable
+/// tree directly and assert a 30×30 pt out-of-flow `BlockEntry`
 /// (the abs `<div>`) is present (PR #260, CodeRabbit).
 #[test]
 fn abs_inside_zero_size_container_is_not_dropped_by_flatten() {
@@ -106,7 +106,7 @@ fn abs_inside_zero_size_container_is_not_dropped_by_flatten() {
     // `collect_positioned_children`'s flatten branch would otherwise
     // collapse — recursing into its children with no parent to pick the
     // abs back up. Without the flatten guard, the abs `<div>` is silently
-    // dropped from the Pageable tree.
+    // dropped from the drawable tree.
     let html = r#"<!doctype html><html><head><style>
         @page { size: 200pt 200pt; margin: 0; }
         body { margin: 0; }
@@ -135,7 +135,7 @@ fn abs_inside_zero_size_container_is_not_dropped_by_flatten() {
 }
 
 /// Regression for the devin thread on fulgur-aijf: when in-flow children
-/// are followed by out-of-flow children in `BlockPageable::children`,
+/// are followed by out-of-flow children in a block's child list,
 /// `find_split_point`'s break-after / overflow-fallback paths must NOT
 /// return AtIndex pointing at an OOF child — that would corrupt
 /// `split_y` (read from CB-relative OOF.y, often 0) and cut the page

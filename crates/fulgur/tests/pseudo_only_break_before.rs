@@ -73,7 +73,7 @@ fn pseudo_only_inline_root_honours_break_before_page() {
 
 /// 空の `<div>` (子無し、pseudo 無し、style 無し) に `break-before: page`
 /// が付いた場合、新しいページが生成される。
-/// `convert_node_inner` 内の "Plain leaf node" SpacerPageable fallback を
+/// `convert_node_inner` 内の "Plain leaf node" spacer fallback を
 /// exercise する。
 #[test]
 fn empty_leaf_div_honours_break_before_page() {

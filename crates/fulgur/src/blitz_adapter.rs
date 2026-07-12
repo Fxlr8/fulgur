@@ -1240,8 +1240,8 @@ pub fn extract_vertical_align(node: &blitz_dom::Node) -> crate::paragraph::Verti
             if let Some(pct) = lp.to_percentage() {
                 VerticalAlign::Percent(pct.0)
             } else {
-                // `.px()` here is parley/stylo's CSS-px scalar. The Pageable
-                // tree is in pt, so convert. For calc() with percentage
+                // `.px()` here is parley/stylo's CSS-px scalar. Drawables
+                // consume pt, so convert. For calc() with percentage
                 // components the basis-0 resolve silently drops them —
                 // acceptable because calc() on vertical-align is rare.
                 let px = lp.resolve(style::values::computed::Length::new(0.0)).px();
@@ -2188,7 +2188,7 @@ pub struct CounterPass {
     state: RefCell<CounterState>,
     generated_css: RefCell<String>,
     counter_id: RefCell<usize>,
-    /// Counter ops keyed by node_id, for later use in Pageable markers.
+    /// Counter ops keyed by node_id, for later use in drawable counter markers.
     ops_by_node: RefCell<Vec<(usize, Vec<CounterOp>)>>,
     /// Counter-state snapshot taken at each visited element after the
     /// element's own `counter-reset` / `counter-increment` / `counter-set`
@@ -2276,7 +2276,7 @@ impl CounterPass {
         std::mem::take(&mut *self.node_snapshots.borrow_mut())
     }
 
-    /// Consume self and return (ops_by_node for Pageable markers, generated CSS for body).
+    /// Consume self and return (ops_by_node for drawable counter markers, generated CSS for body).
     pub fn into_parts(self) -> (Vec<(usize, Vec<CounterOp>)>, String) {
         (
             self.ops_by_node.into_inner(),

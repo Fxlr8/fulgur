@@ -118,8 +118,8 @@ fn test_overflow_scroll_and_auto_also_clip() {
 fn test_overflow_hidden_on_bare_block_without_visual_style() {
     // Regression for the `needs_block_wrapper` fix: a block with overflow
     // as the only non-default style (no background, no border, no padding,
-    // no radius) must still be wrapped in a BlockPageable so that the clip
-    // path is actually emitted.
+    // no radius) must still be wrapped in a block drawable so that the
+    // clip path is actually emitted.
     let engine = fulgur::engine::Engine::builder()
         .page_size(fulgur::config::PageSize::A4)
         .build();
@@ -146,8 +146,8 @@ fn test_overflow_hidden_on_bare_block_without_visual_style() {
 
 #[test]
 fn test_overflow_hidden_on_table_clips() {
-    // Regression for TablePageable::draw clip wiring: a table with
-    // overflow:hidden must clip its cells to the padding box.
+    // Regression for the table clip wiring: a table with overflow:hidden
+    // must clip its cells to the padding box.
     let engine = fulgur::engine::Engine::builder()
         .page_size(fulgur::config::PageSize::A4)
         .build();
