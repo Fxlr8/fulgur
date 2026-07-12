@@ -14,17 +14,12 @@ use krilla::tagging::{Identifier, Node, TagGroup, TagTree};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// Phase 4 PR 1 (fulgur-9t3z): geometry-driven render skeleton.
+/// Geometry-driven page render.
 ///
-/// Walks `geometry` per page, dispatches each (node_id, fragment) to
-/// per-type draw functions sourced from `drawables`. PR 1 emits blank
-/// pages because every map in `Drawables` is empty; subsequent PRs
-/// migrate one Pageable type at a time and the dispatcher grows
-/// match arms.
-///
-/// Page settings (size, margins, landscape, GCPM `@page` overrides)
-/// resolve identically to the v1 path so byte equality is achievable
-/// once the draw migration completes.
+/// Walks `geometry` per page and dispatches each (node_id, fragment)
+/// to per-type draw functions sourced from `drawables`. Page settings
+/// (size, margins, landscape, GCPM `@page` overrides) resolve once per
+/// page.
 #[allow(clippy::too_many_arguments)]
 pub fn render_v2(
     config: &Config,
@@ -71,11 +66,10 @@ pub fn render_v2(
     let page_count = crate::pagination_layout::implied_page_count(geometry).max(1) as usize;
 
     // Pre-pass: register `id` anchors for `href="#..."` resolution.
-    // PR 3 records paragraph ids; PR 4 adds block ids. List-item ids
-    // arrive in PR 5. A node may appear in both `paragraphs` and
-    // `block_styles` (shared node_id case — see `convert::replaced` /
-    // `convert::inline_root`); paragraph wins so the chain mirrors the
-    // priority v1 establishes via the Pageable tree walk.
+    // A node may appear in both `paragraphs` and `block_styles`
+    // (shared node_id case — see `convert::replaced` /
+    // `convert::inline_root`); paragraph wins so the shared-id case
+    // resolves to the inline-root's anchor.
     let mut dest_registry = crate::draw_primitives::DestinationRegistry::new();
     for (&node_id, geom) in geometry {
         let Some(first_frag) = geom.fragments.first() else {
@@ -215,19 +209,17 @@ pub fn render_v2(
                     link_run_node_id: None,
                     in_marked_content: false,
                 };
-                // Root `<html>` + `<body>` background pre-pass. v1's
-                // `BlockPageable::draw` for these elements paints
-                // bg/border/shadow on EVERY page because each page's
-                // sliced root pageable still calls them. v2's main
-                // dispatch sees them via the fragmenter's single fragment
-                // on page 0 only — multi-page docs would lose those fills
-                // on continuation pages. Paint each here at its own offset
+                // Root `<html>` + `<body>` background pre-pass. Root
+                // `<html>` / `<body>` backgrounds repeat per page
+                // (CSS Paged Media §5.4), but the fragmenter only
+                // records a single fragment for each on page 0, so a
+                // pure per-fragment dispatch would lose their fills on
+                // continuation pages. Paint each here at its own offset
                 // (`(margin.left, margin.top)` for html, plus
-                // `body_offset_pt` for body) using `layout_size` from the
-                // entry — mirrors v1's
-                // `total_width = self.layout_size.or(cached_size)...`
-                // derivation. The main dispatch loop skips both `root_id`
-                // and `body_id` to avoid double-painting on page 0.
+                // `body_offset_pt` for body) using `layout_size` from
+                // the entry. The main dispatch loop skips both
+                // `root_id` and `body_id` to avoid double-painting on
+                // page 0.
                 if let Some(root_id) = drawables.root_id
                     && let Some(root_block) = drawables.block_styles.get(&root_id)
                 {
@@ -460,18 +452,13 @@ fn draw_v2_page(
         // coverage isn't dragged down by an else-arm that never fires.
         let geom = &geometry[&node_id];
         // Bookmark anchor: emit on the page where the node's *first*
-        // fragment lands, mirroring `BookmarkMarkerWrapperPageable`'s
-        // `is_first_page_for` slice semantics. Run BEFORE the
-        // `transformed_descendants` skip so headings nested inside a
-        // transformed ancestor (e.g. `<div style="transform:..."><h1>`)
-        // still register in the PDF outline. v1 invokes
-        // `BookmarkMarkerWrapperPageable::draw` recursively from inside
-        // `TransformWrapperPageable::draw`, so the bookmark is recorded
-        // regardless of transform membership; we mirror that by
-        // unconditionally calling `record` here using the untransformed
-        // y position. (v1 emits at the same untransformed y for the
-        // outline destination — `collect_ids` does push the transform
-        // for `/Link` rects but the bookmark itself is keyed by raw y.)
+        // fragment lands. Run BEFORE the `transformed_descendants`
+        // skip so headings nested inside a transformed ancestor (e.g.
+        // `<div style="transform:..."><h1>`) still register in the PDF
+        // outline — record unconditionally using the untransformed y
+        // position so the outline destination is stable. (`/Link`
+        // annotation rects still receive the transform via the link
+        // collector; only the bookmark destination is keyed by raw y.)
         if let Some(first_frag) = geom.fragments.first()
             && first_frag.page_index == page_index
             && let Some(anchor) = drawables.bookmark_anchors.get(&node_id)
@@ -549,24 +536,23 @@ fn draw_v2_page(
                 );
                 continue;
             }
-            // `overflow: hidden | clip` block: bg / border / shadow
-            // paint OUTSIDE the clip (matching v1's
-            // `BlockPageable::draw` ordering at
-            // `pageable.rs:1796-1827`), then push the clip path,
+            // `overflow: hidden | clip` block: paint bg / border /
+            // shadow OUTSIDE the clip, then push the clip path,
             // dispatch self's inner content + every strict descendant
-            // INSIDE the clip, then pop. Same shape as
+            // INSIDE the clip, then pop (CSS 2.1 §11.1.1 painting
+            // order for overflow clipping). Same shape as
             // `draw_under_transform` but with `push_clip_path`.
             //
             // No `!clip_descendants.is_empty()` guard: shared-node_id
             // inner content (inline-root paragraph from
             // `convert::inline_root`, replaced image / svg from
             // `convert::replaced`) lands at the same `node_id` as the
-            // wrapper and so produces an empty `clip_descendants`. v1
-            // pushes the clip unconditionally when
-            // `has_overflow_clip()` is true (`pageable.rs:1808-1826`),
-            // so a `<div style="overflow:hidden;width:50px">long
-            // text</div>` still needs the text clipped at the 50px
-            // box even with no separate descendant NodeIds.
+            // wrapper and so produces an empty `clip_descendants`. The
+            // clip must still be pushed unconditionally when
+            // `has_overflow_clip()` is true so a
+            // `<div style="overflow:hidden;width:50px">long text</div>`
+            // still gets the text clipped at the 50px box even with
+            // no separate descendant NodeIds.
             // Body is intentionally excluded from `draw_under_clip`:
             // body has only a page-0 fragment so the clip would only
             // wrap page-0 content, but body's `clip_descendants`
@@ -598,13 +584,11 @@ fn draw_v2_page(
                 );
                 continue;
             }
-            // Table with `overflow: hidden | clip`: same shape as the
-            // block clip arm above. v1's `TablePageable::draw` mirrors
-            // `BlockPageable::draw` and pushes a clip path around its
-            // cell paint when `has_overflow_clip()` is true; v2 routes
-            // through `draw_under_clip_table` which paints the outer
-            // frame outside the clip and dispatches each cell descendant
-            // inside.
+            // Table with `overflow: hidden | clip`: same painting
+            // order as the block clip arm above (CSS 2.1 §11.1.1).
+            // Route through `draw_under_clip_table`, which paints the
+            // outer frame outside the clip and dispatches each cell
+            // descendant inside.
             if let Some(table) = drawables
                 .tables
                 .get(&node_id)
@@ -627,12 +611,11 @@ fn draw_v2_page(
             }
             // Fractional-opacity block with descendants: wrap own
             // paint + descendant fragments in a single
-            // `draw_with_opacity` group. Mirrors v1's
-            // `BlockPageable::draw` recursion under
-            // `draw_with_opacity(self.opacity, ..)`. Without this,
-            // `<div opacity:0.4><svg>..</svg></div>` paints the svg
-            // outside the parent's opacity wrap, dropping the parent's
-            // opacity from the svg. (fulgur-gdb9)
+            // `draw_with_opacity` group so descendants paint inside the
+            // parent's opacity transparency group (CSS opacity §2).
+            // Without this, `<div opacity:0.4><svg>..</svg></div>`
+            // paints the svg outside the parent's opacity wrap,
+            // dropping the parent's opacity from the svg. (fulgur-gdb9)
             //
             // Body is excluded for the same reason as the clip arm
             // above: body has only a page-0 fragment so a
@@ -681,22 +664,20 @@ fn draw_v2_page(
         }
     }
 
-    // Post-pass: paint multicol column rules between columns. v1's
-    // `MulticolRulePageable::draw` runs this AFTER `child.draw(...)`
-    // so the rule lines paint on top of the column contents. The
-    // post-pass placement mirrors that ordering — every per-NodeId
+    // Post-pass: paint multicol column rules between columns. Column
+    // rules paint AFTER column content so rule lines sit on top of
+    // the column contents (CSS Multi-column §4.5). Every per-NodeId
     // payload is already drawn by the main loop above.
     //
     // Skip multicol containers that live inside a transform (whether
-    // they ARE a transform key or are a descendant of one): in v1
-    // `MulticolRulePageable::draw` runs from inside
-    // `TransformWrapperPageable::draw`'s `push_transform / pop` group,
-    // so the rule lines paint under the composed matrix. The transform
-    // version is dispatched from `draw_under_transform`'s tail
-    // (`paint_transform_scoped_multicol_rules`) so the composed
-    // transform stays active. Painting them here unconditionally would
-    // emit the rules twice — once in page coords (wrong) and once
-    // inside the transform (correct) — and visually misalign the
+    // they ARE a transform key or are a descendant of one): when a
+    // multicol container carries a transform, the rules must paint
+    // under the composed matrix (CSS Transforms §11 stacking-context
+    // rules), so the transform version is dispatched from
+    // `draw_under_transform`'s tail while the composed transform is
+    // still active. Painting them here unconditionally would emit the
+    // rules twice — once in page coords (wrong) and once inside the
+    // transform (correct) — and visually misalign the
     // page-coord copy. (PR #305 follow-up Devin)
     for (&container_id, entry) in &drawables.multicol_rules {
         if transformed_descendants.contains(&container_id)
@@ -1342,8 +1323,7 @@ fn paint_multicol_paragraph_slices(
 
 /// Push the transform onto the surface + link collector, dispatch the
 /// wrapper node's own payload and every descendant fragment that lands
-/// on `page_index`, then pop. Mirrors v1's
-/// `TransformWrapperPageable::draw`:
+/// on `page_index`, then pop:
 ///
 /// ```text
 /// canvas.surface.push_transform(matrix);
@@ -1352,8 +1332,7 @@ fn paint_multicol_paragraph_slices(
 /// ```
 ///
 /// The link collector also receives the transform so `/Link`
-/// annotation rects are mapped into device space — same call sequence
-/// v1 uses (`pageable.rs:2716-2724`).
+/// annotation rects are mapped into device space.
 #[allow(clippy::too_many_arguments)]
 fn draw_under_transform(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
@@ -1369,7 +1348,8 @@ fn draw_under_transform(
     margin_top_pt: f32,
     page_index: u32,
 ) {
-    // `effective_matrix` mirrors `TransformWrapperPageable::effective_matrix`:
+    // Apply the transform around the box's transform-origin
+    // (CSS Transforms §12): the effective matrix is
     //   T(x + ox, y + oy) · M · T(-(x + ox), -(y + oy))
     let ox = x_pt + tx.origin.x.to_f32();
     let oy = y_pt + tx.origin.y.to_f32();
@@ -1383,8 +1363,9 @@ fn draw_under_transform(
     }
     canvas.surface.push_transform(&full.to_krilla());
 
-    // Dispatch the wrapper's own payload first (the `inner` Pageable
-    // shares this `node_id`) — matches v1's `inner.draw(canvas, x, y, ...)`.
+    // Dispatch the wrapper's own payload first (the same NodeId
+    // carries both the transform and its inner content), before
+    // recursing into descendants.
     dispatch_fragment(
         canvas,
         node_id,
@@ -1400,17 +1381,16 @@ fn draw_under_transform(
     );
 
     // Then dispatch every strict descendant on this page. Each
-    // descendant's fragment has its own (x, y) in untransformed local
-    // coordinates — the surface transform applies on top, mirroring v1
-    // where `inner.draw(...)` recurses through children with their
-    // pre-transform layout.
+    // descendant's fragment carries its own (x, y) in untransformed
+    // local coordinates — the surface transform applies on top so the
+    // descendants paint under their ancestor's matrix.
     //
     // Descendants that have their OWN `TransformEntry` recurse into
     // `draw_under_transform` so their matrix composes with the outer
-    // push (matches v1's nested `TransformWrapperPageable::draw` call
-    // chain at `pageable.rs:2714-2725`). Without this recursion the
-    // inner transform would be silently dropped, breaking
-    // `<div style="transform:rotate"><div style="transform:scale">`
+    // push (nested transforms compose right-to-left; each level
+    // pushes its own matrix — CSS Transforms §11). Without this
+    // recursion the inner transform would be silently dropped,
+    // breaking `<div style="transform:rotate"><div style="transform:scale">`
     // (PR #305 Devin).
     //
     // Pre-skip the strict descendants of any nested transform so they
@@ -1592,11 +1572,11 @@ fn draw_under_transform(
     }
 
     // Paint multicol column rules for any multicol container in this
-    // transform's direct scope. Mirrors v1's
-    // `MulticolRulePageable::draw` running inside
-    // `TransformWrapperPageable::draw`'s `push_transform / pop` group
-    // (`pageable.rs:2714-2725 → 3088`) so the rule lines render under
-    // the composed matrix instead of in page coordinates.
+    // transform's direct scope. When the multicol container carries
+    // a transform, the column rules must paint under the composed
+    // matrix (CSS Transforms §11 stacking-context rules), so this
+    // post-pass runs inside the `push_transform / pop` group instead
+    // of in page coordinates.
     //
     // Direct scope = `tx.descendants` (or the transform key itself,
     // covered when `node_id` is also a multicol container) MINUS any
@@ -1638,8 +1618,8 @@ fn draw_under_transform(
 
 /// Push the block's overflow-clip path onto the surface, dispatch the
 /// wrapper's own bg / border / shadow + every descendant fragment that
-/// lands on `page_index`, then pop. Mirrors v1's `BlockPageable::draw`
-/// (`pageable.rs:1796-1827`):
+/// lands on `page_index`, then pop. Painting order per
+/// CSS 2.1 §11.1.1 for overflow clipping:
 ///
 /// ```text
 /// // bg/border/shadow paint OUTSIDE the clip
@@ -1653,9 +1633,9 @@ fn draw_under_transform(
 /// });
 /// ```
 ///
-/// In v2 the wrapper's own inner content (paragraph / image / svg
-/// sharing the same `node_id`) is dispatched as part of the clipped
-/// region, then strict descendants iterate inside the clip. The block
+/// The wrapper's own inner content (paragraph / image / svg sharing
+/// the same `node_id`) is dispatched as part of the clipped region,
+/// then strict descendants iterate inside the clip. The block
 /// dispatcher's "shared node_id" combined helper
 /// (`draw_block_with_inner_content`) already handles the outer
 /// opacity wrap when used; here we replicate that ordering manually
@@ -1709,24 +1689,23 @@ fn draw_under_clip(
     let svg_for_block = drawables.svgs.get(&node_id);
     let inner_inset = block.style.content_inset();
 
-    // When this node is a list-item with overflow clip, mirror v1's
-    // `ListItemPageable::draw` ordering: outer opacity uses
-    // `list_item.opacity` (the body BlockPageable inside is built with
-    // default opacity=1.0 in `convert::list_item::build_list_item_body`,
-    // so `block.opacity` here would silently drop CSS opacity), and
-    // the marker draws before `push_clip_path` (markers sit at negative
-    // x outside the body box, so they must not be clipped). Without
-    // this, `<li style="overflow:hidden">` loses its marker entirely
-    // and any opacity set on the `<li>` is ignored. (PR #310 Devin)
+    // When this node is a list-item with overflow clip, honour the
+    // list-item painting order: outer opacity uses `list_item.opacity`
+    // (the body block inside is built with default opacity=1.0 in
+    // `convert::list_item::build_list_item_body`, so `block.opacity`
+    // here would silently drop CSS opacity), and the marker draws
+    // before `push_clip_path` (markers sit at negative x outside the
+    // body box, so they must not be clipped). Without this,
+    // `<li style="overflow:hidden">` loses its marker entirely and
+    // any opacity set on the `<li>` is ignored. (PR #310 Devin)
     let list_item = drawables.list_items.get(&node_id);
     let opacity = list_item.map_or(block.opacity, |li| li.opacity);
 
     draw_with_opacity(canvas, opacity, |canvas| {
-        // List-item marker paints first, OUTSIDE the clip — v1's
-        // `ListItemPageable::draw` emits the marker before delegating
-        // to `body.draw` (which paints bg / border / shadow). Markers
-        // sit at negative x relative to (x_pt, y_pt), so they must
-        // also stay outside the clip path pushed below.
+        // List-item marker paints first, OUTSIDE the clip — the
+        // marker is emitted before the body's bg / border / shadow.
+        // Markers sit at negative x relative to (x_pt, y_pt), so they
+        // must also stay outside the clip path pushed below.
         if let Some(li) = list_item
             && li.visible
         {
@@ -2013,7 +1992,8 @@ fn draw_under_clip(
 /// fractional opacity but no overflow clip (the clip arm,
 /// `draw_under_clip`, already handles its own opacity wrap).
 ///
-/// Mirrors v1's `BlockPageable::draw` (`pageable.rs:1770-1828`):
+/// The whole subtree must live in a single opacity transparency group
+/// (CSS opacity §2):
 ///
 /// ```text
 /// draw_with_opacity(canvas, self.opacity, |c| {
@@ -2022,14 +2002,14 @@ fn draw_under_clip(
 /// });
 /// ```
 ///
-/// v1 emits a single transparency-group XObject for the entire
-/// subtree. v2's flat dispatch without scope tracking would emit the
-/// block's own paint inside opacity but every descendant outside,
-/// dropping the parent's opacity on those descendants. Mirrors
-/// `draw_under_clip` minus the `push_clip_path` / `pop` calls and the
-/// list-item marker arm (a list-item with opacity uses
-/// `draw_list_item_with_block`, not this path, since list-item
-/// markers are owned by `ListItemEntry` rather than `BlockEntry`).
+/// A single transparency-group XObject covers the whole subtree; a
+/// flat dispatch without scope tracking would emit the block's own
+/// paint inside opacity but every descendant outside, dropping the
+/// parent's opacity on those descendants. Mirrors `draw_under_clip`
+/// minus the `push_clip_path` / `pop` calls and the list-item marker
+/// arm (a list-item with opacity uses `draw_list_item_with_block`,
+/// not this path, since list-item markers are owned by `ListItemEntry`
+/// rather than `BlockEntry`).
 #[allow(clippy::too_many_arguments)]
 fn draw_under_opacity(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
@@ -2335,9 +2315,8 @@ fn draw_under_opacity(
 
 /// Paint multicol column-rule lines on `page_index` for one
 /// `MulticolRuleEntry`. Partitions `entry.groups` by accumulating the
-/// container's per-page heights — mirrors
-/// `MulticolRulePageable::slice_for_page` + `draw` so each page only
-/// emits the rule segments that fit on it.
+/// container's per-page heights so each page only emits the rule
+/// segments that fit on it.
 fn paint_multicol_rule_for_page(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::MulticolRuleEntry,
@@ -2384,12 +2363,11 @@ fn paint_multicol_rule_for_page(
         }
         let visible_top = group_top.max(Pt::ZERO);
         let y_top = y_base + visible_top;
-        // Mirror `MulticolRulePageable::slice_for_page`
-        // (`pageable.rs:3221-3223`): subtract the portion of each
-        // column already painted on prior pages BEFORE clamping to
-        // the visible strip on this page. Without this, a column rule
-        // segment whose group straddles a page boundary extends past
-        // the actual visible column content.
+        // Subtract the portion of each column already painted on
+        // prior pages BEFORE clamping to the visible strip on this
+        // page. Without this, a column rule segment whose group
+        // straddles a page boundary extends past the actual visible
+        // column content.
         let consumed_above = (visible_top - group_top).max(Pt::ZERO);
         let visible_h = (group_bottom.min(cutoff) - visible_top).max(Pt::ZERO);
         for i in 0..(group.n as usize - 1) {
@@ -2421,9 +2399,9 @@ fn paint_multicol_rule_for_page(
     canvas.surface.set_stroke(None);
 }
 
-/// Build the krilla stroke for the configured rule spec, mirroring
-/// `MulticolRulePageable::build_stroke`. Returns `None` when the rule
-/// is invisible (style `None` or non-positive width).
+/// Build the krilla stroke for the configured column-rule spec.
+/// Returns `None` when the rule is invisible (style `None` or
+/// non-positive width).
 fn build_multicol_stroke(
     rule: &crate::column_css::ColumnRuleSpec,
 ) -> Option<krilla::paint::Stroke> {
@@ -2475,10 +2453,11 @@ fn draw_image_v2(
 }
 
 /// Image paint without `draw_with_opacity` wrapper. Used by
-/// `draw_block_with_inner_content` so a `<img>` whose wrapping inline-root
-/// `BlockPageable` shares its node_id (`convert::replaced`) composes
-/// with the block bg/border under one opacity group, mirroring v1's
-/// `BlockPageable::draw` (`pageable.rs:1771`).
+/// `draw_block_with_inner_content` so a `<img>` whose wrapping
+/// inline-root block shares its node_id (`convert::replaced`)
+/// composes with the block bg/border under one opacity group
+/// (CSS opacity §2 — single transparency group for the combined
+/// paint).
 fn draw_image_inner_paint(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::ImageEntry,
@@ -2551,17 +2530,16 @@ fn draw_svg_inner_paint(
     canvas.surface.pop();
 }
 
-/// v2 block draw. Mirrors `BlockPageable::draw`'s background / border /
-/// box-shadow emission. Children paint themselves via their own
-/// per-NodeId dispatch in `draw_v2_page`, so this fn does **not**
-/// recurse into block children.
+/// Block draw: emits background / border / box-shadow for the
+/// wrapper. Children paint themselves via their own per-NodeId
+/// dispatch in `draw_v2_page`, so this fn does **not** recurse into
+/// block children.
 ///
 /// Overflow clip (`overflow: hidden`) is intentionally not pushed
-/// here — the v1 recursive draw scope owns push/pop while the v2 flat
-/// dispatch does not have a natural "end of children" point. Phase 4
-/// PR 5+ will add a per-block clip scope by tracking child-exit
-/// fragments. Documents that rely on `overflow: hidden` won't
-/// byte-eq until then; the inline test cases avoid that property.
+/// here — the clip scope is owned by `draw_under_clip`, which paints
+/// bg/border/shadow outside the clip and pushes the clip path around
+/// the descendant dispatch (see that function for the full painting
+/// order).
 fn draw_block_v2(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::BlockEntry,
@@ -2577,15 +2555,15 @@ fn draw_block_v2(
     });
 }
 
-/// v2 root-element (`<html>`) background pre-pass. The fragmenter's
+/// Root-element (`<html>`) background pre-pass. The fragmenter's
 /// `geometry` table only carries body + descendants, so the standard
-/// per-(node_id, fragment) dispatch never visits html. Mirror v1's
-/// `BlockPageable::draw` for the html root by painting bg / border /
-/// shadow at `(margin.left, margin.top)` with html's own
+/// per-(node_id, fragment) dispatch never visits html. Paint bg /
+/// border / shadow at `(margin.left, margin.top)` using html's own
 /// `layout_size` (which equals body's outer height including
-/// collapsed margins, matching v1's `total_height` derivation).
+/// collapsed margins). Root `<html>` / `<body>` backgrounds repeat
+/// per page (CSS Paged Media §5.4), so this runs once per page.
 ///
-/// Called once per page from `render_v2`; intentionally bypasses the
+/// Called from `render_v2`; intentionally bypasses the
 /// `body_offset_pt.y` adjustment that the main dispatch loop applies,
 /// because html's bg paints at the page's margin top, not at body's
 /// content origin.
@@ -2635,9 +2613,9 @@ fn paint_root_block_v2(
 }
 
 /// Block bg / border / shadow paint without the outer `draw_with_opacity`
-/// wrap. Used by `draw_list_item_with_block` so the list-item's marker
-/// and body block share a single opacity group (matches v1's
-/// `ListItemPageable::draw` byte output exactly).
+/// wrap. Used by `draw_list_item_with_block` so the list-item's
+/// marker and body block share a single opacity transparency group
+/// (CSS opacity §2).
 fn draw_block_inner_paint(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::BlockEntry,
@@ -2657,15 +2635,11 @@ fn draw_block_inner_paint(
     // as a callout-box overflowing page bottom on page 1 AND repeating
     // full-size on page 2 (fulgur-bq6i: `examples/break-inside`).
     //
-    // Mirror v1: `BlockPageable::slice_for_page` returns a sliced
-    // pageable whose `layout_size.height` already equals the slice
-    // height, so v1's draw uses the slice-correct height naturally.
-    // v2 has a single `BlockEntry` per node_id holding the full
-    // layout, so we recover the slice-correct height from
-    // `frag.height` only when the dispatcher tells us this is a
-    // split fragment (`is_split = geom.fragments.len() > 1`). Using
-    // a multi-fragment signal — not a `frag_h < layout_h` comparison
-    // — avoids spurious flips for single-page blocks where the two
+    // Recover the slice-correct height from `frag.height` when the
+    // dispatcher signals this is a split fragment
+    // (`is_split = geom.fragments.len() > 1`). Using the multi-
+    // fragment signal — not a `frag_h < layout_h` comparison —
+    // avoids spurious flips for single-page blocks where the two
     // values may differ by 1 ULP after CSS-px → pt conversion
     // rounding.
     let total_height = entry
@@ -2693,15 +2667,15 @@ fn draw_block_inner_paint(
     }
 }
 
-/// v2 table draw. Mirrors `TablePageable::draw`'s outer-frame
-/// background / border / shadow emission. Cell paint (each `<th>` /
-/// `<td>` is a `BlockPageable` with its own NodeId in geometry) lands
-/// through the standard per-NodeId dispatch.
+/// Table draw: emits the outer-frame background / border / shadow.
+/// Cell paint (each `<th>` / `<td>` is a block with its own NodeId in
+/// geometry) lands through the standard per-NodeId dispatch.
 ///
 /// Tables with `overflow: hidden | clip` route through
-/// [`draw_under_clip_table`] instead so the clip path wraps every cell
-/// dispatched in the same scope. Multi-page table header repetition
-/// (`<thead>` cloned on continuation pages) is deferred to a later PR.
+/// [`draw_under_clip_table`] instead so the clip path wraps every
+/// cell dispatched in the same scope. Multi-page table header
+/// repetition (`<thead>` cloned on continuation pages) is deferred
+/// to a later change.
 fn draw_table_v2(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::TableEntry,
@@ -2963,18 +2937,19 @@ fn draw_under_clip_table(
     });
 }
 
-/// v2 block + inner content combined draw. Mirrors v1's
-/// `BlockPageable::draw` (`pageable.rs:1771`) which wraps bg/border
-/// **and** the children draw inside ONE
-/// `draw_with_opacity(self.opacity, ...)` group.
+/// Block + inner content combined draw. Wraps bg/border **and** the
+/// inner content in ONE `draw_with_opacity(self.opacity, ...)` group
+/// (CSS opacity §2 — a single transparency group covers the whole
+/// composed paint).
 ///
 /// The shared-node_id patterns from `convert::inline_root` (block
 /// wraps an inline-root paragraph) and `convert::replaced` (block
 /// wraps `<img>` / `<svg>`) deliberately leave the inner draw payload
 /// at `opacity: 1.0` — the wrapping block carries the real opacity.
-/// Composing them all under a single `draw_with_opacity(block.opacity, ...)`
-/// keeps the v1 `q .. Q` framing intact so byte-eq holds for
-/// `<p style="opacity:0.5; background:red">text</p>` and friends.
+/// Composing them all under a single
+/// `draw_with_opacity(block.opacity, ...)` keeps the `q .. Q` framing
+/// intact for `<p style="opacity:0.5; background:red">text</p>` and
+/// friends.
 #[allow(clippy::too_many_arguments)]
 fn draw_block_with_inner_content(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
@@ -2998,14 +2973,11 @@ fn draw_block_with_inner_content(
     // Inner content (inline-root paragraph from `convert::inline_root`
     // or replaced image / svg from `convert::replaced`) is positioned
     // at the block's content-box top-left, not its border-box top-left.
-    // v1 expresses this via `PositionedChild { x: content_inset.x, y:
-    // content_inset.y, .. }` so `BlockPageable::draw` recurses into the
-    // child at `(x + ix, y + iy)`. v2 has no `PositionedChild` here —
-    // the inner payload shares the block's `node_id` and would
-    // otherwise paint at the block's border-box origin, dropping
-    // `padding + border` worth of offset for every inline-root or
-    // replaced element. Mirror v1 by reading the inset from the
-    // BlockStyle and adding it before recursing.
+    // Because the inner payload shares the block's `node_id`, it
+    // would otherwise paint at the block's border-box origin,
+    // dropping `padding + border` worth of offset for every
+    // inline-root or replaced element. Read the inset from the
+    // BlockStyle and add it before recursing.
     let (ix, iy) = block.style.content_inset();
     let inner_x = x + ix;
     let inner_y = y + iy;
@@ -3036,19 +3008,19 @@ fn draw_block_with_inner_content(
     });
 }
 
-/// v2 list-item combined draw. Mirrors v1's `ListItemPageable::draw`
-/// (`pageable.rs:3336`) which wraps the marker plus everything painted
-/// by `self.body.draw(...)` in a single `draw_with_opacity(self.opacity, ...)`
-/// group.
+/// List-item combined draw. Wraps the marker plus everything painted
+/// by the body block in a single
+/// `draw_with_opacity(self.opacity, ...)` group so
+/// `<li style="opacity:..">` composites as one transparency group
+/// (CSS opacity §2).
 ///
-/// The `<li>` and its body BlockPageable share the same node_id
+/// The `<li>` and its body block share the same node_id
 /// (`convert/list_item.rs:81`); the body is built with `opacity: 1.0`
 /// on purpose. When the body holds inline content, the inline-root
-/// paragraph also lands at the same node_id (see `convert::inline_root`).
-/// Painting marker + block frame + paragraph glyphs in one compositing
-/// group is what keeps `<li style="opacity:..">` byte-identical with
-/// v1 — separate `draw_with_opacity` calls would emit multiple `q .. Q`
-/// pairs and diverge.
+/// paragraph also lands at the same node_id (see
+/// `convert::inline_root`). Painting marker + block frame + paragraph
+/// glyphs in one compositing group avoids emitting multiple
+/// `q .. Q` pairs that would break the single-group semantics.
 #[allow(clippy::too_many_arguments)]
 fn draw_list_item_with_block(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
@@ -3231,10 +3203,9 @@ fn draw_paragraph_v2(
 
 /// Paragraph paint without the outer `draw_with_opacity` wrap. Used
 /// by `draw_list_item_with_block` so a list-item containing inline
-/// content (the body block holds an inline-root paragraph at the same
-/// node_id) can compose marker + block paint + glyph runs into a
-/// single opacity group, matching v1's
-/// `ListItemPageable::draw → body.draw → paragraph.draw` chain.
+/// content (the body block holds an inline-root paragraph at the
+/// same node_id) can compose marker + block paint + glyph runs into
+/// a single opacity transparency group (CSS opacity §2).
 #[allow(clippy::too_many_arguments)]
 fn draw_paragraph_inner_paint(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
@@ -3417,9 +3388,10 @@ fn parse_datetime(s: &str) -> Option<krilla::metadata::DateTime> {
     Some(dt)
 }
 
-/// Cached max-content width and render Pageable for margin boxes.
+/// Cached max-content width and rendered `Drawables` for margin boxes.
 /// Measure cache: (html, page_height as bits) → max-content width.
-/// Render cache: (html, final_width as bits, final_height as bits) → Pageable.
+/// Render cache: (html, final_width as bits, final_height as bits) →
+/// (`Drawables`, `PaginationGeometryTable`).
 type MeasureCache = HashMap<(String, u32, u32), crate::units::Pt>;
 type RenderCache = HashMap<
     (String, u32, u32),
