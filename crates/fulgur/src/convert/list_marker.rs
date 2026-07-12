@@ -197,8 +197,8 @@ pub(super) fn extract_marker_lines(
                 let font_ref = run.font();
                 let font_index = font_ref.index;
                 let font_arc = ctx.get_or_insert_font(font_ref);
-                // Parley reports font size in CSS px; the Pageable tree is
-                // in pt. See `extract_paragraph` for the matching
+                // Parley reports font size in CSS px; Drawables / Krilla
+                // consume pt. See `extract_paragraph` for the matching
                 // conversion. Glyph ratios stay unitless by dividing by
                 // the original parley value.
                 let font_size_parley = run.font_size();
