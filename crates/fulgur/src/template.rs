@@ -233,6 +233,64 @@ mod tests {
     }
 
     #[test]
+    fn test_format_comma_float_fallback() {
+        // Value is f64 (1234.5 is not exactly representable as i64),
+        // so "," falls back through the as_f64 branch.
+        let tmpl = r#"{{ n | numformat(",") }}"#;
+        let data = json!({"n": 1234.5_f64});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "1,234.5");
+    }
+
+    #[test]
+    fn test_format_comma_string_fallback() {
+        // Non-numeric string: both i64 and f64 conversions fail;
+        // returns value.to_string() unchanged.
+        let tmpl = r#"{{ n | numformat(",") }}"#;
+        let data = json!({"n": "hello"});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_format_comma_decimal_non_numeric() {
+        // ",.Nf" with a non-numeric string: as_f64 is None, falls through
+        // all branches and returns value.to_string().
+        let tmpl = r#"{{ n | numformat(",.2f") }}"#;
+        let data = json!({"n": "hello"});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_format_decimal_only_non_numeric() {
+        // ".Nf" with a non-numeric string: as_f64 is None, falls through.
+        let tmpl = r#"{{ n | numformat(".2f") }}"#;
+        let data = json!({"n": "hello"});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_format_zero_pad_float() {
+        // "0Nd" with a float (as_i64 is None for 1.5): condition matched but
+        // inner as_i64 guard fails, falls through to value.to_string().
+        let tmpl = r#"{{ n | numformat("04d") }}"#;
+        let data = json!({"n": 1.5_f64});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "1.5");
+    }
+
+    #[test]
+    fn test_format_unknown_spec_fallthrough() {
+        // An unrecognised format spec matches no branch; returns value.to_string().
+        let tmpl = r#"{{ n | numformat("xyz") }}"#;
+        let data = json!({"n": 42});
+        let result = render_template("test.html", tmpl, &data).unwrap();
+        assert_eq!(result, "42");
+    }
+
+    #[test]
     fn test_for_loop_over_string_iterates_chars() {
         // MiniJinja iterates over characters of a string
         let tmpl = "{% for c in items %}[{{ c }}]{% endfor %}";
