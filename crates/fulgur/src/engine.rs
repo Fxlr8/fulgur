@@ -471,11 +471,11 @@ impl Engine {
         // Blitz treats multicol containers as plain blocks; route them
         // through fulgur's Taffy hook so columns balance and siblings
         // shift in lockstep. The returned geometry table captures per-
-        // `ColumnGroup` layout for Task 4's `MulticolRulePageable`; we
-        // thread it through `ConvertContext` so the convert pass can
-        // wrap multicol containers with the rule spec + geometry they
-        // need to render. See docs/plans/2026-04-20-css-multicol-design.md
-        // and docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
+        // `ColumnGroup` layout for column-rule rendering; we thread it
+        // through `ConvertContext` so the convert pass can wrap multicol
+        // containers with the rule spec + geometry they need to render.
+        // See docs/plans/2026-04-20-css-multicol-design.md and
+        // docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
         let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
 
         // Run the pagination_layout fragmenter (fulgur-4cbc). Walks
@@ -502,15 +502,15 @@ impl Engine {
         // fulgur-s67g Phase 2.2: thread `running_store` so the
         // fragmenter skips `position: running()` named children. They
         // belong in `@page` margin boxes, not body flow, so including
-        // their height would over-count and diverge from Pageable.
+        // their height would over-count body-flow strip height.
         //
         // fulgur-s67g Phase 2.6 (`@page` size / margin resolution):
         // resolve the page-1 size + margin from `gcpm.page_settings`
         // before driving the fragmenter, so its strip height matches
         // `render_to_pdf_with_gcpm`'s `content_height` exactly. Both
-        // sides use the page-1 result for *all* pages — Pageable
-        // does the same in `render.rs:283-291` and does not re-resolve
-        // per-page size for `:left` / `:right` / named selectors.
+        // sides use the page-1 result for *all* pages and do not
+        // re-resolve per-page size for `:left` / `:right` / named
+        // selectors.
         // This lets the parity gates drop the
         // `(content_height - config.content_height()).abs() < 0.001`
         // skip: documents that override page size / margin via
@@ -613,7 +613,7 @@ impl Engine {
             BTreeMap::new()
         };
 
-        // --- Convert DOM to Pageable and render ---
+        // --- Convert DOM to Drawables and render ---
         // Build string-set lookup map
         let string_set_by_node: HashMap<usize, Vec<(String, String)>> = {
             let mut map: HashMap<usize, Vec<(String, String)>> = HashMap::new();

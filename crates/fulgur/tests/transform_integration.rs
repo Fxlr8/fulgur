@@ -29,9 +29,9 @@ fn entry_from(html: &str) -> TransformEntry {
     first_transform(&drawables).expect("expected a TransformEntry in Drawables")
 }
 
-/// Reproduces the v1 `TransformWrapperPageable::effective_matrix(draw_x, draw_y)`
-/// composition: translate the origin into the draw frame, conjugate the
-/// raw matrix by it, so rotation / scale happen around the chosen origin.
+/// Composes the effective transform matrix for a given draw origin:
+/// translate the origin into the draw frame, conjugate the raw matrix
+/// by it, so rotation / scale happen around the chosen origin.
 fn effective_matrix(entry: &TransformEntry, draw_x: f32, draw_y: f32) -> Affine2D {
     let ox = draw_x + entry.origin.x.to_f32();
     let oy = draw_y + entry.origin.y.to_f32();

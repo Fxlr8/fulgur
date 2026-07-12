@@ -47,8 +47,8 @@ fn avoid_block_straddling_boundary_promotes_to_next_page() {
 /// 1ページより大きい avoid block は無限ループせず通常 split へ fallback。
 ///
 /// Note: `.huge` has splittable children (rows). An empty `<div style="height:
-/// 500pt">` would not exercise the fallback because `BlockPageable::split`
-/// cannot synthesise children out of pure CSS-sized boxes; that is a separate
+/// 500pt">` would not exercise the fallback because block splitting cannot
+/// synthesise children out of pure CSS-sized boxes; that is a separate
 /// concern beyond Task 5's scope.
 #[test]
 fn avoid_block_taller_than_page_falls_back_to_split() {

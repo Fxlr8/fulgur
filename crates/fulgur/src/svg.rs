@@ -21,7 +21,7 @@ pub struct SvgRender {
     pub opacity: f32,
     pub visible: bool,
     /// fulgur-3vwx (Phase 3.2.b): DOM NodeId for `slice_for_page`
-    /// geometry lookup. See `BlockPageable::node_id`.
+    /// geometry lookup.
     pub node_id: Option<usize>,
 }
 

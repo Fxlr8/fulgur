@@ -73,7 +73,7 @@ pub struct ImageRender {
     pub opacity: f32,
     pub visible: bool,
     /// fulgur-r6we (Phase 3.2.a): DOM NodeId for `slice_for_page`
-    /// geometry lookup. See `BlockPageable::node_id`.
+    /// geometry lookup.
     pub node_id: Option<usize>,
 }
 

@@ -1,7 +1,7 @@
 //! Named string support for CSS Generated Content for Paged Media (GCPM).
 //!
 //! Manages string-set values extracted from the DOM via `string-set: name content(text)`.
-//! Values are stored with their DOM node IDs for later insertion into the Pageable tree.
+//! Values are stored with their DOM node IDs for later insertion into the drawable tree.
 
 /// A single string-set entry extracted from the DOM.
 #[derive(Debug, Clone)]
@@ -10,7 +10,7 @@ pub struct StringSetEntry {
     pub name: String,
     /// The resolved text value.
     pub value: String,
-    /// Blitz DOM node ID, used to position the marker in the Pageable tree.
+    /// Blitz DOM node ID, used to position the marker in the drawable tree.
     pub node_id: usize,
 }
 

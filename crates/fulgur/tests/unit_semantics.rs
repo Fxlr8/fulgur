@@ -1,6 +1,6 @@
 //! Integration smoke tests confirming the renderer produces a non-empty PDF
 //! for a variety of CSS length units. Precise geometric assertions live in
-//! `convert::unit_oracle_tests` where the Pageable tree is inspectable.
+//! `convert::unit_oracle_tests` where the drawable tree is inspectable.
 
 use fulgur::Engine;
 

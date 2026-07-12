@@ -125,7 +125,7 @@ fn test_visibility_hidden_preserves_layout() {
 
 /// Regression test: styled inline root with visibility:hidden must hide text.
 /// Exercises the convert.rs path where a ParagraphRender is wrapped in a
-/// BlockPageable for background/border — the inner paragraph must inherit visible.
+/// BlockEntry for background/border — the inner paragraph must inherit visible.
 #[test]
 fn test_visibility_hidden_styled_inline_root() {
     let engine = Engine::builder().page_size(PageSize::A4).build();
@@ -144,8 +144,8 @@ fn test_visibility_hidden_styled_inline_root() {
 }
 
 /// Regression test: list item with visibility:hidden must hide marker and body.
-/// Exercises the convert.rs path where ListItemPageable body is built without
-/// the node's visibility — the body must inherit visible.
+/// Exercises the convert.rs path where the list-item body drawable is built
+/// without the node's visibility — the body must inherit visible.
 #[test]
 fn test_visibility_hidden_list_item() {
     let engine = Engine::builder().page_size(PageSize::A4).build();

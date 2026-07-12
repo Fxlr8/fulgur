@@ -55,9 +55,9 @@ fn test_svg_with_border_and_padding_renders() {
     assert!(plain_pdf.starts_with(b"%PDF"));
 
     // The styled SVG must produce a larger PDF than the plain one because
-    // the BlockPageable wrapping branch adds border strokes and a background
-    // fill on top of the same <rect> content. If the has_visual_style()
-    // branch is ever broken, this assertion will catch it.
+    // the block-wrapping branch adds border strokes and a background fill
+    // on top of the same <rect> content. If the has_visual_style() branch
+    // is ever broken, this assertion will catch it.
     assert!(
         styled_pdf.len() > plain_pdf.len(),
         "styled SVG PDF ({} bytes) must exceed plain SVG PDF ({} bytes) \

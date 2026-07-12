@@ -2,8 +2,8 @@
 //!
 //! Covers the "SpanAll child that itself page-breaks" acceptance case
 //! from the issue. When a `column-span: all` subtree is larger than one
-//! page, the existing BlockPageable pagination must split the full-width
-//! block across pages cleanly — no column structure leaks into the spill.
+//! page, block pagination must split the full-width block across pages
+//! cleanly — no column structure leaks into the spill.
 
 use fulgur::{Engine, PageSize};
 
