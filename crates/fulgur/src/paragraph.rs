@@ -197,10 +197,10 @@ pub struct ParagraphRender {
     /// HTML `id` attribute of the inline-root element this paragraph was
     /// extracted from. Used by `DestinationRegistry` to resolve `#anchor`
     /// links targeting headings (`<h1 id=..>`) and similar inline-root
-    /// elements that do not gain a `BlockPageable` wrapper.
+    /// elements that do not carry a `BlockEntry`.
     pub id: Option<Arc<String>>,
     /// fulgur-r6we (Phase 3.2.a): DOM NodeId for `slice_for_page`
-    /// geometry lookup. See `BlockPageable::node_id`.
+    /// geometry lookup.
     pub node_id: Option<usize>,
 }
 
@@ -546,9 +546,8 @@ fn draw_line_decorations(
 /// PR 8g: render-side context that lets `draw_shaped_lines` dispatch
 /// inline-box content (`LineItem::InlineBox`) through the v2 dispatcher.
 ///
-/// `None` is passed by the list-item marker text render paths
-/// (`ListItemPageable::draw` in `pageable.rs` and
-/// `render::draw_list_item_marker`), because marker line streams only
+/// `None` is passed by the list-item marker text render path
+/// (`render::draw_list_item_marker`), because marker line streams only
 /// contain Text / Image items — never `LineItem::InlineBox` — and
 /// therefore have no inline-box children to dispatch.
 ///
@@ -1815,15 +1814,6 @@ mod link_span_tests {
         );
     }
 }
-
-// `link_collect_tests` was removed in PR 8i: it exercised the v1
-// `Pageable::draw` path with a `LinkCollector` that the v2 dispatcher
-// supersedes. The behaviour those tests pinned (link annotation
-// emission, dedup across glyph runs, inline-box rect emission) is now
-// covered end-to-end by `crates/fulgur/tests/inline_box_render_test.rs`
-// (PDF byte / `/Link` substring assertions) and the VRT byte-identical
-// fixtures. The Pageable trait + `LinkCollector` are slated for full
-// removal in PR 8j.
 
 #[cfg(test)]
 mod text_decoration_tests {

@@ -65,10 +65,10 @@ pub struct ParagraphSplitEntry {
 /// Per-`ColumnGroup` geometry recorded by the Taffy multicol hook.
 ///
 /// `layout_column_group` builds one of these every time it balances a run of
-/// columnar children. Consumers (Task 4's `MulticolRulePageable`) use the
-/// geometry to paint `column-rule` lines between adjacent non-empty columns
-/// without re-running layout: the rule at gutter `i ↔ i+1` starts at
-/// `y_offset` and extends `min(col_heights[i], col_heights[i+1])` downward.
+/// columnar children. Consumers use the geometry to paint `column-rule`
+/// lines between adjacent non-empty columns without re-running layout: the
+/// rule at gutter `i ↔ i+1` starts at `y_offset` and extends
+/// `min(col_heights[i], col_heights[i+1])` downward.
 ///
 /// Conventions:
 ///
@@ -79,8 +79,8 @@ pub struct ParagraphSplitEntry {
 /// - `col_w` and `gap` are in CSS pixels (Taffy's native unit), matching the
 ///   rest of the multicol hook.
 /// - `x_offset` / `y_offset` are relative to the multicol container's
-///   **border-box** top-left (same frame as `BlockPageable::draw`'s `x, y`
-///   args). They already include the container's own padding + border.
+///   **border-box** top-left. They already include the container's own
+///   padding + border.
 #[derive(Clone, Debug, Default)]
 pub struct ColumnGroupGeometry {
     /// Horizontal offset from the container's border-box left to column 0's
@@ -713,19 +713,19 @@ pub fn compute_multicol_layout(
     }
 
     // Shift each recorded group geometry into the same border-box frame so
-    // `MulticolRulePageable::draw` (which receives `x, y` at the container's
-    // border-box origin) can use `group.x_offset + col_x_math` and
-    // `group.y_offset` directly without reapplying the container's padding.
+    // downstream column-rule rendering (which receives `x, y` at the
+    // container's border-box origin) can use `group.x_offset + col_x_math`
+    // and `group.y_offset` directly without reapplying the container's padding.
     for group in group_geometries.iter_mut() {
         group.x_offset = inset_left.as_px();
         group.y_offset += inset_top.as_px();
     }
 
-    // Stash the per-container geometry for downstream consumers (Task 4's
-    // `MulticolRulePageable`). We intentionally record the entry even when
-    // the container produced no column groups (all `SpanAll`, or entirely
-    // empty) — the presence of the key lets convert-side code distinguish
-    // "layout hook ran but found nothing balanceable" from "hook never ran".
+    // Stash the per-container geometry for downstream consumers. We
+    // intentionally record the entry even when the container produced no
+    // column groups (all `SpanAll`, or entirely empty) — the presence of the
+    // key lets convert-side code distinguish "layout hook ran but found
+    // nothing balanceable" from "hook never ran".
     tree.geometry.insert(
         usize::from(node_id),
         MulticolGeometry {

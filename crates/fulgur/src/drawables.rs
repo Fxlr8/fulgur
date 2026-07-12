@@ -1,26 +1,9 @@
-//! Phase 4 (fulgur-9t3z): node-keyed side-channel maps that replace the
-//! `Pageable` trait + 17 impls.
-//!
-//! `Drawables` is the data shape that `convert::dom_to_drawables` produces
-//! and `render::render_v2` consumes. Each map holds per-NodeId state for
-//! one draw concern (background, paragraph, image, etc.). The render path
-//! walks `pagination_layout::PaginationGeometryTable` per page and looks
-//! up the node's data in the appropriate map — no trait dispatch, no
+//! Data shape produced by `convert::dom_to_drawables` and consumed by
+//! `render::render_v2`; each map holds per-NodeId state for one draw
+//! concern (background, paragraph, image, etc.). The render path walks
+//! `pagination_layout::PaginationGeometryTable` per page and looks up
+//! the node's data in the appropriate map — no trait dispatch, no
 //! central `DrawOp` enum.
-//!
-//! See `docs/plans/2026-04-30-phase4-design.md` for the full design.
-//!
-//! ## PR sequence note
-//!
-//! This struct is introduced in PR 1 with empty placeholder fields. Each
-//! subsequent PR replaces one placeholder with the real data type:
-//!
-//! - PR 2: `images`, `svgs`, plus the five marker types collapse into
-//!   `bookmark_anchors` (the rest are deleted from the draw path).
-//! - PR 3: `paragraphs`.
-//! - PR 4: `block_styles`.
-//! - PR 5: `tables`, `list_items`.
-//! - PR 6: `transforms`, `multicol_rules`, plus marker wrappers vanish.
 
 use std::collections::BTreeMap;
 
@@ -128,17 +111,10 @@ pub struct DrawMark {
     list_items: usize,
 }
 
-// ── Placeholder entry types ──────────────────────────────────────────
-//
-// Each PR in the Phase 4 sequence replaces one of these with the real
-// per-node data extracted from convert. The placeholder is empty so that
-// the `Drawables` struct compiles before any draw migration starts; the
-// shadow harness can already exercise the pipeline plumbing.
+// ── Entry types ──────────────────────────────────────────────────────
 
-/// Block draw payload for v2. Mirrors the fields `BlockPageable`
-/// holds for paint dispatch — backgrounds, borders, box-shadow,
-/// overflow clip, opacity, and the anchor id used by
-/// `DestinationRegistry`.
+/// Block draw payload: backgrounds, borders, box-shadow, overflow clip,
+/// opacity, and the anchor id used by `DestinationRegistry`.
 #[derive(Debug, Clone)]
 pub struct BlockEntry {
     pub style: crate::draw_primitives::BlockStyle,
@@ -167,12 +143,12 @@ pub struct BlockEntry {
     /// `draw_under_clip` already wraps its descendants in
     /// `draw_with_opacity` so the dual case is covered there).
     ///
-    /// Mirrors v1's `BlockPageable::draw` ordering: opacity wraps
-    /// EVERYTHING — bg/border/shadow + descendants — so a
+    /// CSS `opacity` semantics: the block's opacity wraps EVERYTHING —
+    /// bg / border / shadow + descendants — so a
     /// `<div style="opacity:0.4"><svg>..</svg></div>` produces a
-    /// single transparency group. v2's flat dispatch without this
-    /// scope tracking would emit the svg outside the parent's
-    /// opacity wrap, dropping the parent's opacity from the svg.
+    /// single transparency group. `render_v2`'s flat dispatch would
+    /// otherwise emit the svg outside the parent's opacity wrap and
+    /// drop the parent's opacity from the svg.
     pub opacity_descendants: Vec<NodeId>,
 }
 
@@ -330,9 +306,9 @@ pub struct ColumnRuleGeometry {
 }
 
 /// Multicol column-rule paint spec + per-column-group geometry.
-/// Mirrors the fields `MulticolRulePageable` carries — render at the
-/// container's location after children paint, partitioning `groups`
-/// per page based on the container's fragment cumulative heights.
+/// Rendered at the container's location after children paint,
+/// partitioning `groups` per page based on the container's fragment
+/// cumulative heights.
 #[derive(Debug, Clone)]
 pub struct MulticolRuleEntry {
     pub rule: crate::column_css::ColumnRuleSpec,
@@ -343,8 +319,8 @@ pub struct MulticolRuleEntry {
 /// container. Built from `multicol_layout::ParagraphSplitEntry`. The
 /// per-slice `lines` are pre-rebased so each slice's first line has
 /// `baseline = ascent` (i.e. `y=0` is the slice's top edge), matching
-/// the rebase convention `paragraph::ParagraphPageable::split` uses
-/// for second fragments after a page-break (see commit 9c0e092).
+/// the baseline-rebase convention used for second fragments after a
+/// page-break (see commit 9c0e092).
 #[derive(Debug, Clone, Default)]
 pub struct ParagraphSlicesEntry {
     /// Multicol container's NodeId. `render_v2` looks up the
@@ -384,11 +360,11 @@ impl std::fmt::Debug for ParagraphSlice {
 
 /// CSS transform matrix + origin for a node (and its descendants).
 ///
-/// Mirrors `TransformWrapperPageable`. v1 pushes the surface transform
-/// before drawing `inner.draw(...)` and pops after; v2's flat dispatch
-/// emulates this by recording every descendant `node_id` of the wrapper
-/// at convert time so the render loop can dispatch the wrapper's own
-/// payload + every descendant inside one push/pop pair.
+/// `render_v2`'s flat dispatch loop has no implicit scope: to keep the
+/// transform in effect for every descendant fragment, convert records
+/// every descendant `node_id` of the wrapper here so the render loop
+/// can dispatch the wrapper's own payload + every descendant inside
+/// one push/pop pair.
 #[derive(Debug, Clone)]
 pub struct TransformEntry {
     pub matrix: crate::draw_primitives::Affine2D,
@@ -421,10 +397,6 @@ pub struct LinkSpanEntry;
 // ── Drawables ─────────────────────────────────────────────────────────
 
 /// Node-keyed side-channel maps consumed by `render::render_v2`.
-///
-/// Phase 4 PR 1 ships this with all maps empty — the v2 render path
-/// walks geometry but emits no content for any node. Subsequent PRs
-/// fill each map by migrating one Pageable type at a time.
 #[derive(Debug, Clone)]
 pub struct Drawables {
     /// `body_layout.location.x/y` in pt. Captures the html → body
