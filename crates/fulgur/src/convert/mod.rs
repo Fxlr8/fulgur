@@ -1,12 +1,9 @@
 //! Convert a Blitz DOM (after style resolution + layout) into a `Drawables`
-//! struct holding per-NodeId draw payload (Phase 4 PR 8i).
+//! struct holding per-NodeId draw payload.
 //!
-//! Phase 4 PR 8i replaced the previous "build a Pageable tree, then walk it
-//! to extract Drawables" scaffold with a single DOM walk that writes
-//! directly into `Drawables`'s per-NodeId maps. The intermediate Pageable
-//! tree (and the orphan-marker / wrapper machinery that supported it) is
-//! gone; bookmark / string-set / counter-op / running-element side-channels
-//! are read from their respective stores by the fragmenter and render pass
+//! A single DOM walk writes directly into `Drawables`'s per-NodeId maps.
+//! Bookmark / string-set / counter-op / running-element side-channels are
+//! read from their respective stores by the fragmenter and render pass
 //! independently.
 
 use crate::asset::AssetBundle;
@@ -660,8 +657,8 @@ fn record_multicol_rule(
 /// For every `ParagraphSplitEntry` recorded by `multicol_layout` against
 /// this container, materialise one `ParagraphSlice` per non-empty column.
 /// Each slice carries `Vec<ShapedLine>` rebased to the slice's own top
-/// edge, mirroring the `ParagraphPageable::split` convention used for
-/// continuation fragments after a page break (commit 9c0e092).
+/// edge, using the same rebase convention as continuation fragments after
+/// a page break (commit 9c0e092).
 ///
 /// Two source-layout sources, distinguished by whether
 /// `source_node_id == node_id`:
@@ -786,8 +783,8 @@ fn convert_multicol_paragraph_slices(
                 }
 
                 // Rebase per-line baselines into slice-local space.
-                // This mirrors `ParagraphPageable::split`'s rebase for
-                // continuation fragments (commit 9c0e092):
+                // Same rebase used for continuation fragments after a page
+                // break (commit 9c0e092):
                 //
                 // 1. `line.baseline -= consumed` shifts each line's
                 //    baseline from parley-layout space (paragraph top →

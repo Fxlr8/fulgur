@@ -28,18 +28,14 @@ pub(super) fn try_convert(
     }
     let (width, height) = size_in_pt(node.final_layout.size);
 
-    // PR 8i: snapshot taken BEFORE `extract_paragraph` because the latter
+    // Snapshot must be taken BEFORE `extract_paragraph` because the latter
     // recurses into inline-box children (registering their drawable
-    // entries into `out`). Pre-PR-8i, `extract_drawables_from_pageable`
-    // walked the v1 `BlockPageable` subtree and collected every nested
-    // node into `clip_descendants`/`opacity_descendants`; placing the
-    // snapshot after `extract_paragraph` would miss those exact nodes.
-    // The `id != node_id` filter on the diff drops the inline-root's
-    // own id from the descendant list; nested inline-box subtree
-    // members are intentionally NOT filtered against
-    // `inline_box_subtree_skip` so the render path's
-    // `draw_under_clip` re-dispatches them inside the clip group —
-    // mirroring the v1 ordering the golden PDFs encode.
+    // entries into `out`); placing the snapshot after would miss those
+    // exact nodes in the `clip_descendants`/`opacity_descendants` diff.
+    // The `id != node_id` filter drops the inline-root's own id from the
+    // descendant list; nested inline-box subtree members are intentionally
+    // NOT filtered against `inline_box_subtree_skip` so the render path's
+    // `draw_under_clip` re-dispatches them inside the clip group.
     let style = extract_block_style(node, ctx.assets);
     let (opacity, visible) = extract_opacity_visible(node);
     let needs_block_pre = style.needs_block_wrapper()
@@ -338,13 +334,12 @@ pub(super) fn inline_box_baseline_offset_from_drawables(
 }
 
 /// Recursive worker for `inline_box_baseline_offset_from_drawables`.
-/// Mirrors the pre-PR-8i `pageable_last_baseline` walk over
-/// `BlockPageable.children` in REVERSE — except the children list is
-/// derived from `node.layout_children` / `node.children` (Taffy DOM)
-/// instead of the Pageable tree. `top_inset` of each container adds its
-/// own `border-top + padding-top`; child layout `location.y` adds the
-/// child's offset within the container; the recursive call returns the
-/// inner baseline relative to the child's top edge.
+/// Walks the block's child list in REVERSE, deriving children from
+/// `node.layout_children` / `node.children` (Taffy DOM). `top_inset` of
+/// each container adds its own `border-top + padding-top`; child layout
+/// `location.y` adds the child's offset within the container; the
+/// recursive call returns the inner baseline relative to the child's top
+/// edge.
 fn pageable_last_baseline_from_drawables(
     doc: &BaseDocument,
     out: &crate::drawables::Drawables,
@@ -366,8 +361,7 @@ fn pageable_last_baseline_from_drawables(
             return Some(top_inset + line.baseline);
         }
     }
-    // 2) Otherwise walk DOM children in REVERSE, mirroring v1's
-    //    `BlockPageable::children.iter().rev()` search. Use Blitz's
+    // 2) Otherwise walk DOM children in REVERSE. Use Blitz's
     //    `layout_children` when available so anonymous block wrappers
     //    around inline-level siblings are visited correctly.
     let node = doc.get_node(node_id)?;

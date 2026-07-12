@@ -47,11 +47,10 @@ pub(super) fn convert(
     let opacity_scope = !clipping && opacity < 1.0;
     let mark = (clipping || opacity_scope).then(|| out.draw_mark());
 
-    // Always insert the block entry — the v2 dispatcher silently no-ops
+    // Always insert the block entry — the dispatcher silently no-ops
     // when neither paint nor clip nor opacity applies, so leaving an
     // unstyled entry costs nothing and keeps abs/fixed descendants able
-    // to look up their CB at render time. Mirrors v1's behavior of
-    // always emitting a `BlockPageable` for container nodes.
+    // to look up their CB at render time.
     insert_block_entry(node, style, width, height, out);
 
     // Walk in-flow children.
