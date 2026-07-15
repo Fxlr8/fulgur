@@ -3259,4 +3259,117 @@ mod tests {
         assert!(ctx.cleaned_css.contains("body { color: red; }"));
         assert!(ctx.cleaned_css.contains("p { margin: 0; }"));
     }
+
+    // --- prelude error paths (lines 148-149, 164, 190-191) ---
+
+    #[test]
+    fn test_selector_delimiter_first_token_is_skipped() {
+        // A delimiter like `>` as the first token in a rule is not a
+        // recognised simple selector; the block must be drained and the rule
+        // silently ignored (lines 148-149 of prelude parser).
+        let ctx = parse_gcpm("> p { position: running(header); }");
+        assert!(ctx.running_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_pseudo_element_is_not_registered() {
+        // `::first-line` is a valid CSS pseudo-element but is not mapped to
+        // Before/After, so the rule should be ignored (line 164).
+        let ctx = parse_gcpm("h1::first-line { position: running(header); }");
+        assert!(ctx.running_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_compound_selector_block_is_drained() {
+        // `.foo.bar` is a compound selector — our parser only handles simple
+        // selectors. When the prelude returns None, the block must be drained
+        // and the rule ignored (lines 190-191).
+        let ctx = parse_gcpm(".foo.bar { position: running(header); }");
+        assert!(ctx.running_mappings.is_empty());
+    }
+
+    // --- page-size error paths (lines 336, 355-357, 363) ---
+
+    #[test]
+    fn test_page_size_keyword_followed_by_non_ident_is_rejected() {
+        // `A4 100pt` — after the keyword `A4`, the next token is a Dimension,
+        // not an orientation ident. The orientation try_parse fails (line 336)
+        // and the token is put back. The trailing-token guard then fires and
+        // rejects the whole size declaration.
+        assert_no_page_settings("@page { size: A4 100pt; }");
+    }
+
+    #[test]
+    fn test_page_size_second_dim_invalid_unit_is_ignored() {
+        // `100pt 200em` — the second dimension uses `em`, which `css_unit_to_pt`
+        // does not support (relative units are unknown at parse time). The
+        // filter returns None, making the whole size declaration None
+        // (lines 355-357).
+        assert_no_page_settings("@page { size: 100pt 200em; }");
+    }
+
+    #[test]
+    fn test_page_size_string_literal_is_ignored() {
+        // A quoted string is not a valid first token for `size:`, so
+        // `parse_page_size_value` must return None (line 363 catch-all).
+        assert_no_page_settings(r#"@page { size: "A4"; }"#);
+    }
+
+    // --- @page unknown declaration (line 539) ---
+
+    #[test]
+    fn test_page_unknown_property_is_skipped() {
+        // An unrecognised property inside @page should be silently skipped
+        // (line 539: `while input.next().is_ok() {}`). The rule must still be
+        // parsed so that a subsequent `size:` or `margin:` is honoured.
+        let ctx = parse_gcpm("@page { color: red; size: A4; }");
+        assert_eq!(ctx.page_settings.len(), 1);
+        assert_eq!(
+            ctx.page_settings[0].size,
+            Some(PageSizeDecl::Keyword("A4".to_string()))
+        );
+    }
+
+    // --- counter-reset: none (line 1058) ---
+
+    #[test]
+    fn test_counter_reset_none_produces_no_ops() {
+        // `counter-reset: none` must produce zero counter ops (line 1057-1058
+        // breaks immediately), so no CounterMapping is recorded.
+        let ctx = parse_gcpm("p { counter-reset: none; }");
+        assert!(ctx.counter_mappings.is_empty());
+    }
+
+    // --- target-counter / target-counters invalid URL (lines 1005, 1010, 1162) ---
+
+    #[test]
+    fn test_target_counter_url_with_extra_token_drops_item() {
+        // `url("a" "b")` — the url() block contains two tokens; `is_exhausted`
+        // is false after parsing "a", so parse_nested_block returns Err and
+        // parse_target_url returns None (line 1005). The target-counter item
+        // is not recorded.
+        let css = r#"a::after { content: target-counter(url("a" "b"), page); }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.content_counter_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_target_counter_numeric_first_arg_drops_item() {
+        // A bare number `42` is not a recognised url form (not attr/string/url/
+        // unquoted-url), so parse_target_url hits the catch-all Err arm
+        // (line 1010) and returns None. The target-counter item is not recorded.
+        let css = r#"a::after { content: target-counter(42, page); }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.content_counter_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_target_counters_invalid_url_drops_item() {
+        // Same catch-all path (line 1162) for target-counters: a bare number
+        // as the URL argument causes parse_target_url to return None, so the
+        // item is silently dropped.
+        let css = r#"a::after { content: target-counters(42, section, "."); }"#;
+        let ctx = parse_gcpm(css);
+        assert!(ctx.content_counter_mappings.is_empty());
+    }
 }
