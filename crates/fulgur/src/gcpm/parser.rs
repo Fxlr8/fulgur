@@ -3267,16 +3267,40 @@ mod tests {
         // A delimiter like `>` as the first token in a rule is not a
         // recognised simple selector; the block must be drained and the rule
         // silently ignored (lines 148-149 of prelude parser).
-        let ctx = parse_gcpm("> p { position: running(header); }");
-        assert!(ctx.running_mappings.is_empty());
+        // A valid rule that follows must still be parsed to prove the block
+        // was drained and parsing continued (not short-circuited).
+        let ctx =
+            parse_gcpm("> p { position: running(header); } .valid { position: running(footer); }");
+        assert!(
+            !ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "header")
+        );
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "footer")
+        );
     }
 
     #[test]
     fn test_unknown_pseudo_element_is_not_registered() {
         // `::first-line` is a valid CSS pseudo-element but is not mapped to
         // Before/After, so the rule should be ignored (line 164).
-        let ctx = parse_gcpm("h1::first-line { position: running(header); }");
-        assert!(ctx.running_mappings.is_empty());
+        // The follow-up valid rule must still register to prove parsing continued.
+        let ctx = parse_gcpm(
+            "h1::first-line { position: running(header); } .valid { position: running(footer); }",
+        );
+        assert!(
+            !ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "header")
+        );
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "footer")
+        );
     }
 
     #[test]
@@ -3284,8 +3308,21 @@ mod tests {
         // `.foo.bar` is a compound selector — our parser only handles simple
         // selectors. When the prelude returns None, the block must be drained
         // and the rule ignored (lines 190-191).
-        let ctx = parse_gcpm(".foo.bar { position: running(header); }");
-        assert!(ctx.running_mappings.is_empty());
+        // The follow-up valid rule must still register to prove the block was
+        // drained and parsing continued.
+        let ctx = parse_gcpm(
+            ".foo.bar { position: running(header); } .valid { position: running(footer); }",
+        );
+        assert!(
+            !ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "header")
+        );
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "footer")
+        );
     }
 
     // --- page-size error paths (lines 336, 355-357, 363) ---
