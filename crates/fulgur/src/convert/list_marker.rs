@@ -392,6 +392,7 @@ mod tests {
     use crate::blitz_adapter::Marker;
     use crate::drawables::{Drawables, ParagraphEntry};
     use crate::image::ImageFormat;
+    use crate::paragraph::InlineBoxItem;
 
     // Minimal 1×1 red PNG (same bytes as in convert/replaced.rs tests).
     const TEST_PNG_1X1: &[u8] = &[
@@ -669,6 +670,164 @@ mod tests {
         assert_eq!(
             last.text_range.end, text_len,
             "last glyph must reach text end"
+        );
+    }
+
+    // ── find_marker_font: drawables loop branch coverage ─────────────────────
+    //
+    // The drawables fallback in find_marker_font iterates over paragraphs and
+    // skips three kinds of non-contributing items.  The existing
+    // `find_marker_font_fallback_from_drawables_paragraph` test only exercises
+    // the successful-return arm; the three "continue / fall-through" branches
+    // (non-Text item, invalid font bytes, font doesn't cover the char) were
+    // never hit.
+
+    #[test]
+    fn find_marker_font_drawables_inline_box_item_is_skipped() {
+        // A paragraph that contains only InlineBoxItem items must be skipped
+        // entirely — the font search must not crash or return a spurious match.
+        let box_item = LineItem::InlineBox(InlineBoxItem {
+            node_id: None,
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
+            link: None,
+            opacity: 1.0,
+            visible: true,
+        });
+        let line = ShapedLine {
+            height: 12.0_f32.as_pt(),
+            baseline: 9.0_f32.as_pt(),
+            items: vec![box_item],
+        };
+        let mut drawables = Drawables::new();
+        drawables.paragraphs.insert(
+            1,
+            ParagraphEntry {
+                lines: vec![line],
+                opacity: 1.0,
+                visible: true,
+                id: None,
+            },
+        );
+        let result = find_marker_font(&Marker::Char('•'), None, &drawables);
+        assert!(
+            result.is_none(),
+            "InlineBoxItem items must not be used as a font source"
+        );
+    }
+
+    #[test]
+    fn find_marker_font_drawables_invalid_font_bytes_are_skipped() {
+        // A Text run whose font_data contains invalid bytes makes
+        // skrifa::FontRef::from_index return Err.  The loop must skip the
+        // corrupt entry without panicking and return None when no other
+        // font is available.
+        let bad_font = Arc::new(vec![0u8; 16]);
+        let glyph_run = ShapedGlyphRun {
+            font_data: Arc::clone(&bad_font),
+            font_index: 0,
+            font_size: 12.0_f32.as_pt(),
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: Arc::from("•"),
+            x_offset: crate::units::Pt::ZERO,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 12.0_f32.as_pt(),
+            baseline: 9.0_f32.as_pt(),
+            items: vec![LineItem::Text(glyph_run)],
+        };
+        let mut drawables = Drawables::new();
+        drawables.paragraphs.insert(
+            1,
+            ParagraphEntry {
+                lines: vec![line],
+                opacity: 1.0,
+                visible: true,
+                id: None,
+            },
+        );
+        let result = find_marker_font(&Marker::Char('•'), None, &drawables);
+        assert!(
+            result.is_none(),
+            "invalid font bytes in a drawables run must not crash or be returned"
+        );
+    }
+
+    #[test]
+    fn find_marker_font_drawables_font_not_covering_char_is_skipped() {
+        // NotoSans is a valid font but does not cover U+E000 (Private Use Area).
+        // The coverage check inside the drawables loop must detect the miss
+        // and continue iterating rather than returning the non-covering font.
+        let font_data = load_noto_sans_ttf();
+        let glyph_run = ShapedGlyphRun {
+            font_data: Arc::clone(&font_data),
+            font_index: 0,
+            font_size: 12.0_f32.as_pt(),
+            color: [0, 0, 0, 255],
+            decoration: TextDecoration::default(),
+            glyphs: vec![],
+            text: Arc::from("A"),
+            x_offset: crate::units::Pt::ZERO,
+            link: None,
+        };
+        let line = ShapedLine {
+            height: 12.0_f32.as_pt(),
+            baseline: 9.0_f32.as_pt(),
+            items: vec![LineItem::Text(glyph_run)],
+        };
+        let mut drawables = Drawables::new();
+        drawables.paragraphs.insert(
+            1,
+            ParagraphEntry {
+                lines: vec![line],
+                opacity: 1.0,
+                visible: true,
+                id: None,
+            },
+        );
+        // U+E000 is in the Private Use Area; NotoSans does not map it.
+        let result = find_marker_font(&Marker::Char('\u{E000}'), None, &drawables);
+        assert!(
+            result.is_none(),
+            "NotoSans must not be returned for a marker char it does not cover"
+        );
+    }
+
+    // ── shape_marker_with_skrifa: unmapped character falls back to GlyphId 0 ─
+
+    #[test]
+    fn shape_marker_with_skrifa_unmapped_char_uses_glyph_id_zero() {
+        // When a character in the marker text is absent from the font's charmap,
+        // charmap.map() returns None and the code falls back to GlyphId::new(0)
+        // — the OpenType `.notdef` placeholder.  Shaping must still succeed.
+        let font_data = load_noto_sans_ttf();
+        let result = shape_marker_with_skrifa(
+            // marker_skrifa_text(Char(U+E000)) → "\u{E000} " (char + trailing space)
+            &Marker::Char('\u{E000}'),
+            &font_data,
+            0,
+            12.0_f32.as_pt(),
+            [0, 0, 0, 255],
+        );
+        assert!(
+            result.is_some(),
+            "shaping must succeed even when the char is absent from the font"
+        );
+        let run = result.unwrap();
+        assert!(
+            !run.glyphs.is_empty(),
+            "at least one glyph must be produced"
+        );
+        // First glyph is for U+E000, which NotoSans does not have → id must be 0.
+        assert_eq!(
+            run.glyphs[0].id, 0,
+            "U+E000 (absent from NotoSans) must map to glyph ID 0, got {}",
+            run.glyphs[0].id
         );
     }
 }
