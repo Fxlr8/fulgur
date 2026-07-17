@@ -251,21 +251,30 @@ mod tests {
     #[test]
     fn pdf_tag_to_krilla_tag_heading_with_title() {
         let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 2 }, Some("Chapter 1".to_owned()), None);
-        assert!(matches!(k, krilla::tagging::TagKind::Hn(_)));
+        let krilla::tagging::TagKind::Hn(tag) = k else {
+            panic!("expected Hn");
+        };
+        assert_eq!(tag.title(), Some("Chapter 1"));
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_figure_none_alt_text() {
         // None = alt attribute absent (not decorative).
         let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, None);
-        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
+        let krilla::tagging::TagKind::Figure(tag) = k else {
+            panic!("expected Figure");
+        };
+        assert_eq!(tag.alt_text(), None);
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_figure_empty_alt_text() {
         // Some("") = decorative image.
         let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, Some(String::new()));
-        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
+        let krilla::tagging::TagKind::Figure(tag) = k else {
+            panic!("expected Figure");
+        };
+        assert_eq!(tag.alt_text(), Some(""));
     }
 
     #[test]
@@ -277,7 +286,10 @@ mod tests {
             None,
             None,
         );
-        assert!(matches!(k, krilla::tagging::TagKind::L(_)));
+        let krilla::tagging::TagKind::L(tag) = k else {
+            panic!("expected L");
+        };
+        assert_eq!(tag.numbering(), krilla::tagging::ListNumbering::Decimal);
     }
 
     #[test]
@@ -289,7 +301,10 @@ mod tests {
             TableHeaderScope::Both,
         ] {
             let k = pdf_tag_to_krilla_tag(&PdfTag::Th { scope }, None, None);
-            assert!(matches!(k, TagKind::TH(_)), "scope = {scope:?}");
+            let TagKind::TH(tag) = k else {
+                panic!("expected TH for scope = {scope:?}");
+            };
+            assert_eq!(tag.scope(), scope, "scope = {scope:?}");
         }
     }
 
