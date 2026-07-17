@@ -120,11 +120,15 @@ fn tagged_render_with_noto(html: &str) -> Vec<u8> {
 /// `[APP: ]` across line breaks. Returns `None` if `pdftotext` is not
 /// installed — callers should gracefully skip in that case (CI has
 /// poppler-utils preinstalled; local dev on macOS needs `brew install
-/// poppler`). pdftotext walks the font's ToUnicode CMap to recover
-/// Unicode from CID-encoded TJ strings, which lopdf 0.40 cannot do —
-/// this is the replacement for the old ActualText hex grep, which was
-/// only viable while the now-fixed `text_range = 0..text_len` bug
-/// triggered Krilla's whole-paragraph ActualText path.
+/// poppler`). If pdftotext is installed but exits non-zero, returns
+/// `Some("[pdftotext failed status=... stderr=...]")` so the caller's
+/// `assert!(text.contains(...))` fires with the underlying stderr in
+/// the panic message instead of silently skipping. pdftotext walks the
+/// font's ToUnicode CMap to recover Unicode from CID-encoded TJ
+/// strings, which lopdf 0.40 cannot do — this is the replacement for
+/// the old ActualText hex grep, which was only viable while the
+/// now-fixed `text_range = 0..text_len` bug triggered Krilla's
+/// whole-paragraph ActualText path.
 fn extract_pdf_text(pdf: &[u8]) -> Option<String> {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("extract.pdf");
@@ -136,7 +140,11 @@ fn extract_pdf_text(pdf: &[u8]) -> Option<String> {
         .output()
         .ok()?;
     if !output.status.success() {
-        return None;
+        return Some(format!(
+            "[pdftotext failed status={} stderr={:?}]",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
     }
     Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
