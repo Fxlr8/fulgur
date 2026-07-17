@@ -158,6 +158,19 @@ mod tests {
     }
 
     #[test]
+    fn classify_element_h2_through_h5_have_correct_levels() {
+        assert_eq!(classify_element("h2"), Some(PdfTag::H { level: 2 }));
+        assert_eq!(classify_element("h3"), Some(PdfTag::H { level: 3 }));
+        assert_eq!(classify_element("h4"), Some(PdfTag::H { level: 4 }));
+        assert_eq!(classify_element("h5"), Some(PdfTag::H { level: 5 }));
+    }
+
+    #[test]
+    fn classify_element_empty_string_returns_none() {
+        assert_eq!(classify_element(""), None);
+    }
+
+    #[test]
     fn classify_element_recognises_generic_containers_as_div() {
         for tag in [
             "div", "section", "article", "main", "aside", "nav", "header", "footer",
@@ -233,6 +246,55 @@ mod tests {
     fn pdf_tag_to_krilla_tag_span() {
         let k = pdf_tag_to_krilla_tag(&PdfTag::Span, None, None);
         assert!(matches!(k, krilla::tagging::TagKind::Span(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_heading_with_title() {
+        // Heading title flows through to the Hn variant.
+        let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 2 }, Some("Chapter 1".to_owned()), None);
+        assert!(matches!(k, krilla::tagging::TagKind::Hn(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_figure_none_alt_text() {
+        // None = alt attribute absent (not decorative).
+        let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, None);
+        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_figure_empty_alt_text() {
+        // Some("") = decorative image.
+        let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, Some(String::new()));
+        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_l_decimal() {
+        let k = pdf_tag_to_krilla_tag(
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Decimal,
+            },
+            None,
+            None,
+        );
+        assert!(matches!(k, krilla::tagging::TagKind::L(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_th_scope_variants() {
+        use krilla::tagging::{TableHeaderScope, TagKind};
+        for scope in [
+            TableHeaderScope::Row,
+            TableHeaderScope::Column,
+            TableHeaderScope::Both,
+        ] {
+            let k = pdf_tag_to_krilla_tag(&PdfTag::Th { scope }, None, None);
+            assert!(matches!(k, TagKind::TH(_)), "scope = {scope:?}");
+            if let TagKind::TH(tag) = k {
+                assert_eq!(tag.scope(), scope, "scope = {scope:?}");
+            }
+        }
     }
 
     #[test]
