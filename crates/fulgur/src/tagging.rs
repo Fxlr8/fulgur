@@ -251,30 +251,30 @@ mod tests {
     #[test]
     fn pdf_tag_to_krilla_tag_heading_with_title() {
         let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 2 }, Some("Chapter 1".to_owned()), None);
-        let krilla::tagging::TagKind::Hn(tag) = k else {
-            panic!("expected Hn");
-        };
-        assert_eq!(tag.title(), Some("Chapter 1"));
+        assert!(matches!(k, krilla::tagging::TagKind::Hn(_)));
+        if let krilla::tagging::TagKind::Hn(tag) = k {
+            assert_eq!(tag.title(), Some("Chapter 1"));
+        }
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_figure_none_alt_text() {
         // None = alt attribute absent (not decorative).
         let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, None);
-        let krilla::tagging::TagKind::Figure(tag) = k else {
-            panic!("expected Figure");
-        };
-        assert_eq!(tag.alt_text(), None);
+        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
+        if let krilla::tagging::TagKind::Figure(tag) = k {
+            assert_eq!(tag.alt_text(), None);
+        }
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_figure_empty_alt_text() {
         // Some("") = decorative image.
         let k = pdf_tag_to_krilla_tag(&PdfTag::Figure, None, Some(String::new()));
-        let krilla::tagging::TagKind::Figure(tag) = k else {
-            panic!("expected Figure");
-        };
-        assert_eq!(tag.alt_text(), Some(""));
+        assert!(matches!(k, krilla::tagging::TagKind::Figure(_)));
+        if let krilla::tagging::TagKind::Figure(tag) = k {
+            assert_eq!(tag.alt_text(), Some(""));
+        }
     }
 
     #[test]
@@ -286,10 +286,10 @@ mod tests {
             None,
             None,
         );
-        let krilla::tagging::TagKind::L(tag) = k else {
-            panic!("expected L");
-        };
-        assert_eq!(tag.numbering(), krilla::tagging::ListNumbering::Decimal);
+        assert!(matches!(k, krilla::tagging::TagKind::L(_)));
+        if let krilla::tagging::TagKind::L(tag) = k {
+            assert_eq!(tag.numbering(), krilla::tagging::ListNumbering::Decimal);
+        }
     }
 
     #[test]
@@ -301,10 +301,10 @@ mod tests {
             TableHeaderScope::Both,
         ] {
             let k = pdf_tag_to_krilla_tag(&PdfTag::Th { scope }, None, None);
-            let TagKind::TH(tag) = k else {
-                panic!("expected TH for scope = {scope:?}");
-            };
-            assert_eq!(tag.scope(), scope, "scope = {scope:?}");
+            assert!(matches!(k, TagKind::TH(_)), "scope = {scope:?}");
+            if let TagKind::TH(tag) = k {
+                assert_eq!(tag.scope(), scope, "scope = {scope:?}");
+            }
         }
     }
 
