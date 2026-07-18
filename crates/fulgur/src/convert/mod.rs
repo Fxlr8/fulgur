@@ -1495,6 +1495,171 @@ mod semantics_tests {
             "missing alt should be None"
         );
     }
+
+    // ── walk_semantics: <th scope> attribute handling ─────────────────────
+
+    #[test]
+    fn walk_semantics_th_scope_row_overrides_default() {
+        // <th scope="row"> must produce TableHeaderScope::Row, not the
+        // default Both that classify_element initialises.
+        let html = "<!DOCTYPE html><html><body>\
+            <table><tr>\
+                <th scope=\"row\">Row header</th>\
+                <td>data</td>\
+            </tr></table>\
+            </body></html>";
+        let d = build_drawables(html);
+        let row_ths = entries_by_tag(
+            &d,
+            &PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Row,
+            },
+        );
+        assert_eq!(row_ths.len(), 1, "one th with scope=row");
+        let both_ths = entries_by_tag(
+            &d,
+            &PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Both,
+            },
+        );
+        assert_eq!(
+            both_ths.len(),
+            0,
+            "no default-scope th when scope=row is set"
+        );
+    }
+
+    #[test]
+    fn walk_semantics_th_scope_col_overrides_default() {
+        // <th scope="col"> must produce TableHeaderScope::Column.
+        let html = "<!DOCTYPE html><html><body>\
+            <table><tr>\
+                <th scope=\"col\">Col header 1</th>\
+                <th scope=\"column\">Col header 2</th>\
+            </tr></table>\
+            </body></html>";
+        let d = build_drawables(html);
+        let col_ths = entries_by_tag(
+            &d,
+            &PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Column,
+            },
+        );
+        assert_eq!(col_ths.len(), 2, "two th with scope=col/column");
+    }
+
+    #[test]
+    fn walk_semantics_th_unrecognised_scope_falls_back_to_both() {
+        // An unrecognised scope value (e.g. "rowgroup") produces the Both
+        // fallback set by the `unwrap_or` in walk_semantics.
+        let html = "<!DOCTYPE html><html><body>\
+            <table><tr>\
+                <th scope=\"rowgroup\">Group header</th>\
+            </tr></table>\
+            </body></html>";
+        let d = build_drawables(html);
+        let both_ths = entries_by_tag(
+            &d,
+            &PdfTag::Th {
+                scope: krilla::tagging::TableHeaderScope::Both,
+            },
+        );
+        assert_eq!(both_ths.len(), 1, "unrecognised scope falls back to Both");
+    }
+
+    // ── walk_semantics: list-style-type CSS override ──────────────────────
+
+    #[test]
+    fn walk_semantics_list_style_type_circle_maps_to_circle() {
+        // <ul style="list-style-type:circle"> must override the default Disc
+        // numbering that classify_element("ul") sets.
+        let html = "<!DOCTYPE html><html><body>\
+            <ul style=\"list-style-type:circle\"><li>item</li></ul>\
+            </body></html>";
+        let d = build_drawables(html);
+        let circle_lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Circle,
+            },
+        );
+        assert_eq!(circle_lists.len(), 1, "one ul with Circle numbering");
+        let disc_lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Disc,
+            },
+        );
+        assert_eq!(disc_lists.len(), 0, "no Disc list when circle is set");
+    }
+
+    #[test]
+    fn walk_semantics_list_style_type_square_maps_to_square() {
+        let html = "<!DOCTYPE html><html><body>\
+            <ul style=\"list-style-type:square\"><li>item</li></ul>\
+            </body></html>";
+        let d = build_drawables(html);
+        let square_lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::Square,
+            },
+        );
+        assert_eq!(square_lists.len(), 1, "one ul with Square numbering");
+    }
+
+    #[test]
+    fn walk_semantics_list_style_type_lower_alpha_maps_to_lower_alpha() {
+        let html = "<!DOCTYPE html><html><body>\
+            <ol style=\"list-style-type:lower-alpha\"><li>a</li></ol>\
+            </body></html>";
+        let d = build_drawables(html);
+        let alpha_lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::LowerAlpha,
+            },
+        );
+        assert_eq!(alpha_lists.len(), 1, "one ol with LowerAlpha numbering");
+    }
+
+    #[test]
+    fn walk_semantics_list_style_type_upper_alpha_maps_to_upper_alpha() {
+        let html = "<!DOCTYPE html><html><body>\
+            <ol style=\"list-style-type:upper-alpha\"><li>A</li></ol>\
+            </body></html>";
+        let d = build_drawables(html);
+        let alpha_lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::UpperAlpha,
+            },
+        );
+        assert_eq!(alpha_lists.len(), 1, "one ol with UpperAlpha numbering");
+    }
+
+    #[test]
+    fn walk_semantics_list_style_type_unhandled_maps_to_none() {
+        // lower-greek is a CSS keyword Stylo/servo recognises (it is in servo's
+        // single_keyword list) but is NOT in our explicit match arms, so it hits
+        // `_ => ListNumbering::None`. lower-roman is NOT in servo's list, so
+        // the inline style is rejected and the UA-stylesheet default takes over.
+        let html = "<!DOCTYPE html><html><body>\
+            <ol style=\"list-style-type:lower-greek\"><li>α</li></ol>\
+            </body></html>";
+        let d = build_drawables(html);
+        let none_lists = entries_by_tag(
+            &d,
+            &PdfTag::L {
+                numbering: krilla::tagging::ListNumbering::None,
+            },
+        );
+        assert_eq!(
+            none_lists.len(),
+            1,
+            "lower-greek maps to ListNumbering::None"
+        );
+    }
 }
 
 #[cfg(test)]
