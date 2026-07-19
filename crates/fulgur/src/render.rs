@@ -4451,6 +4451,64 @@ mod tests {
         assert!(para_has_link_runs(&para));
     }
 
+    // --- run_tag_target ---
+
+    #[test]
+    fn run_tag_target_li_lbody_ids_hit_returns_lbody_id() {
+        // When li_lbody_ids contains node_id, the synthetic LBody id is returned
+        // (which differs from the input node_id).
+        let mut d = Drawables::new();
+        let li_id: crate::drawables::NodeId = 10;
+        let lbody_id: crate::drawables::NodeId = 9999;
+        d.li_lbody_ids.insert(li_id, lbody_id);
+        assert_eq!(run_tag_target(&d, li_id), Some(lbody_id));
+    }
+
+    #[test]
+    fn run_tag_target_li_lbody_ids_returns_mapped_not_input_id() {
+        // The returned id is the LBody synthetic id, NOT the li input id.
+        let mut d = Drawables::new();
+        let li_id: crate::drawables::NodeId = 20;
+        let lbody_id: crate::drawables::NodeId = 8888;
+        d.li_lbody_ids.insert(li_id, lbody_id);
+        let result = run_tag_target(&d, li_id);
+        assert_ne!(result, Some(li_id));
+        assert_eq!(result, Some(lbody_id));
+    }
+
+    #[test]
+    fn run_tag_target_semantics_hit_returns_node_id() {
+        // When only semantics contains node_id, returns Some(node_id) unchanged.
+        let node_id: crate::drawables::NodeId = 5;
+        let d = drawables_with_para(node_id);
+        assert_eq!(run_tag_target(&d, node_id), Some(node_id));
+    }
+
+    #[test]
+    fn run_tag_target_neither_map_returns_none() {
+        // A node absent from both li_lbody_ids and semantics yields None.
+        let d = Drawables::new();
+        assert_eq!(run_tag_target(&d, 42), None);
+    }
+
+    #[test]
+    fn run_tag_target_li_lbody_ids_takes_priority_over_semantics() {
+        // When node_id is in both maps, li_lbody_ids wins and lbody_id is returned.
+        let mut d = Drawables::new();
+        let node_id: crate::drawables::NodeId = 7;
+        let lbody_id: crate::drawables::NodeId = 7777;
+        d.li_lbody_ids.insert(node_id, lbody_id);
+        d.semantics.insert(
+            node_id,
+            crate::tagging::SemanticEntry {
+                tag: crate::tagging::PdfTag::Li,
+                parent: None,
+                alt_text: None,
+            },
+        );
+        assert_eq!(run_tag_target(&d, node_id), Some(lbody_id));
+    }
+
     // --- extract_heading_title ---
 
     #[test]
