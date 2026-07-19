@@ -5659,7 +5659,8 @@ fn font_size_zero_does_not_produce_nan_glyphs() {
                 let fulgur::paragraph::LineItem::Text(run) = item else {
                     continue;
                 };
-                if run.font_size.to_f32() == 0.0 {
+                let font_size_zero = run.font_size.to_f32() == 0.0;
+                if font_size_zero {
                     *seen_zero += 1;
                 }
                 for g in &run.glyphs {
@@ -5678,6 +5679,27 @@ fn font_size_zero_does_not_produce_nan_glyphs() {
                         "{source}: y_offset must be finite even at font-size:0 (got {})",
                         g.y_offset,
                     );
+                    // Pin the *contract* of `normalize_by_font_size` at
+                    // `font_size == 0.0`: not merely finite (which a
+                    // regression to `raw / very_small_positive` could
+                    // still satisfy at a garbage value) but exactly
+                    // `0.0`. Downstream `x_advance * run.font_size` will
+                    // multiply by zero anyway, so the only value that
+                    // preserves the round-trip is `0.0` itself.
+                    if font_size_zero {
+                        assert_eq!(
+                            g.x_advance, 0.0,
+                            "{source}: x_advance at font-size:0 must be exactly 0.0"
+                        );
+                        assert_eq!(
+                            g.x_offset, 0.0,
+                            "{source}: x_offset at font-size:0 must be exactly 0.0"
+                        );
+                        assert_eq!(
+                            g.y_offset, 0.0,
+                            "{source}: y_offset at font-size:0 must be exactly 0.0"
+                        );
+                    }
                 }
             }
         }

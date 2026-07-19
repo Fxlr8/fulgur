@@ -79,14 +79,74 @@ impl ShapedGlyph {
     /// Normalize a raw glyph advance/offset by `font_size` to the unit-less
     /// ratio stored in `x_advance`/`x_offset`/`y_offset` (see the fulgur
     /// convention documented at the four glyph-construction sites in
-    /// `crates/fulgur/src/convert/`). Returns `0.0` when `font_size` is not
-    /// strictly positive, which covers `font-size: 0` (a valid CSS state
-    /// used e.g. to suppress whitespace between inline children) as well as
-    /// stray NaN/negative inputs — a plain division would otherwise produce
-    /// NaN and propagate into the PDF `Tm`/`TJ` operators (issue #639).
+    /// `crates/fulgur/src/convert/`).
+    ///
+    /// Returns `0.0` in every case that would otherwise leak a non-finite
+    /// value into the PDF `Tm`/`TJ` operators (issue #639):
+    /// - `font_size == 0.0` (the reported repro — `font-size: 0` is a
+    ///   valid CSS state used e.g. to suppress whitespace between inline
+    ///   children) → the bare division would produce `NaN`.
+    /// - `font_size < 0.0` or `NaN` — stray inputs from upstream bugs.
+    /// - Subnormal / very small `font_size` where `v / font_size`
+    ///   overflows to `±Infinity`.
+    /// - Non-finite `v` (also propagated to `0.0` via the trailing
+    ///   `is_finite` gate).
     #[inline]
     pub(crate) fn normalize_by_font_size(v: f32, font_size: f32) -> f32 {
-        if font_size > 0.0 { v / font_size } else { 0.0 }
+        if font_size > 0.0 {
+            let ratio = v / font_size;
+            if ratio.is_finite() {
+                return ratio;
+            }
+        }
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod normalize_by_font_size_tests {
+    use super::ShapedGlyph;
+
+    #[test]
+    fn positive_divisor_returns_ratio() {
+        assert_eq!(ShapedGlyph::normalize_by_font_size(10.0, 5.0), 2.0);
+        assert_eq!(ShapedGlyph::normalize_by_font_size(0.0, 5.0), 0.0);
+        assert_eq!(ShapedGlyph::normalize_by_font_size(-3.0, 6.0), -0.5);
+    }
+
+    #[test]
+    fn zero_divisor_returns_zero_not_nan() {
+        assert_eq!(ShapedGlyph::normalize_by_font_size(0.0, 0.0), 0.0);
+        assert_eq!(ShapedGlyph::normalize_by_font_size(10.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn negative_divisor_returns_zero() {
+        assert_eq!(ShapedGlyph::normalize_by_font_size(10.0, -5.0), 0.0);
+    }
+
+    #[test]
+    fn nan_divisor_returns_zero() {
+        assert_eq!(ShapedGlyph::normalize_by_font_size(10.0, f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn subnormal_divisor_that_would_overflow_returns_zero() {
+        let subnormal = f32::from_bits(1);
+        assert!(subnormal > 0.0 && subnormal < f32::MIN_POSITIVE);
+        assert!(!(1.0f32 / subnormal).is_finite());
+        assert_eq!(
+            ShapedGlyph::normalize_by_font_size(1.0, subnormal),
+            0.0,
+            "1.0 / subnormal overflows to Infinity; helper must not leak it \
+             into `x_advance`",
+        );
+    }
+
+    #[test]
+    fn non_finite_numerator_returns_zero() {
+        assert_eq!(ShapedGlyph::normalize_by_font_size(f32::NAN, 5.0), 0.0);
+        assert_eq!(ShapedGlyph::normalize_by_font_size(f32::INFINITY, 5.0), 0.0);
     }
 }
 
