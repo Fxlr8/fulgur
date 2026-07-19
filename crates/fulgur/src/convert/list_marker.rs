@@ -235,9 +235,9 @@ pub(super) fn extract_marker_lines(
                     line_width += g.advance.as_px().in_pt();
                     glyphs.push(ShapedGlyph {
                         id: g.id,
-                        x_advance: g.advance / font_size_parley,
-                        x_offset: g.x / font_size_parley,
-                        y_offset: g.y / font_size_parley,
+                        x_advance: ShapedGlyph::normalize_by_font_size(g.advance, font_size_parley),
+                        x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
+                        y_offset: ShapedGlyph::normalize_by_font_size(g.y, font_size_parley),
                         text_range,
                     });
                 }
@@ -364,7 +364,7 @@ pub(super) fn shape_marker_with_skrifa(
         let advance = glyph_metrics.advance_width(gid).unwrap_or(0.0);
         glyphs.push(ShapedGlyph {
             id: gid.to_u32(),
-            x_advance: advance / font_size.to_f32(),
+            x_advance: ShapedGlyph::normalize_by_font_size(advance, font_size.to_f32()),
             x_offset: 0.0,
             y_offset: 0.0,
             text_range: byte_offset..byte_offset + ch_len,

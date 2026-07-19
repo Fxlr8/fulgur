@@ -509,9 +509,12 @@ pub(super) fn extract_paragraph(
                         run_glyph_offset += 1;
                         glyphs.push(ShapedGlyph {
                             id: g.id,
-                            x_advance: g.advance / font_size_parley,
-                            x_offset: g.x / font_size_parley,
-                            y_offset: g.y / font_size_parley,
+                            x_advance: ShapedGlyph::normalize_by_font_size(
+                                g.advance,
+                                font_size_parley,
+                            ),
+                            x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
+                            y_offset: ShapedGlyph::normalize_by_font_size(g.y, font_size_parley),
                             text_range,
                         });
                     }

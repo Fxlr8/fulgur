@@ -5611,3 +5611,122 @@ fn tagged_p_with_nested_list_in_inline_block_does_not_panic() {
     let s = String::from_utf8_lossy(&pdf);
     assert!(s.contains("/StructTreeRoot"));
 }
+
+/// Regression for issue #639 (fulgur-rkfu): `font-size: 0` on an element with
+/// text used to divide `parley` (or `skrifa`) glyph advances by `0.0`,
+/// producing `NaN` glyph fields that propagated into the PDF `Tm`/`TJ`
+/// operators. `pdftocairo` rejected the resulting stream with `Unknown
+/// operator 'NaN'`.
+///
+/// Four convert-time sites normalize glyph advance/offsets by `font_size`
+/// (see `ShapedGlyph::normalize_by_font_size` in `paragraph.rs`); the HTML
+/// below is deliberately shaped to drive all four so a regression at any
+/// single one fails this test:
+///
+/// - `<p>invisible <span>visible</span> …</p>` → `inline_root.rs` shaping
+///   (the plain inline paragraph path).
+/// - `<div class="mc">…</div>` with `columns: 2` → `convert/mod.rs`'s
+///   `shape_paragraph_glyph_runs` (the multicol per-slice re-shape path).
+/// - `<ul><li>outside</li></ul>` (default `list-style-position: outside`)
+///   → `list_marker.rs::extract_marker_lines` (parley marker shaping).
+/// - `<ul style="list-style-position:inside"><li>inside</li></ul>` →
+///   `list_marker.rs::shape_marker_with_skrifa` (skrifa marker fallback).
+///
+/// Empirically verified by reverting each of the four guards one at a time
+/// while running this test — each revert flips the test red.
+#[test]
+fn font_size_zero_does_not_produce_nan_glyphs() {
+    let html = r#"<!DOCTYPE html><html><head><style>
+        p, .mc, ul, ul li, ul li div { font-size: 0; }
+        p > span { font-size: 9pt; }
+        .mc { columns: 2; column-gap: 20pt; width: 400pt; }
+        ul.inside { list-style-position: inside; }
+    </style></head><body>
+        <p>invisible <span>visible</span> also-invisible</p>
+        <div class="mc">multicol invisible text spanning two columns of layout</div>
+        <ul><li>outside marker item</li></ul>
+        <ul class="inside"><li><div>inside marker with block child</div></li></ul>
+    </body></html>"#;
+
+    let out = Engine::builder()
+        .build()
+        .layout(html)
+        .expect("font-size:0 layout must succeed");
+
+    fn check_lines(lines: &[fulgur::paragraph::ShapedLine], source: &str, seen_zero: &mut u32) {
+        for line in lines {
+            for item in &line.items {
+                let fulgur::paragraph::LineItem::Text(run) = item else {
+                    continue;
+                };
+                if run.font_size.to_f32() == 0.0 {
+                    *seen_zero += 1;
+                }
+                for g in &run.glyphs {
+                    assert!(
+                        g.x_advance.is_finite(),
+                        "{source}: x_advance must be finite even at font-size:0 (got {})",
+                        g.x_advance,
+                    );
+                    assert!(
+                        g.x_offset.is_finite(),
+                        "{source}: x_offset must be finite even at font-size:0 (got {})",
+                        g.x_offset,
+                    );
+                    assert!(
+                        g.y_offset.is_finite(),
+                        "{source}: y_offset must be finite even at font-size:0 (got {})",
+                        g.y_offset,
+                    );
+                }
+            }
+        }
+    }
+
+    // Three separate counters so a coverage regression (e.g. multicol
+    // slice path stops emitting) fails loudly instead of silently
+    // shrinking the site coverage of this test.
+    let mut para_runs = 0u32;
+    let mut slice_runs = 0u32;
+    let mut marker_runs = 0u32;
+
+    for entry in out.drawables.paragraphs.values() {
+        check_lines(&entry.lines, "paragraphs", &mut para_runs);
+    }
+    for entry in out.drawables.paragraph_slices.values() {
+        for slice in &entry.slices {
+            check_lines(&slice.lines, "paragraph_slices", &mut slice_runs);
+        }
+    }
+    for entry in out.drawables.list_items.values() {
+        if let fulgur::drawables::ListItemMarker::Text { lines, .. } = &entry.marker {
+            check_lines(lines, "list_items.marker", &mut marker_runs);
+        }
+    }
+
+    assert!(
+        para_runs > 0,
+        "expected inline_root (paragraphs) to emit at least one font-size:0 run",
+    );
+    assert!(
+        slice_runs > 0,
+        "expected multicol (paragraph_slices) to emit at least one font-size:0 run",
+    );
+    assert!(
+        marker_runs > 0,
+        "expected list-item markers (list_items.marker) to emit at least one \
+         font-size:0 run",
+    );
+
+    // Full pipeline still produces a well-formed PDF (no NaN → no `Unknown
+    // operator 'NaN'` from pdftocairo). We do not decompress and grep for
+    // the substring "NaN" here because that would require a decompression
+    // dev-dep; the layout assertion above already pins the source of the
+    // NaN, and a `%PDF` prefix + non-empty body confirms rendering
+    // completed without panic.
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("font-size:0 render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+}

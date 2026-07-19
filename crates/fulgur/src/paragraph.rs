@@ -75,6 +75,21 @@ pub struct ShapedGlyph {
     pub text_range: std::ops::Range<usize>,
 }
 
+impl ShapedGlyph {
+    /// Normalize a raw glyph advance/offset by `font_size` to the unit-less
+    /// ratio stored in `x_advance`/`x_offset`/`y_offset` (see the fulgur
+    /// convention documented at the four glyph-construction sites in
+    /// `crates/fulgur/src/convert/`). Returns `0.0` when `font_size` is not
+    /// strictly positive, which covers `font-size: 0` (a valid CSS state
+    /// used e.g. to suppress whitespace between inline children) as well as
+    /// stray NaN/negative inputs — a plain division would otherwise produce
+    /// NaN and propagate into the PDF `Tm`/`TJ` operators (issue #639).
+    #[inline]
+    pub(crate) fn normalize_by_font_size(v: f32, font_size: f32) -> f32 {
+        if font_size > 0.0 { v / font_size } else { 0.0 }
+    }
+}
+
 /// Target for a clickable link in PDF output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
