@@ -5811,3 +5811,59 @@ fn font_size_zero_does_not_produce_nan_glyphs() {
         .expect("font-size:0 render must succeed");
     assert!(pdf.starts_with(b"%PDF"));
 }
+
+/// Attack fixture builder: `<N>` color-stops evenly distributed as a
+/// red/blue alternation. Used by the gradient-fallback OOM tests below.
+fn many_color_stops(n: usize) -> String {
+    let mut s = String::new();
+    let step = 100.0f32 / (n as f32 - 1.0);
+    for i in 0..n {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        let pct = (i as f32) * step;
+        let color = if i % 2 == 0 { "red" } else { "blue" };
+        s.push_str(&format!("{color} {pct:.4}%"));
+    }
+    s
+}
+
+/// Codex Security finding `01f477e4` — "Repeated tiny gradients can
+/// exhaust render CPU". Before this fix, the attack HTML below (~300 B
+/// serialized) produced a **~425 MB** PDF and **~975 MB** peak RSS in
+/// the CLI: `background-size: 1.33px × 1.33px` with `background-repeat:
+/// repeat` on an A4 clip generates ~500k logical tiles, which the
+/// `compute_tile_positions_slow` `MAX_TILES = 10_000` cap truncates
+/// mid-row. The truncated (non-rectangular) grid defeats
+/// `try_uniform_grid`, so the per-tile fallback fires with up to 10_000
+/// `draw_linear_gradient` calls, each rebuilding a krilla stop vector
+/// bounded by `MAX_GRADIENT_STOPS = 256`. Fix: fold the leading
+/// complete-row rectangle into a single Tiling Pattern (see
+/// `split_truncated_grid` in `background.rs`); only the trailing
+/// partial row falls through to per-tile draws.
+///
+/// The 5 MB budget below has comfortable headroom above the ~KB output
+/// that a well-formed Pattern-emitted layer produces (`attack_uniform`
+/// fixture is <50 KB with the same 300-stop payload) and stays orders
+/// of magnitude below the pre-fix 425 MB regression window.
+#[test]
+fn linear_gradient_nonuniform_tile_repeat_is_bounded() {
+    let stops = many_color_stops(300);
+    let html = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{{margin:0;padding:0}}
+body{{background-size:1.33px 1.33px;background-repeat:repeat;height:1130px;
+     background-image:linear-gradient(45deg,{stops})}}
+</style></head><body></body></html>"#
+    );
+    let pdf = Engine::builder()
+        .build()
+        .render(&html)
+        .expect("linear-gradient exploit render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+    assert!(
+        pdf.len() < 5_000_000,
+        "linear gradient with tiny repeat + many stops must be bounded, got {} bytes",
+        pdf.len()
+    );
+}

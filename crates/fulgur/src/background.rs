@@ -611,11 +611,27 @@ fn draw_background_layer(
             stops,
             repeating,
         } => {
-            // Try to detect a uniform tile grid and emit a single Tiling Pattern
-            // resource (one Function 2 + Shading 2 + Pattern triplet) rather
-            // than N independent gradient draws. Falls back to the per-tile
-            // loop for irregular tile geometry (e.g. uneven space repeat).
-            if let Some(grid) = try_uniform_grid(&tiles) {
+            // Detect the tile-grid shape and pick the cheapest emission:
+            // - Fully uniform grid → single Tiling Pattern (one Function 2
+            //   + Shading 2 + Pattern triplet), unchanged fast path.
+            // - Truncated grid (MAX_TILES mid-row cut) → leading complete-row
+            //   rectangle as one Pattern; the trailing partial row is itself
+            //   a uniform 1×N strip so it emits as a second Pattern via the
+            //   remainder try_uniform_grid check below. This bounds the
+            //   pre-fix ~425 MB / ~975 MB RSS regression from
+            //   `background-size:1.33px + background-repeat:repeat`
+            //   (Codex `01f477e4`).
+            // - Otherwise (single tile / irregular geometry) → per-tile
+            //   loop over all tiles.
+            let split = if let Some(grid) = try_uniform_grid(&tiles) {
+                SplitGrid {
+                    full: Some(grid),
+                    remainder: &[],
+                }
+            } else {
+                split_truncated_grid(&tiles)
+            };
+            let draw_linear_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 let angle = match direction {
                     crate::draw_primitives::LinearGradientDirection::Angle(a) => *a,
                     crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
@@ -636,39 +652,48 @@ fn draw_background_layer(
                         grid.cell.1,
                     );
                 });
-            } else {
-                // Fallback: per-tile loop. Match before the loop (Angle hoists,
-                // Corner needs per-tile recomputation because the angle depends
-                // on tile aspect — CSS Images §3.1.1).
-                match direction {
-                    crate::draw_primitives::LinearGradientDirection::Angle(a) => {
-                        let angle = *a;
-                        for (tx, ty, tw, th) in &tiles {
-                            draw_linear_gradient(
-                                canvas.surface,
-                                angle,
-                                stops,
-                                *repeating,
-                                *tx,
-                                *ty,
-                                *tw,
-                                *th,
-                            );
+            };
+            if let Some(grid) = split.full {
+                draw_linear_grid(canvas, grid);
+            }
+            // Remainder: prefer another Pattern (partial trailing row is a
+            // 1×N uniform strip in the truncated-grid case), else per-tile.
+            // Corner direction needs per-tile angle recomputation because
+            // the angle depends on tile aspect (CSS Images §3.1.1).
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_linear_grid(canvas, grid);
+                } else {
+                    match direction {
+                        crate::draw_primitives::LinearGradientDirection::Angle(a) => {
+                            let angle = *a;
+                            for (tx, ty, tw, th) in split.remainder {
+                                draw_linear_gradient(
+                                    canvas.surface,
+                                    angle,
+                                    stops,
+                                    *repeating,
+                                    *tx,
+                                    *ty,
+                                    *tw,
+                                    *th,
+                                );
+                            }
                         }
-                    }
-                    crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
-                        for (tx, ty, tw, th) in &tiles {
-                            let angle = corner_to_angle_rad(*corner, *tw, *th);
-                            draw_linear_gradient(
-                                canvas.surface,
-                                angle,
-                                stops,
-                                *repeating,
-                                *tx,
-                                *ty,
-                                *tw,
-                                *th,
-                            );
+                        crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
+                            for (tx, ty, tw, th) in split.remainder {
+                                let angle = corner_to_angle_rad(*corner, *tw, *th);
+                                draw_linear_gradient(
+                                    canvas.surface,
+                                    angle,
+                                    stops,
+                                    *repeating,
+                                    *tx,
+                                    *ty,
+                                    *tw,
+                                    *th,
+                                );
+                            }
                         }
                     }
                 }
