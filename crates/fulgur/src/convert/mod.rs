@@ -438,10 +438,26 @@ fn walk_semantics(
                 }
             };
 
+            // `visibility: hidden` / `collapse` excludes the subtree from
+            // the accessibility tree (CSS 2 §11.2 + WAI-ARIA; matched by
+            // Chromium and Firefox), so an invisible <img> must not
+            // surface its `alt` text through the Figure tag's `/Alt`
+            // attribute either. Web-aware authoring uses sr-only
+            // (position:absolute + clip) or aria-hidden to keep alt
+            // available to assistive tech while hiding the visual — not
+            // `visibility: hidden`. Gate here (rather than in
+            // `pdf_tag_to_krilla_tag`) so `SemanticEntry.alt_text` stays
+            // the authoritative value that downstream tag-tree code can
+            // trust.
             let alt_text = if matches!(tag, crate::tagging::PdfTag::Figure) {
-                node.element_data()
-                    .and_then(|e| get_attr(e, "alt"))
-                    .map(|v| v.to_owned())
+                let (_opacity, visible) = extract_opacity_visible(node);
+                if visible {
+                    node.element_data()
+                        .and_then(|e| get_attr(e, "alt"))
+                        .map(|v| v.to_owned())
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -1493,6 +1509,45 @@ mod semantics_tests {
             figure_alt("<!DOCTYPE html><html><body><img src='a.png'></body></html>"),
             None,
             "missing alt should be None"
+        );
+    }
+
+    #[test]
+    fn dom_to_drawables_drops_alt_text_on_invisible_figure() {
+        // CSS 2 §11.2 + WAI-ARIA: `visibility: hidden` / `collapse`
+        // excludes the subtree from the accessibility tree (Chromium /
+        // Firefox agreement). The Figure tag's `/Alt` attribute is an
+        // accessibility payload, so an invisible <img> must not surface
+        // its `alt` text through it — same regression class as the
+        // heading `/T` gate (heading_title_of in render.rs).
+        let figure_alt = |html: &str| {
+            let d = build_drawables(html);
+            let figures: Vec<_> = d
+                .semantics
+                .values()
+                .filter(|e| e.tag == PdfTag::Figure)
+                .collect();
+            assert_eq!(figures.len(), 1);
+            figures[0].alt_text.clone()
+        };
+
+        assert_eq!(
+            figure_alt(
+                "<!DOCTYPE html><html><body>\
+                 <img src='a.png' alt='hidden secret' style='visibility:hidden'>\
+                 </body></html>"
+            ),
+            None,
+            "visibility:hidden should drop the alt payload"
+        );
+        assert_eq!(
+            figure_alt(
+                "<!DOCTYPE html><html><body>\
+                 <img src='a.png' alt='collapsed secret' style='visibility:collapse'>\
+                 </body></html>"
+            ),
+            None,
+            "visibility:collapse should drop the alt payload"
         );
     }
 
