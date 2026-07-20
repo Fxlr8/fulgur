@@ -5867,3 +5867,27 @@ body{{background-size:1.33px 1.33px;background-repeat:repeat;height:1130px;
         pdf.len()
     );
 }
+
+/// Radial-gradient variant of the Codex `01f477e4` exploit. Same
+/// truncated-grid fallback machinery, same Pattern fold applied.
+#[test]
+fn radial_gradient_nonuniform_tile_repeat_is_bounded() {
+    let stops = many_color_stops(300);
+    let html = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{{margin:0;padding:0}}
+body{{background-size:1.33px 1.33px;background-repeat:repeat;height:1130px;
+     background-image:radial-gradient(circle at center,{stops})}}
+</style></head><body></body></html>"#
+    );
+    let pdf = Engine::builder()
+        .build()
+        .render(&html)
+        .expect("radial-gradient exploit render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+    assert!(
+        pdf.len() < 5_000_000,
+        "radial gradient with tiny repeat + many stops must be bounded, got {} bytes",
+        pdf.len()
+    );
+}

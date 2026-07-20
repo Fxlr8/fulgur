@@ -709,31 +709,49 @@ fn draw_background_layer(
         } => {
             // Same dedup story as Linear: uniform grids share (cell_w, cell_h)
             // so cx/cy/rx/ry are identical across tiles → a single Pattern
-            // resource is sound.
-            if let Some(grid) = try_uniform_grid(&tiles) {
+            // resource is sound. Extended (Codex `01f477e4`) to also route
+            // the truncated-grid leading rectangle + trailing 1×N strip
+            // through Pattern emission rather than per-tile draws.
+            let split = if let Some(grid) = try_uniform_grid(&tiles) {
+                SplitGrid {
+                    full: Some(grid),
+                    remainder: &[],
+                }
+            } else {
+                split_truncated_grid(&tiles)
+            };
+            let draw_radial_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
                     draw_radial_gradient(
                         surface, *shape, size, position_x, position_y, stops, *repeating, 0.0, 0.0,
                         tw, th,
                     );
                 });
-            } else {
-                // Per-tile shape geometry — uses each tile's own (tw, th)
-                // for cx/cy/rx/ry. No uniformity assumption needed.
-                for (tx, ty, tw, th) in &tiles {
-                    draw_radial_gradient(
-                        canvas.surface,
-                        *shape,
-                        size,
-                        position_x,
-                        position_y,
-                        stops,
-                        *repeating,
-                        *tx,
-                        *ty,
-                        *tw,
-                        *th,
-                    );
+            };
+            if let Some(grid) = split.full {
+                draw_radial_grid(canvas, grid);
+            }
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_radial_grid(canvas, grid);
+                } else {
+                    // Per-tile shape geometry — uses each tile's own (tw, th)
+                    // for cx/cy/rx/ry. No uniformity assumption needed.
+                    for (tx, ty, tw, th) in split.remainder {
+                        draw_radial_gradient(
+                            canvas.surface,
+                            *shape,
+                            size,
+                            position_x,
+                            position_y,
+                            stops,
+                            *repeating,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                        );
+                    }
                 }
             }
         }
