@@ -2125,6 +2125,31 @@ fn try_uniform_grid(tiles: &[(f32, f32, f32, f32)]) -> Option<UniformGrid> {
     })
 }
 
+/// Result of splitting a truncated (`MAX_TILES` mid-row cut) tile grid into
+/// a leading uniform-grid rectangle and a trailing partial-row remainder.
+///
+/// The full rectangle is emitted as a single Tiling Pattern (cheap) and
+/// the remainder as per-tile draws. Degenerate inputs (empty, single tile,
+/// single row, non-truncated grid, or non-uniform geometry) return
+/// `full=None, remainder=<original tiles>` so callers fall through to the
+/// pre-existing per-tile path unchanged.
+#[derive(Debug)]
+struct SplitGrid<'a> {
+    full: Option<UniformGrid>,
+    remainder: &'a [(f32, f32, f32, f32)],
+}
+
+/// Detect a `MAX_TILES` mid-row-truncated grid and split it into a
+/// leading uniform rectangle + a trailing partial-row remainder. Placeholder
+/// implementation (Task 1): returns `None`/`tiles` so the current per-tile
+/// callers behave unchanged; the row-length inspection lands in Task 2.
+fn split_truncated_grid(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
+    SplitGrid {
+        full: None,
+        remainder: tiles,
+    }
+}
+
 fn resolve_repeat_axis(
     repeat: BgRepeat,
     position: f32,
@@ -4569,6 +4594,39 @@ mod additional_conic_and_grid_tests {
             try_uniform_grid(&tiles).is_none(),
             "non-uniform x steps must be rejected"
         );
+    }
+
+    // ─── split_truncated_grid: degenerate cases ─────────────────────────────
+
+    #[test]
+    fn split_truncated_grid_empty_returns_none_and_no_remainder() {
+        let tiles: Vec<(f32, f32, f32, f32)> = vec![];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder.len(), 0);
+    }
+
+    #[test]
+    fn split_truncated_grid_single_tile_returns_none_and_tile_as_remainder() {
+        let tiles = vec![(0.0_f32, 0.0_f32, 10.0_f32, 10.0_f32)];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    #[test]
+    fn split_truncated_grid_single_row_returns_none_and_row_as_remainder() {
+        // Single row is either fast-path caught by try_uniform_grid or
+        // irregular; split_truncated_grid does not attempt to split a
+        // single row and hands the whole slice back as remainder.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
     }
 }
 
