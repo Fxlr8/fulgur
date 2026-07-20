@@ -1798,22 +1798,33 @@ fn ellipse_corner_scale(
 /// `Explicit` with one axis `None` falls back to the corresponding origin axis
 /// (still no aspect to derive from).
 fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f32) {
-    // Clamp subpixel tile sizes to `MIN_GRADIENT_TILE_PT` so tiles remain
-    // above the `try_uniform_grid` epsilon (`1e-3` pt). Tiles narrower
-    // than the eps otherwise collapse in the grid-shape dedup and
-    // re-enter per-tile emission (the Codex `01f477e4` subpixel residual
-    // = 425 MB / 975 MB RSS from ~300 B HTML). See `MIN_GRADIENT_TILE_PT`
-    // for the rationale on the chosen constant (well below any physical
-    // dot at commercial 7200 dpi printing).
+    // Clamp positive-but-sub-`MIN_GRADIENT_TILE_PT` tile sizes to the
+    // constant so tiles remain above the `try_uniform_grid` epsilon
+    // (`1e-3` pt). Tiles narrower than the eps otherwise collapse in
+    // the grid-shape dedup and re-enter per-tile emission (the Codex
+    // `01f477e4` subpixel residual = 425 MB / 975 MB RSS from ~300 B
+    // HTML). See `MIN_GRADIENT_TILE_PT` for the rationale on the
+    // chosen constant (well below any physical dot at commercial
+    // 7200 dpi printing).
     //
-    // The clamp applies **only to axes explicitly specified in the CSS
-    // `background-size` value** (`BgSize::Explicit(Some(_), _)` /
-    // `Explicit(_, Some(_))`). `Auto` / `Cover` / `Contain` and the
-    // auto-side of a single-axis `Explicit` return the origin dimension
-    // unchanged — the origin (padding-box by default) can legitimately
-    // be sub-min, and rewriting it would change the tile size CSS never
-    // asked for. Only attacker-supplied `background-size: 0.001px` etc.
-    // enters the clamp path.
+    // The clamp applies to the **final** tile size — both explicit
+    // `background-size` axes AND the origin-derived `Auto` / `Cover` /
+    // `Contain` / one-axis-`Explicit`-with-auto-side fallback. Rationale:
+    // an attacker can drive the origin box itself sub-eps via the CSS
+    // box model (`background-origin: content-box` + tiny content-box +
+    // large padding, keeping the clip large through `background-clip:
+    // border-box`), which would otherwise bypass an explicit-only clamp
+    // and re-enable the fallback (Codex PR #654 review
+    // `discussion_r3614099014`). Current Blitz layout happens to floor
+    // sub-0.5 CSS-px content to 0 pt, and fulgur's `if img_w <= 0.0`
+    // short-circuit already skips zero-area layers, so the clamp does
+    // not currently rewrite any observable output — but relying on that
+    // implicit rounding would be a lateral dependency on the layout
+    // engine's precision. Clamping the final tile size here removes
+    // that coupling. Zero remains zero (legitimate no-emit); only
+    // strictly positive sub-min values are lifted, and the ceiling
+    // (0.01 pt) is a full order of magnitude below any physical output
+    // dot, so no visible legitimate rendering changes.
     fn floor_gradient_tile(v: f32) -> f32 {
         if v > 0.0 && v < crate::MIN_GRADIENT_TILE_PT {
             crate::MIN_GRADIENT_TILE_PT
@@ -1821,20 +1832,21 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
             v
         }
     }
-    match size {
+    let (raw_w, raw_h) = match size {
         BgSize::Auto | BgSize::Cover | BgSize::Contain => (origin_w, origin_h),
         BgSize::Explicit(w_opt, h_opt) => {
             let rw = w_opt
                 .as_ref()
-                .map(|v| floor_gradient_tile(resolve_lp(v, origin_w)))
+                .map(|v| resolve_lp(v, origin_w))
                 .unwrap_or(origin_w);
             let rh = h_opt
                 .as_ref()
-                .map(|v| floor_gradient_tile(resolve_lp(v, origin_h)))
+                .map(|v| resolve_lp(v, origin_h))
                 .unwrap_or(origin_h);
             (rw, rh)
         }
-    }
+    };
+    (floor_gradient_tile(raw_w), floor_gradient_tile(raw_h))
 }
 
 /// Resolve `background-size` for a layer relative to the origin area.
@@ -2678,25 +2690,33 @@ mod tests {
     }
 
     #[test]
-    fn resolve_gradient_size_auto_does_not_clamp_sub_min_origin() {
-        // `BgSize::Auto` must pass origin dimensions through unchanged, even
-        // when the origin is legitimately sub-`MIN_GRADIENT_TILE_PT`. Only
-        // attacker-supplied explicit `background-size: 0.001px` values enter
-        // the clamp path — an element whose padding-box happens to be
-        // 0.005 pt (or 0.0) still gets its own dimensions, not 0.01 pt.
+    fn resolve_gradient_size_auto_clamps_sub_min_origin() {
+        // `BgSize::Auto` must lift sub-min origin dimensions to
+        // `MIN_GRADIENT_TILE_PT` to close the Codex `discussion_r3614099014`
+        // origin-manipulation exploit (`background-origin:content-box` +
+        // tiny content-box + large padding). Blitz layout currently floors
+        // sub-0.5 CSS-px content to 0 pt so no observable rendering is
+        // touched today, but the clamp removes the implicit dependency on
+        // that layout-engine rounding.
         let layer_size = BgSize::Auto;
         let (w, h) = resolve_gradient_size(&layer_size, 0.005, 0.005);
-        assert_eq!(
-            (w, h),
-            (0.005, 0.005),
-            "Auto must not lift origin dims above MIN_GRADIENT_TILE_PT"
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "Auto with sub-min origin_w must clamp, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "Auto with sub-min origin_h must clamp, got {h}"
         );
     }
 
     #[test]
-    fn resolve_gradient_size_explicit_with_auto_side_preserves_origin_on_auto_axis() {
-        // `background-size: 0.001px auto` — the width is explicit (clamps),
-        // the height is auto (falls back to origin, must NOT clamp).
+    fn resolve_gradient_size_explicit_with_auto_side_clamps_auto_axis_too() {
+        // `background-size: 0.001px auto` on a sub-min origin: both axes
+        // must clamp — the explicit width because CSS explicitly asked
+        // for a subpixel tile (attacker), the auto height because the
+        // origin fallback path is likewise attacker-reachable via CSS
+        // box model tricks (Codex `discussion_r3614099014`).
         let layer_size = BgSize::Explicit(
             Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
             None,
@@ -2706,9 +2726,22 @@ mod tests {
             (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
             "explicit width must clamp, got {w}"
         );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "auto-side height with sub-min origin must clamp, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_auto_preserves_supra_min_origin() {
+        // Regression: legitimate non-tiny origins must pass through
+        // unchanged. 1 pt is 100× the min; must not be lifted.
+        let layer_size = BgSize::Auto;
+        let (w, h) = resolve_gradient_size(&layer_size, 1.0, 2.0);
         assert_eq!(
-            h, 0.005,
-            "auto-side height must inherit origin unchanged, got {h}"
+            (w, h),
+            (1.0, 2.0),
+            "Auto with supra-min origin must pass through"
         );
     }
 
