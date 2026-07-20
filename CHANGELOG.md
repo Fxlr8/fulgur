@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.37.0] - 2026-07-20
+
+<!-- release-notes:auto:begin -->
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(tagged): drop invisible heading /T and figure /Alt from tag tree by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/652
+### Bug Fixes
+* fix(gradient): fold per-tile fallback into Tiling Pattern for linear/radial/conic by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/654
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.36.0...v0.37.0
+<!-- release-notes:auto:end -->
+
 ## [0.36.0] - 2026-07-19
 
 <!-- release-notes:auto:begin -->
