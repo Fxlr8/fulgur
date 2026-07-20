@@ -1819,7 +1819,21 @@ fn ellipse_corner_scale(
 /// `Explicit` with one axis `None` falls back to the corresponding origin axis
 /// (still no aspect to derive from).
 fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f32) {
-    match size {
+    // Clamp subpixel tile sizes to `MIN_GRADIENT_TILE_PT` so tiles remain
+    // above the `try_uniform_grid` epsilon (`1e-3` pt). Tiles narrower
+    // than the eps otherwise collapse in the grid-shape dedup and
+    // re-enter per-tile emission (the Codex `01f477e4` subpixel residual
+    // = 425 MB / 975 MB RSS from ~300 B HTML). See `MIN_GRADIENT_TILE_PT`
+    // for the rationale on the chosen constant (well below any physical
+    // dot at commercial 7200 dpi printing).
+    fn floor_gradient_tile(v: f32) -> f32 {
+        if v > 0.0 && v < crate::MIN_GRADIENT_TILE_PT {
+            crate::MIN_GRADIENT_TILE_PT
+        } else {
+            v
+        }
+    }
+    let (raw_w, raw_h) = match size {
         BgSize::Auto | BgSize::Cover | BgSize::Contain => (origin_w, origin_h),
         BgSize::Explicit(w_opt, h_opt) => {
             let rw = w_opt
@@ -1832,7 +1846,8 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
                 .unwrap_or(origin_h);
             (rw, rh)
         }
-    }
+    };
+    (floor_gradient_tile(raw_w), floor_gradient_tile(raw_h))
 }
 
 /// Resolve `background-size` for a layer relative to the origin area.
@@ -2626,6 +2641,55 @@ mod tests {
         let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
         assert!((w - 100.0).abs() < 1e-6);
         assert!((h - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_clamps_subpixel_to_min_gradient_tile_pt() {
+        // 0.0001 px = 0.000075 pt, well below MIN_GRADIENT_TILE_PT (0.01 pt).
+        // Both axes must clamp; MIN_GRADIENT_TILE_PT closes the Codex `01f477e4`
+        // subpixel residual where sub-eps tiles collapsed try_uniform_grid dedup.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 595.0, 842.0);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-eps width must clamp to MIN_GRADIENT_TILE_PT, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-eps height must clamp to MIN_GRADIENT_TILE_PT, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_does_not_clamp_supra_min_values() {
+        // 1 px = 0.75 pt, well above MIN_GRADIENT_TILE_PT (0.01 pt).
+        // Legitimate tile sizes must pass through unchanged.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(1.0_f32.as_px().in_pt())),
+            Some(BgLengthPercentage::Length(2.0_f32.as_px().in_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 100.0, 100.0);
+        assert!((w - 0.75).abs() < 1e-6, "1 px must remain 0.75 pt, got {w}");
+        assert!((h - 1.5).abs() < 1e-6, "2 px must remain 1.5 pt, got {h}");
+    }
+
+    #[test]
+    fn resolve_gradient_size_preserves_zero_axis() {
+        // Zero-width or zero-height explicit gradient size is legitimate
+        // (Auto behavior falls back to origin, and the tiling early-return
+        // at background.rs handles img_w<=0 || img_h<=0). Do not clamp
+        // zero up to MIN_GRADIENT_TILE_PT — that would resurrect a tile
+        // where the caller asked for nothing.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0_f32.as_pt())),
+            Some(BgLengthPercentage::Length(0.5_f32.as_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 100.0, 100.0);
+        assert_eq!(w, 0.0, "zero width must stay zero");
+        assert!((h - 0.5).abs() < 1e-6, "non-zero height passes through");
     }
 
     #[test]

@@ -5914,3 +5914,35 @@ body{background-size:1.33px 1.33px;background-repeat:repeat;height:1130px;
         pdf.len()
     );
 }
+
+/// Subpixel residual of Codex `01f477e4` — the Pattern fold defused
+/// the primary attack (`background-size: 1.33px`), but tiles smaller
+/// than the `try_uniform_grid` eps (`1e-3` pt) still collapsed in the
+/// grid-shape dedup and re-entered per-tile emission. `background-size:
+/// 0.001px 0.001px` = `0.00075` pt, below eps, previously produced
+/// ~425 MB PDF / ~975 MB RSS from ~300 B HTML.
+///
+/// Fix: `MIN_GRADIENT_TILE_PT` (`lib.rs`) clamps gradient tile size to
+/// `0.01 pt` = 10× the eps, well below any physical output-device dot
+/// (1 dot @ 7200 dpi). Well-formed shape → Pattern emit.
+#[test]
+fn linear_gradient_subpixel_tile_is_bounded() {
+    let stops = many_color_stops(300);
+    let html = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{{margin:0;padding:0}}
+body{{background-size:0.001px 0.001px;background-repeat:repeat;height:1130px;
+     background-image:linear-gradient(45deg,{stops})}}
+</style></head><body></body></html>"#
+    );
+    let pdf = Engine::builder()
+        .build()
+        .render(&html)
+        .expect("subpixel-tile exploit render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+    assert!(
+        pdf.len() < 5_000_000,
+        "subpixel-tile linear gradient must be bounded by MIN_GRADIENT_TILE_PT, got {} bytes",
+        pdf.len()
+    );
+}

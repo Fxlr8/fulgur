@@ -84,6 +84,25 @@ pub(crate) const MAX_COLUMN_COUNT: u32 = 64;
 /// multicol bound.
 pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
 
+/// Minimum tile size (in PDF pt) for CSS `background-image` gradients when
+/// `background-size` is explicitly set. Values below this are clamped up.
+///
+/// `background.rs::try_uniform_grid` uses a `1e-3` pt epsilon to identify
+/// tile position clusters as "the same column/row"; tiles narrower than
+/// that epsilon collapse in the dedup and defeat the Pattern fast path,
+/// forcing per-tile fallback with up to `MAX_TILES × MAX_GRADIENT_STOPS`
+/// stop-copies of PDF output (~425 MB observed for the `01f477e4` subpixel
+/// residual). Clamping tile size well above the epsilon closes that
+/// residual (`0.01 pt = 10 × eps`), and stays a full order of magnitude
+/// below any physical output-device dot (`0.01 pt = 1 dot @ 7200 dpi`
+/// commercial printing) so no legitimate CSS is affected: at 7200 dpi the
+/// tile fits inside one printed dot.
+///
+/// Sibling of the [`MAX_GRADIENT_STOPS`] gradient bound. Applied only to
+/// gradient tiles (`resolve_gradient_size`); raster/svg image tiles keep
+/// their intrinsic sizing.
+pub(crate) const MIN_GRADIENT_TILE_PT: f32 = 0.01;
+
 /// Maximum byte length of a CSS named page (`page: <custom-ident>` /
 /// `@page <name>`). A CSS `<custom-ident>` is length-unbounded, and the name
 /// `String` is retained in the parsed `ColumnProps`, cloned into the column
