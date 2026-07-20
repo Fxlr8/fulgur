@@ -611,11 +611,20 @@ fn draw_background_layer(
             stops,
             repeating,
         } => {
-            // Try to detect a uniform tile grid and emit a single Tiling Pattern
-            // resource (one Function 2 + Shading 2 + Pattern triplet) rather
-            // than N independent gradient draws. Falls back to the per-tile
-            // loop for irregular tile geometry (e.g. uneven space repeat).
-            if let Some(grid) = try_uniform_grid(&tiles) {
+            // Detect the tile-grid shape and pick the cheapest emission:
+            // - Fully uniform grid → single Tiling Pattern (one Function 2
+            //   + Shading 2 + Pattern triplet), unchanged fast path.
+            // - Truncated grid (MAX_TILES mid-row cut) → leading complete-row
+            //   rectangle as one Pattern; the trailing partial row is itself
+            //   a uniform 1×N strip so it emits as a second Pattern via the
+            //   remainder try_uniform_grid check below. This bounds the
+            //   pre-fix ~425 MB / ~975 MB RSS regression from
+            //   `background-size:1.33px + background-repeat:repeat`
+            //   (Codex `01f477e4`).
+            // - Otherwise (single tile / irregular geometry) → per-tile
+            //   loop over all tiles.
+            let split = resolve_gradient_split(&tiles);
+            let draw_linear_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 let angle = match direction {
                     crate::draw_primitives::LinearGradientDirection::Angle(a) => *a,
                     crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
@@ -636,39 +645,48 @@ fn draw_background_layer(
                         grid.cell.1,
                     );
                 });
-            } else {
-                // Fallback: per-tile loop. Match before the loop (Angle hoists,
-                // Corner needs per-tile recomputation because the angle depends
-                // on tile aspect — CSS Images §3.1.1).
-                match direction {
-                    crate::draw_primitives::LinearGradientDirection::Angle(a) => {
-                        let angle = *a;
-                        for (tx, ty, tw, th) in &tiles {
-                            draw_linear_gradient(
-                                canvas.surface,
-                                angle,
-                                stops,
-                                *repeating,
-                                *tx,
-                                *ty,
-                                *tw,
-                                *th,
-                            );
+            };
+            if let Some(grid) = split.full {
+                draw_linear_grid(canvas, grid);
+            }
+            // Remainder: prefer another Pattern (partial trailing row is a
+            // 1×N uniform strip in the truncated-grid case), else per-tile.
+            // Corner direction needs per-tile angle recomputation because
+            // the angle depends on tile aspect (CSS Images §3.1.1).
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_linear_grid(canvas, grid);
+                } else {
+                    match direction {
+                        crate::draw_primitives::LinearGradientDirection::Angle(a) => {
+                            let angle = *a;
+                            for (tx, ty, tw, th) in split.remainder {
+                                draw_linear_gradient(
+                                    canvas.surface,
+                                    angle,
+                                    stops,
+                                    *repeating,
+                                    *tx,
+                                    *ty,
+                                    *tw,
+                                    *th,
+                                );
+                            }
                         }
-                    }
-                    crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
-                        for (tx, ty, tw, th) in &tiles {
-                            let angle = corner_to_angle_rad(*corner, *tw, *th);
-                            draw_linear_gradient(
-                                canvas.surface,
-                                angle,
-                                stops,
-                                *repeating,
-                                *tx,
-                                *ty,
-                                *tw,
-                                *th,
-                            );
+                        crate::draw_primitives::LinearGradientDirection::Corner(corner) => {
+                            for (tx, ty, tw, th) in split.remainder {
+                                let angle = corner_to_angle_rad(*corner, *tw, *th);
+                                draw_linear_gradient(
+                                    canvas.surface,
+                                    angle,
+                                    stops,
+                                    *repeating,
+                                    *tx,
+                                    *ty,
+                                    *tw,
+                                    *th,
+                                );
+                            }
                         }
                     }
                 }
@@ -684,31 +702,42 @@ fn draw_background_layer(
         } => {
             // Same dedup story as Linear: uniform grids share (cell_w, cell_h)
             // so cx/cy/rx/ry are identical across tiles → a single Pattern
-            // resource is sound.
-            if let Some(grid) = try_uniform_grid(&tiles) {
+            // resource is sound. Extended (Codex `01f477e4`) to also route
+            // the truncated-grid leading rectangle + trailing 1×N strip
+            // through Pattern emission rather than per-tile draws.
+            let split = resolve_gradient_split(&tiles);
+            let draw_radial_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
                     draw_radial_gradient(
                         surface, *shape, size, position_x, position_y, stops, *repeating, 0.0, 0.0,
                         tw, th,
                     );
                 });
-            } else {
-                // Per-tile shape geometry — uses each tile's own (tw, th)
-                // for cx/cy/rx/ry. No uniformity assumption needed.
-                for (tx, ty, tw, th) in &tiles {
-                    draw_radial_gradient(
-                        canvas.surface,
-                        *shape,
-                        size,
-                        position_x,
-                        position_y,
-                        stops,
-                        *repeating,
-                        *tx,
-                        *ty,
-                        *tw,
-                        *th,
-                    );
+            };
+            if let Some(grid) = split.full {
+                draw_radial_grid(canvas, grid);
+            }
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_radial_grid(canvas, grid);
+                } else {
+                    // Per-tile shape geometry — uses each tile's own (tw, th)
+                    // for cx/cy/rx/ry. No uniformity assumption needed.
+                    for (tx, ty, tw, th) in split.remainder {
+                        draw_radial_gradient(
+                            canvas.surface,
+                            *shape,
+                            size,
+                            position_x,
+                            position_y,
+                            stops,
+                            *repeating,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                        );
+                    }
                 }
             }
         }
@@ -722,7 +751,12 @@ fn draw_background_layer(
             // Linear/Radial と同じく uniform-tile grid なら 1 個の Tiling Pattern
             // resource に集約する。Conic は wedge path 群 (~数百 byte/conic) が
             // 各 tile で完全同一になるため、特に N×M タイルで効果が大きい。
-            if let Some(grid) = try_uniform_grid(&tiles) {
+            // Codex `01f477e4`: also route the truncated-grid leading
+            // rectangle + trailing strip through Pattern emission —
+            // pre-fix conic non-uniform + repeat produced ~46 MB PDF /
+            // ~833 MB RSS from ~300 B HTML.
+            let split = resolve_gradient_split(&tiles);
+            let draw_conic_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
                     draw_conic_gradient(
                         surface,
@@ -737,20 +771,28 @@ fn draw_background_layer(
                         th,
                     );
                 });
-            } else {
-                for (tx, ty, tw, th) in &tiles {
-                    draw_conic_gradient(
-                        canvas.surface,
-                        *from_angle,
-                        position_x,
-                        position_y,
-                        stops,
-                        *repeating,
-                        *tx,
-                        *ty,
-                        *tw,
-                        *th,
-                    );
+            };
+            if let Some(grid) = split.full {
+                draw_conic_grid(canvas, grid);
+            }
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_conic_grid(canvas, grid);
+                } else {
+                    for (tx, ty, tw, th) in split.remainder {
+                        draw_conic_gradient(
+                            canvas.surface,
+                            *from_angle,
+                            position_x,
+                            position_y,
+                            stops,
+                            *repeating,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                        );
+                    }
                 }
             }
         }
@@ -1756,7 +1798,44 @@ fn ellipse_corner_scale(
 /// `Explicit` with one axis `None` falls back to the corresponding origin axis
 /// (still no aspect to derive from).
 fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f32) {
-    match size {
+    // Clamp positive-but-sub-`MIN_GRADIENT_TILE_PT` tile sizes to the
+    // constant so tiles remain above the `try_uniform_grid` epsilon
+    // (`1e-3` pt). Tiles narrower than the eps otherwise collapse in
+    // the grid-shape dedup and re-enter per-tile emission (the Codex
+    // `01f477e4` subpixel residual = 425 MB / 975 MB RSS from ~300 B
+    // HTML). See `MIN_GRADIENT_TILE_PT` for the resolution basis, the
+    // per-value lift factor (grows unbounded as the raw value
+    // approaches zero — `0.001 pt` becomes `10×`, `0.0001 pt` becomes
+    // `100×`), and the trade-off discussion.
+    //
+    // The clamp applies to the **final** tile size — both explicit
+    // `background-size` axes AND the origin-derived `Auto` / `Cover` /
+    // `Contain` / one-axis-`Explicit`-with-auto-side fallback. Rationale:
+    // an attacker can drive the origin box itself sub-eps via the CSS
+    // box model (`background-origin: content-box` + tiny content-box +
+    // large padding, keeping the clip large through `background-clip:
+    // border-box`), which would otherwise bypass an explicit-only clamp
+    // and re-enable the fallback (Codex PR #654 review
+    // `discussion_r3614099014`). Current Blitz layout happens to floor
+    // sub-0.5 CSS-px content to 0 pt, and fulgur's `if img_w <= 0.0`
+    // short-circuit already skips zero-area layers, so the clamp does
+    // not currently rewrite any observable output — but relying on that
+    // implicit rounding would be a lateral dependency on the layout
+    // engine's precision. Clamping the final tile size here removes
+    // that coupling. Zero remains zero (legitimate no-emit); only
+    // strictly positive sub-min values are lifted.
+    //
+    // `background-repeat: round` also gets the same floor at
+    // `resolve_repeat_axis::Round` because that helper re-derives tile
+    // size from `clip_size / count` and can slip back below the min.
+    fn floor_gradient_tile(v: f32) -> f32 {
+        if v > 0.0 && v < crate::MIN_GRADIENT_TILE_PT {
+            crate::MIN_GRADIENT_TILE_PT
+        } else {
+            v
+        }
+    }
+    let (raw_w, raw_h) = match size {
         BgSize::Auto | BgSize::Cover | BgSize::Contain => (origin_w, origin_h),
         BgSize::Explicit(w_opt, h_opt) => {
             let rw = w_opt
@@ -1769,7 +1848,8 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
                 .unwrap_or(origin_h);
             (rw, rh)
         }
-    }
+    };
+    (floor_gradient_tile(raw_w), floor_gradient_tile(raw_h))
 }
 
 /// Resolve `background-size` for a layer relative to the origin area.
@@ -2125,6 +2205,142 @@ fn try_uniform_grid(tiles: &[(f32, f32, f32, f32)]) -> Option<UniformGrid> {
     })
 }
 
+/// Result of splitting a truncated (`MAX_TILES` mid-row cut) tile grid into
+/// a leading uniform-grid rectangle and a trailing partial-row remainder.
+///
+/// The full rectangle is emitted as a single Tiling Pattern (cheap) and
+/// the remainder as per-tile draws. Degenerate inputs (empty, single tile,
+/// single row, non-truncated grid, or non-uniform geometry) return
+/// `full=None, remainder=<original tiles>` so callers fall through to the
+/// pre-existing per-tile path unchanged.
+#[derive(Debug)]
+struct SplitGrid<'a> {
+    full: Option<UniformGrid>,
+    remainder: &'a [(f32, f32, f32, f32)],
+}
+
+/// Combined uniform-grid / truncated-grid classifier used by every
+/// gradient arm. Wraps the "fast path first, split fallback second"
+/// choice in a single call so the three gradient arms cannot drift
+/// apart (e.g. linear picking up a new shape while radial does not).
+fn resolve_gradient_split(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
+    if let Some(grid) = try_uniform_grid(tiles) {
+        SplitGrid {
+            full: Some(grid),
+            remainder: &[],
+        }
+    } else {
+        split_truncated_grid(tiles)
+    }
+}
+
+/// Detect a `MAX_TILES` mid-row-truncated grid and split it into a
+/// leading uniform rectangle + a trailing partial-row remainder.
+///
+/// `compute_tile_positions_slow` (see the outer y / inner x loop above)
+/// generates tiles in row-major order and truncates at `MAX_TILES`, so
+/// a truncated output is always shaped as "k full rows of length N
+/// followed by one partial row of length M < N". This function detects
+/// that shape by scanning per-row tile counts by y-coordinate blocks
+/// and, when found, hands the leading `k × N` tiles to `try_uniform_grid`
+/// for full geometry validation (uniform steps + identical x-positions
+/// across rows). The trailing `M` tiles are returned as `remainder` for
+/// the caller to draw per-tile.
+///
+/// Returns `full=None, remainder=tiles` (unchanged) for:
+/// - tiles.len() < 2 (nothing to split)
+/// - non-uniform cell size across the tile set
+/// - single row (nothing to split; caller either used try_uniform_grid
+///   or falls through to per-tile)
+/// - all rows same length (either a complete grid — caller already
+///   ran try_uniform_grid — or geometry is irregular)
+/// - the leading rectangle is not itself a well-formed uniform grid
+///   (non-uniform x-steps or misaligned x-positions across rows)
+fn split_truncated_grid(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
+    if tiles.len() < 2 {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+    let eps = 1e-3_f32;
+
+    // Cell size must be uniform across the whole tile set.
+    let (tw0, th0) = (tiles[0].2, tiles[0].3);
+    if !tiles
+        .iter()
+        .all(|t| (t.2 - tw0).abs() < eps && (t.3 - th0).abs() < eps)
+    {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+
+    // Row-major traversal: identify per-row tile counts by y-coordinate
+    // blocks. Consecutive entries with matching y form a row.
+    let mut row_starts: Vec<usize> = Vec::with_capacity(16);
+    row_starts.push(0);
+    let mut cur_y = tiles[0].1;
+    for (i, t) in tiles.iter().enumerate().skip(1) {
+        if (t.1 - cur_y).abs() >= eps {
+            row_starts.push(i);
+            cur_y = t.1;
+        }
+    }
+    let row_count = row_starts.len();
+    if row_count < 2 {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+    // Compute per-row lengths from start offsets + total tile count.
+    // `row_count <= tiles.len() <= MAX_TILES = 10_000` so the collected
+    // vector is bounded at ~80 KB worst-case, safely below any
+    // materialization concern.
+    let row_lengths: Vec<usize> = row_starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| row_starts.get(i + 1).copied().unwrap_or(tiles.len()) - start)
+        .collect();
+
+    // Count leading rows whose length matches the first row.
+    let full_row_len = row_lengths[0];
+    let full_row_count = row_lengths
+        .iter()
+        .take_while(|&&len| len == full_row_len)
+        .count();
+
+    // All rows equal length → complete grid. try_uniform_grid handles
+    // this on the fast path; return None so the caller does not
+    // double-emit the same tile set.
+    if full_row_count == row_count {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+
+    let full_tile_count = full_row_count * full_row_len;
+    let full_tiles = &tiles[..full_tile_count];
+    let remainder = &tiles[full_tile_count..];
+
+    // Delegate geometry validation (step uniformity + x-position match)
+    // to the existing helper — the leading rectangle must itself be a
+    // well-formed uniform grid for Pattern emission to be sound.
+    match try_uniform_grid(full_tiles) {
+        Some(grid) => SplitGrid {
+            full: Some(grid),
+            remainder,
+        },
+        None => SplitGrid {
+            full: None,
+            remainder: tiles,
+        },
+    }
+}
+
 fn resolve_repeat_axis(
     repeat: BgRepeat,
     position: f32,
@@ -2160,7 +2376,24 @@ fn resolve_repeat_axis(
             }
             let count = (clip_size / image_size).round().max(1.0);
             let adjusted = clip_size / count;
-            (adjusted, 0.0, clip_start, clip_end)
+            // `Round` re-derives the tile size from `clip_size / count`,
+            // which can slip below MIN_GRADIENT_TILE_PT (and even below
+            // the `try_uniform_grid` eps) when `clip_size` is small or
+            // when `count` rounds up — bypassing the `resolve_gradient_size`
+            // clamp. Apply the same floor here so gradient Round tiles
+            // stay above eps and re-enter the Pattern fast path (coderabbit
+            // review PR #654 discussion_r3614448858). Raster/SVG tiles
+            // that transit through this same helper get the floor too;
+            // sub-min raster tiles are invisible on any output device
+            // (see MIN_GRADIENT_TILE_PT docstring), so the shared clamp
+            // is a defense-in-depth consistency win rather than a
+            // behavior change for legitimate content.
+            let final_size = if adjusted > 0.0 && adjusted < crate::MIN_GRADIENT_TILE_PT {
+                crate::MIN_GRADIENT_TILE_PT
+            } else {
+                adjusted
+            };
+            (final_size, 0.0, clip_start, clip_end)
         }
     }
 }
@@ -2441,6 +2674,111 @@ mod tests {
         let (w, h) = resolve_gradient_size(&size, 200.0, 100.0);
         assert!((w - 100.0).abs() < 1e-6);
         assert!((h - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_gradient_size_clamps_subpixel_to_min_gradient_tile_pt() {
+        // 0.0001 px = 0.000075 pt, well below MIN_GRADIENT_TILE_PT (0.01 pt).
+        // Both axes must clamp; MIN_GRADIENT_TILE_PT closes the Codex `01f477e4`
+        // subpixel residual where sub-eps tiles collapsed try_uniform_grid dedup.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 595.0, 842.0);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-eps width must clamp to MIN_GRADIENT_TILE_PT, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-eps height must clamp to MIN_GRADIENT_TILE_PT, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_does_not_clamp_supra_min_values() {
+        // 1 px = 0.75 pt, well above MIN_GRADIENT_TILE_PT (0.01 pt).
+        // Legitimate tile sizes must pass through unchanged.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(1.0_f32.as_px().in_pt())),
+            Some(BgLengthPercentage::Length(2.0_f32.as_px().in_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 100.0, 100.0);
+        assert!((w - 0.75).abs() < 1e-6, "1 px must remain 0.75 pt, got {w}");
+        assert!((h - 1.5).abs() < 1e-6, "2 px must remain 1.5 pt, got {h}");
+    }
+
+    #[test]
+    fn resolve_gradient_size_auto_clamps_sub_min_origin() {
+        // `BgSize::Auto` must lift sub-min origin dimensions to
+        // `MIN_GRADIENT_TILE_PT` to close the Codex `discussion_r3614099014`
+        // origin-manipulation exploit (`background-origin:content-box` +
+        // tiny content-box + large padding). Blitz layout currently floors
+        // sub-0.5 CSS-px content to 0 pt so no observable rendering is
+        // touched today, but the clamp removes the implicit dependency on
+        // that layout-engine rounding.
+        let layer_size = BgSize::Auto;
+        let (w, h) = resolve_gradient_size(&layer_size, 0.005, 0.005);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "Auto with sub-min origin_w must clamp, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "Auto with sub-min origin_h must clamp, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_with_auto_side_clamps_auto_axis_too() {
+        // `background-size: 0.001px auto` on a sub-min origin: both axes
+        // must clamp — the explicit width because CSS explicitly asked
+        // for a subpixel tile (attacker), the auto height because the
+        // origin fallback path is likewise attacker-reachable via CSS
+        // box model tricks (Codex `discussion_r3614099014`).
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+            None,
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 0.005, 0.005);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "explicit width must clamp, got {w}"
+        );
+        assert!(
+            (h - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "auto-side height with sub-min origin must clamp, got {h}"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_auto_preserves_supra_min_origin() {
+        // Regression: legitimate non-tiny origins must pass through
+        // unchanged. 1 pt is 100× the min; must not be lifted.
+        let layer_size = BgSize::Auto;
+        let (w, h) = resolve_gradient_size(&layer_size, 1.0, 2.0);
+        assert_eq!(
+            (w, h),
+            (1.0, 2.0),
+            "Auto with supra-min origin must pass through"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_preserves_zero_axis() {
+        // Zero-width or zero-height explicit gradient size is legitimate
+        // (Auto behavior falls back to origin, and the tiling early-return
+        // at background.rs handles img_w<=0 || img_h<=0). Do not clamp
+        // zero up to MIN_GRADIENT_TILE_PT — that would resurrect a tile
+        // where the caller asked for nothing.
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0_f32.as_pt())),
+            Some(BgLengthPercentage::Length(0.5_f32.as_pt())),
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 100.0, 100.0);
+        assert_eq!(w, 0.0, "zero width must stay zero");
+        assert!((h - 0.5).abs() < 1e-6, "non-zero height passes through");
     }
 
     #[test]
@@ -4534,6 +4872,48 @@ mod additional_conic_and_grid_tests {
         assert!((end - 40.0).abs() < 1e-5);
     }
 
+    #[test]
+    fn resolve_repeat_axis_round_sub_min_adjusted_clamps_to_min_gradient_tile_pt() {
+        // clip_size=0.005 pt is well below MIN_GRADIENT_TILE_PT=0.01.
+        // With image_size=100 (post-clamp arbitrary), Round yields
+        //   count = round(0.005/100).max(1) = 1
+        //   adjusted = 0.005 / 1 = 0.005      ← below MIN_GRADIENT_TILE_PT
+        // The floor must lift adjusted to MIN_GRADIENT_TILE_PT (0.01) so
+        // downstream `try_uniform_grid` stays above its 1e-3 pt eps and
+        // the Pattern fast path remains reachable (coderabbit review PR
+        // #654 discussion_r3614448858).
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 100.0, 0.0, 0.005);
+        assert!(
+            (size - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-min Round adjusted must clamp to MIN_GRADIENT_TILE_PT, got {size}"
+        );
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_zero_clip_stays_zero() {
+        // Zero clip is a legitimate degenerate; the floor must not
+        // resurrect a tile out of nothing.
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 100.0, 0.0, 0.0);
+        assert_eq!(size, 0.0, "zero clip must produce zero tile, got {size}");
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_supra_min_adjusted_passes_through() {
+        // Regression: legitimate non-tiny Round tiles must not be
+        // affected by the clamp. image_size=10, clip_size=105.5:
+        //   count = round(10.55) = 11
+        //   adjusted = 105.5 / 11 ≈ 9.591       (well above min)
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 10.0, 0.0, 105.5);
+        let expected = 105.5_f32 / 11.0;
+        assert!(
+            (size - expected).abs() < 1e-5,
+            "supra-min Round adjusted must pass through unchanged, got {size} expected {expected}"
+        );
+    }
+
     // ─── try_uniform_grid: non-uniform y step rejection ──────────────────────
 
     #[test]
@@ -4569,6 +4949,118 @@ mod additional_conic_and_grid_tests {
             try_uniform_grid(&tiles).is_none(),
             "non-uniform x steps must be rejected"
         );
+    }
+
+    // ─── split_truncated_grid: degenerate cases ─────────────────────────────
+
+    #[test]
+    fn split_truncated_grid_empty_returns_none_and_no_remainder() {
+        let tiles: Vec<(f32, f32, f32, f32)> = vec![];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder.len(), 0);
+    }
+
+    #[test]
+    fn split_truncated_grid_single_tile_returns_none_and_tile_as_remainder() {
+        let tiles = vec![(0.0_f32, 0.0_f32, 10.0_f32, 10.0_f32)];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    #[test]
+    fn split_truncated_grid_single_row_returns_none_and_row_as_remainder() {
+        // Single row is either fast-path caught by try_uniform_grid or
+        // irregular; split_truncated_grid does not attempt to split a
+        // single row and hands the whole slice back as remainder.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    // ─── split_truncated_grid: truncated-grid detection ─────────────────────
+
+    #[test]
+    fn split_truncated_grid_two_full_rows_plus_partial_returns_full_and_remainder() {
+        // 3 cols × 2 full rows + 1 partial row of 2 tiles.
+        // Cell 5×5, step 5 (no gap), row-major order per compute_tile_positions_slow.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+            (10.0, 5.0, 5.0, 5.0),
+            (0.0, 10.0, 5.0, 5.0),
+            (5.0, 10.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        let grid = split.full.expect("full grid must be detected");
+        assert_eq!(grid.count, (3, 2));
+        assert_eq!(grid.cell, (5.0, 5.0));
+        assert_eq!(grid.step, (5.0, 5.0));
+        assert_eq!(grid.origin, (0.0, 0.0));
+        assert_eq!(split.remainder.len(), 2);
+        assert_eq!(split.remainder[0], (0.0, 10.0, 5.0, 5.0));
+        assert_eq!(split.remainder[1], (5.0, 10.0, 5.0, 5.0));
+    }
+
+    #[test]
+    fn split_truncated_grid_all_rows_same_length_returns_none() {
+        // Complete uniform grid — try_uniform_grid catches this on the
+        // fast path; split_truncated_grid declines so the caller does
+        // not double-emit.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(
+            split.full.is_none(),
+            "complete grid must fall through to try_uniform_grid fast path"
+        );
+    }
+
+    #[test]
+    fn split_truncated_grid_mismatched_cell_sizes_returns_none() {
+        // Non-uniform cell size — cannot be a truncated grid.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 3.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    #[test]
+    fn split_truncated_grid_exploit_shape_100x16_plus_400() {
+        // Emulate the MAX_TILES = 10_000 truncation shape used by the
+        // exploit: 100 cols × 16 full rows + 1 partial row of 400 tiles.
+        // Cell 1×1, step 1.
+        let mut tiles = Vec::with_capacity(2000);
+        for r in 0..16 {
+            for c in 0..100 {
+                tiles.push((c as f32, r as f32, 1.0, 1.0));
+            }
+        }
+        for c in 0..400 {
+            tiles.push((c as f32, 16.0, 1.0, 1.0));
+        }
+        assert_eq!(tiles.len(), 2000);
+        let split = split_truncated_grid(&tiles);
+        let grid = split.full.expect("full rectangle must be detected");
+        assert_eq!(grid.count, (100, 16));
+        assert_eq!(split.remainder.len(), 400);
     }
 }
 
