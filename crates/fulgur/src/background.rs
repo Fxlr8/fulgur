@@ -623,14 +623,7 @@ fn draw_background_layer(
             //   (Codex `01f477e4`).
             // - Otherwise (single tile / irregular geometry) → per-tile
             //   loop over all tiles.
-            let split = if let Some(grid) = try_uniform_grid(&tiles) {
-                SplitGrid {
-                    full: Some(grid),
-                    remainder: &[],
-                }
-            } else {
-                split_truncated_grid(&tiles)
-            };
+            let split = resolve_gradient_split(&tiles);
             let draw_linear_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 let angle = match direction {
                     crate::draw_primitives::LinearGradientDirection::Angle(a) => *a,
@@ -712,14 +705,7 @@ fn draw_background_layer(
             // resource is sound. Extended (Codex `01f477e4`) to also route
             // the truncated-grid leading rectangle + trailing 1×N strip
             // through Pattern emission rather than per-tile draws.
-            let split = if let Some(grid) = try_uniform_grid(&tiles) {
-                SplitGrid {
-                    full: Some(grid),
-                    remainder: &[],
-                }
-            } else {
-                split_truncated_grid(&tiles)
-            };
+            let split = resolve_gradient_split(&tiles);
             let draw_radial_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
                     draw_radial_gradient(
@@ -769,14 +755,7 @@ fn draw_background_layer(
             // rectangle + trailing strip through Pattern emission —
             // pre-fix conic non-uniform + repeat produced ~46 MB PDF /
             // ~833 MB RSS from ~300 B HTML.
-            let split = if let Some(grid) = try_uniform_grid(&tiles) {
-                SplitGrid {
-                    full: Some(grid),
-                    remainder: &[],
-                }
-            } else {
-                split_truncated_grid(&tiles)
-            };
+            let split = resolve_gradient_split(&tiles);
             let draw_conic_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
                     draw_conic_gradient(
@@ -2223,6 +2202,21 @@ fn try_uniform_grid(tiles: &[(f32, f32, f32, f32)]) -> Option<UniformGrid> {
 struct SplitGrid<'a> {
     full: Option<UniformGrid>,
     remainder: &'a [(f32, f32, f32, f32)],
+}
+
+/// Combined uniform-grid / truncated-grid classifier used by every
+/// gradient arm. Wraps the "fast path first, split fallback second"
+/// choice in a single call so the three gradient arms cannot drift
+/// apart (e.g. linear picking up a new shape while radial does not).
+fn resolve_gradient_split(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
+    if let Some(grid) = try_uniform_grid(tiles) {
+        SplitGrid {
+            full: Some(grid),
+            remainder: &[],
+        }
+    } else {
+        split_truncated_grid(tiles)
+    }
 }
 
 /// Detect a `MAX_TILES` mid-row-truncated grid and split it into a
