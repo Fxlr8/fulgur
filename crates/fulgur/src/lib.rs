@@ -84,23 +84,36 @@ pub(crate) const MAX_COLUMN_COUNT: u32 = 64;
 /// multicol bound.
 pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
 
-/// Minimum tile size (in PDF pt) for CSS `background-image` gradients when
-/// `background-size` is explicitly set. Values below this are clamped up.
+/// Minimum tile size (in PDF pt) for CSS `background-image` gradients — a
+/// defensive floor applied to the resolved tile size (explicit
+/// `background-size`, origin-derived `Auto`/`Cover`/`Contain`, and the
+/// `background-repeat: round`–adjusted axis). Strictly-positive values
+/// below this are clamped up; zero remains zero.
 ///
 /// `background.rs::try_uniform_grid` uses a `1e-3` pt epsilon to identify
 /// tile position clusters as "the same column/row"; tiles narrower than
 /// that epsilon collapse in the dedup and defeat the Pattern fast path,
 /// forcing per-tile fallback with up to `MAX_TILES × MAX_GRADIENT_STOPS`
-/// stop-copies of PDF output (~425 MB observed for the `01f477e4` subpixel
-/// residual). Clamping tile size well above the epsilon closes that
-/// residual (`0.01 pt = 10 × eps`), and stays a full order of magnitude
-/// below any physical output-device dot (`0.01 pt = 1 dot @ 7200 dpi`
-/// commercial printing) so no legitimate CSS is affected: at 7200 dpi the
-/// tile fits inside one printed dot.
+/// stop-copies of PDF output (~425 MB observed for the Codex `01f477e4`
+/// subpixel residual). Clamping to `10 ×` the epsilon keeps the FP
+/// safety margin.
 ///
-/// Sibling of the [`MAX_GRADIENT_STOPS`] gradient bound. Applied only to
-/// gradient tiles (`resolve_gradient_size`); raster/svg image tiles keep
-/// their intrinsic sizing.
+/// Resolution context: `0.01 pt = 72 pt/inch / 7200 dpi`, i.e. **exactly
+/// one physical dot at commercial-max 7200 dpi printing** — the clamp
+/// equals a single dot at that ceiling, not below it. At more common
+/// resolutions (300–1200 dpi, `1 dot ≈ 0.06–0.24 pt`) the clamp is 6–24×
+/// smaller than a printed dot, so no visible legitimate rendering
+/// changes. A design that meaningfully targets a single-dot-wide
+/// gradient at 7200 dpi would see that tile lifted by ≤ 2×; accepted
+/// as a defense-in-depth trade-off, since no realistic design uses
+/// gradient tiles at that scale (a one-dot gradient does not read as a
+/// gradient).
+///
+/// Sibling of the [`MAX_GRADIENT_STOPS`] gradient bound. Also applies
+/// to raster/SVG tiles that transit `resolve_repeat_axis::Round` since
+/// that helper is shared; sub-min raster tiles are invisible on any
+/// output device, so the shared clamp is a defense-in-depth consistency
+/// win rather than a behavior change for legitimate content.
 pub(crate) const MIN_GRADIENT_TILE_PT: f32 = 0.01;
 
 /// Maximum byte length of a CSS named page (`page: <custom-ident>` /

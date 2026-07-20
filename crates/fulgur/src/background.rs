@@ -1803,9 +1803,10 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
     // (`1e-3` pt). Tiles narrower than the eps otherwise collapse in
     // the grid-shape dedup and re-enter per-tile emission (the Codex
     // `01f477e4` subpixel residual = 425 MB / 975 MB RSS from ~300 B
-    // HTML). See `MIN_GRADIENT_TILE_PT` for the rationale on the
-    // chosen constant (well below any physical dot at commercial
-    // 7200 dpi printing).
+    // HTML). See `MIN_GRADIENT_TILE_PT` for the exact resolution basis
+    // and trade-off discussion (0.01 pt equals one dot at commercial
+    // 7200 dpi printing, so single-dot gradients at that ceiling get
+    // lifted by ≤ 2× — accepted defense-in-depth cost).
     //
     // The clamp applies to the **final** tile size — both explicit
     // `background-size` axes AND the origin-derived `Auto` / `Cover` /
@@ -1822,9 +1823,11 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
     // implicit rounding would be a lateral dependency on the layout
     // engine's precision. Clamping the final tile size here removes
     // that coupling. Zero remains zero (legitimate no-emit); only
-    // strictly positive sub-min values are lifted, and the ceiling
-    // (0.01 pt) is a full order of magnitude below any physical output
-    // dot, so no visible legitimate rendering changes.
+    // strictly positive sub-min values are lifted.
+    //
+    // `background-repeat: round` also gets the same floor at
+    // `resolve_repeat_axis::Round` because that helper re-derives tile
+    // size from `clip_size / count` and can slip back below the min.
     fn floor_gradient_tile(v: f32) -> f32 {
         if v > 0.0 && v < crate::MIN_GRADIENT_TILE_PT {
             crate::MIN_GRADIENT_TILE_PT
@@ -2373,7 +2376,24 @@ fn resolve_repeat_axis(
             }
             let count = (clip_size / image_size).round().max(1.0);
             let adjusted = clip_size / count;
-            (adjusted, 0.0, clip_start, clip_end)
+            // `Round` re-derives the tile size from `clip_size / count`,
+            // which can slip below MIN_GRADIENT_TILE_PT (and even below
+            // the `try_uniform_grid` eps) when `clip_size` is small or
+            // when `count` rounds up — bypassing the `resolve_gradient_size`
+            // clamp. Apply the same floor here so gradient Round tiles
+            // stay above eps and re-enter the Pattern fast path (coderabbit
+            // review PR #654 discussion_r3614448858). Raster/SVG tiles
+            // that transit through this same helper get the floor too;
+            // sub-min raster tiles are invisible on any output device
+            // (see MIN_GRADIENT_TILE_PT docstring), so the shared clamp
+            // is a defense-in-depth consistency win rather than a
+            // behavior change for legitimate content.
+            let final_size = if adjusted > 0.0 && adjusted < crate::MIN_GRADIENT_TILE_PT {
+                crate::MIN_GRADIENT_TILE_PT
+            } else {
+                adjusted
+            };
+            (final_size, 0.0, clip_start, clip_end)
         }
     }
 }
@@ -4850,6 +4870,48 @@ mod additional_conic_and_grid_tests {
         assert_eq!(space, 0.0);
         assert_eq!(start, 0.0);
         assert!((end - 40.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_sub_min_adjusted_clamps_to_min_gradient_tile_pt() {
+        // clip_size=0.005 pt is well below MIN_GRADIENT_TILE_PT=0.01.
+        // With image_size=100 (post-clamp arbitrary), Round yields
+        //   count = round(0.005/100).max(1) = 1
+        //   adjusted = 0.005 / 1 = 0.005      ← below MIN_GRADIENT_TILE_PT
+        // The floor must lift adjusted to MIN_GRADIENT_TILE_PT (0.01) so
+        // downstream `try_uniform_grid` stays above its 1e-3 pt eps and
+        // the Pattern fast path remains reachable (coderabbit review PR
+        // #654 discussion_r3614448858).
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 100.0, 0.0, 0.005);
+        assert!(
+            (size - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "sub-min Round adjusted must clamp to MIN_GRADIENT_TILE_PT, got {size}"
+        );
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_zero_clip_stays_zero() {
+        // Zero clip is a legitimate degenerate; the floor must not
+        // resurrect a tile out of nothing.
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 100.0, 0.0, 0.0);
+        assert_eq!(size, 0.0, "zero clip must produce zero tile, got {size}");
+    }
+
+    #[test]
+    fn resolve_repeat_axis_round_supra_min_adjusted_passes_through() {
+        // Regression: legitimate non-tiny Round tiles must not be
+        // affected by the clamp. image_size=10, clip_size=105.5:
+        //   count = round(10.55) = 11
+        //   adjusted = 105.5 / 11 ≈ 9.591       (well above min)
+        let (size, _space, _start, _end) =
+            resolve_repeat_axis(BgRepeat::Round, 0.0, 10.0, 0.0, 105.5);
+        let expected = 105.5_f32 / 11.0;
+        assert!(
+            (size - expected).abs() < 1e-5,
+            "supra-min Round adjusted must pass through unchanged, got {size} expected {expected}"
+        );
     }
 
     // ─── try_uniform_grid: non-uniform y step rejection ──────────────────────
