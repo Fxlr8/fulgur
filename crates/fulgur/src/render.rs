@@ -890,6 +890,29 @@ fn extract_heading_title(para: &crate::drawables::ParagraphEntry) -> String {
         .collect()
 }
 
+/// Compute the `/T` (Title) attribute value for a heading tag, honouring
+/// `ParagraphEntry.visible`.
+///
+/// Returns `None` when the paragraph is invisible (CSS `visibility: hidden`
+/// or `visibility: collapse` — stored as `visible = false`) so that the
+/// heading's text does not leak into the tag tree while the paint path
+/// suppresses it (`draw_paragraph_inner_paint` returns early for
+/// `!entry.visible`). Also returns `None` for a visible-but-empty title,
+/// which keeps `Tag::Hn` from emitting a zero-length `/T`.
+///
+/// Called from both title-extraction sinks — `try_start_tagged` (the normal
+/// paragraph tagging path) and the `build_struct_tree` per-run backfill
+/// (heading whose content is per-run tagged because of an inner link) — so
+/// the same `visible` gate applies to every path that can produce a
+/// heading `/T` attribute.
+fn heading_title_of(para: &crate::drawables::ParagraphEntry) -> Option<String> {
+    if !para.visible {
+        return None;
+    }
+    let title = extract_heading_title(para);
+    (!title.is_empty()).then_some(title)
+}
+
 /// Start a Krilla tagged content sequence for a paragraph-bearing node when
 /// tagging is enabled and the node has a P / H / Span semantic entry.
 ///
@@ -932,7 +955,7 @@ fn try_start_tagged(
             let heading_title = drawables
                 .paragraphs
                 .get(&node_id)
-                .map(extract_heading_title);
+                .and_then(heading_title_of);
             use krilla::tagging::{ContentTag, SpanTag};
             let id = canvas
                 .surface
@@ -3882,17 +3905,20 @@ fn build_struct_tree(
     // Nodes that use per-run tagging (run_entries) bypass try_start_tagged and
     // therefore never record a heading_title through tc_entries. Backfill their
     // titles here so <h1><a href>…</a></h1> still gets the /T attribute.
+    // `heading_title_of` filters out invisible headings so the tag tree does
+    // not leak `visibility: hidden` content that the paint path suppressed.
     for &node_id in run_entries.keys() {
         if heading_titles.contains_key(&node_id) {
             continue;
         }
         if let Some(entry) = drawables.semantics.get(&node_id) {
             if matches!(entry.tag, crate::tagging::PdfTag::H { .. }) {
-                if let Some(para) = drawables.paragraphs.get(&node_id) {
-                    let title = extract_heading_title(para);
-                    if !title.is_empty() {
-                        heading_titles.insert(node_id, title);
-                    }
+                if let Some(title) = drawables
+                    .paragraphs
+                    .get(&node_id)
+                    .and_then(heading_title_of)
+                {
+                    heading_titles.insert(node_id, title);
                 }
             }
         }
@@ -4343,6 +4369,17 @@ mod tests {
         }
     }
 
+    fn make_hidden_para(
+        lines: Vec<crate::paragraph::ShapedLine>,
+    ) -> crate::drawables::ParagraphEntry {
+        crate::drawables::ParagraphEntry {
+            lines,
+            opacity: 1.0,
+            visible: false,
+            id: None,
+        }
+    }
+
     #[test]
     fn para_has_link_runs_empty_paragraph_returns_false() {
         let para = make_para(vec![]);
@@ -4569,6 +4606,59 @@ mod tests {
         ]);
         let para = make_para(vec![line]);
         assert_eq!(extract_heading_title(&para), "text");
+    }
+
+    // --- heading_title_of ---
+    //
+    // `heading_title_of` gates `extract_heading_title` on
+    // `ParagraphEntry.visible` and drops zero-length titles. It is the
+    // single choke point shared by `try_start_tagged` (H arm) and
+    // `build_struct_tree`'s per-run backfill, so a `None` here means the
+    // heading `/T` attribute is never emitted for that paragraph.
+
+    #[test]
+    fn heading_title_of_visible_paragraph_with_text_returns_title() {
+        // Sanity: the visible-with-text path still forwards a title.
+        let line = make_shaped_line(vec![crate::paragraph::LineItem::Text(make_glyph_run(
+            "Chapter", None,
+        ))]);
+        let para = make_para(vec![line]);
+        assert_eq!(heading_title_of(&para), Some("Chapter".to_string()));
+    }
+
+    #[test]
+    fn heading_title_of_visible_empty_paragraph_returns_none() {
+        // An empty paragraph would have produced a zero-length `/T`
+        // before; the helper drops that in a single place so both call
+        // sites see identical behaviour.
+        let para = make_para(vec![]);
+        assert_eq!(heading_title_of(&para), None);
+    }
+
+    #[test]
+    fn heading_title_of_hidden_paragraph_returns_none() {
+        // Core security regression guard: a `visibility: hidden` /
+        // `collapse` paragraph must not surface its text through the tag
+        // tree even though `extract_heading_title` would happily collect
+        // it. Without this gate the text would end up in `Tag::Hn`'s
+        // `/T` attribute for both the normal and per-run backfill sinks
+        // while the paint path skips the same paragraph, leaking hidden
+        // content to any tool that reads the struct tree.
+        let line = make_shaped_line(vec![crate::paragraph::LineItem::Text(make_glyph_run(
+            "hidden secret",
+            None,
+        ))]);
+        let para = make_hidden_para(vec![line]);
+        assert_eq!(heading_title_of(&para), None);
+    }
+
+    #[test]
+    fn heading_title_of_hidden_empty_paragraph_returns_none() {
+        // The visibility gate short-circuits before the text collection,
+        // so an empty-and-hidden paragraph is `None` too — same result
+        // as the visible-empty case, exercised via the other branch.
+        let para = make_hidden_para(vec![]);
+        assert_eq!(heading_title_of(&para), None);
     }
 
     // --- paragraph_lines_for_page ---

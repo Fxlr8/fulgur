@@ -5457,6 +5457,65 @@ fn test_tagged_semanticless_link_runs_do_not_panic() {
     }
 }
 
+/// Headings and `<img alt>` values with `visibility: hidden` (or
+/// `collapse`) must not leak their text into the tagged PDF struct tree
+/// via `Tag::Hn`'s `/T` (Title) attribute or `Tag::Figure`'s `/Alt`
+/// attribute. CSS 2 §11.2 + WAI-ARIA specify that `visibility: hidden`
+/// excludes the subtree from the accessibility tree (Chromium / Firefox
+/// agreement); tagged PDF is the paged counterpart of that a11y tree so
+/// the same subtree exclusion applies. `pdf_tag_to_krilla_tag` carries
+/// exactly two free-text attributes (heading title, figure alt) — every
+/// other `PdfTag` variant is an enum or nothing — so gating these two
+/// closes the class completely.
+///
+/// Covers all three sinks:
+/// - `try_start_tagged` H arm (heading `/T`, normal paragraph tagging)
+/// - `build_struct_tree` per-run backfill (heading `/T` when an inner
+///   link forces per-run tagging)
+/// - `SemanticEntry.alt_text` extraction (`<img>` Figure `/Alt`)
+#[test]
+fn test_tagged_hidden_heading_omits_title_attribute() {
+    // Sentinel appears in the input HTML only inside elements that are
+    // `visibility: hidden` (or `collapse`). If it shows up in the rendered
+    // PDF bytes, it can only have come from a tag-tree attribute, since
+    // painting is already suppressed for these paragraphs / images.
+    let sentinel = "FULGURHIDDENSECRETXYZ";
+    // Tiny valid 1x1 PNG (raster ping-through so the Figure tag is emitted).
+    let png_data_url = "data:image/png;base64,\
+        iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQAAAAA3bvkkAAAAB0lEQVR42mNgAAAAAgABc3UBGAAAAABJRU5ErkJggg==";
+    let cases = [
+        // Plain hidden heading exercises the `try_start_tagged` path.
+        format!(r#"<h1 style="visibility:hidden">{sentinel}</h1>"#),
+        // Collapsed hidden heading is equivalent per CSS 2.1 §11.2 and
+        // must be gated the same way.
+        format!(r#"<h2 style="visibility:collapse">{sentinel}</h2>"#),
+        // Hidden heading whose only child is a link forces per-run
+        // tagging, exercising the `build_struct_tree` backfill sink.
+        format!(
+            r#"<h3 style="visibility:hidden"><a href="https://example.com">{sentinel}</a></h3>"#
+        ),
+        // Hidden image alt: `Tag::Figure` carries the alt text through
+        // its `/Alt` attribute — the other free-text sink in
+        // `pdf_tag_to_krilla_tag`.
+        format!(r#"<img src="{png_data_url}" alt="{sentinel}" style="visibility:hidden">"#),
+        format!(r#"<img src="{png_data_url}" alt="{sentinel}" style="visibility:collapse">"#),
+    ];
+    for body in cases {
+        let pdf = Engine::builder()
+            .tagged(true)
+            .lang("en")
+            .build()
+            .render(&format!("<html><body>{body}</body></html>"))
+            .unwrap_or_else(|e| panic!("tagged render must not fail for {body:?}: {e:?}"));
+        let needle = sentinel.as_bytes();
+        let leaks = pdf.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            !leaks,
+            "hidden heading text leaked into tagged PDF for {body:?}"
+        );
+    }
+}
+
 #[test]
 fn test_render_html_huge_multicol_column_count_is_bounded() {
     // Security regression (unbounded `column-count` memory-exhaustion DoS):
