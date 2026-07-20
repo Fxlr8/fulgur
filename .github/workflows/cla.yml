@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: CLA Assistant
-        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        uses: fulgur-rs/cla-assistant-lite@a4b4fee802dfbe0bbad78557fdcf78b31c1006d7 # fulgur-rs fork of v2.6.1 with Node 24 runtime
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
