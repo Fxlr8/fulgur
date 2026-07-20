@@ -2281,22 +2281,21 @@ fn split_truncated_grid(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
         };
     }
     // Compute per-row lengths from start offsets + total tile count.
-    let row_len = |r: usize| -> usize {
-        let start = row_starts[r];
-        let end = if r + 1 < row_count {
-            row_starts[r + 1]
-        } else {
-            tiles.len()
-        };
-        end - start
-    };
+    // `row_count <= tiles.len() <= MAX_TILES = 10_000` so the collected
+    // vector is bounded at ~80 KB worst-case, safely below any
+    // materialization concern.
+    let row_lengths: Vec<usize> = row_starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| row_starts.get(i + 1).copied().unwrap_or(tiles.len()) - start)
+        .collect();
 
     // Count leading rows whose length matches the first row.
-    let full_row_len = row_len(0);
-    let mut full_row_count = 1usize;
-    while full_row_count < row_count && row_len(full_row_count) == full_row_len {
-        full_row_count += 1;
-    }
+    let full_row_len = row_lengths[0];
+    let full_row_count = row_lengths
+        .iter()
+        .take_while(|&&len| len == full_row_len)
+        .count();
 
     // All rows equal length → complete grid. try_uniform_grid handles
     // this on the fast path; return None so the caller does not
