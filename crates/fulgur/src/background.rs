@@ -1826,6 +1826,15 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
     // = 425 MB / 975 MB RSS from ~300 B HTML). See `MIN_GRADIENT_TILE_PT`
     // for the rationale on the chosen constant (well below any physical
     // dot at commercial 7200 dpi printing).
+    //
+    // The clamp applies **only to axes explicitly specified in the CSS
+    // `background-size` value** (`BgSize::Explicit(Some(_), _)` /
+    // `Explicit(_, Some(_))`). `Auto` / `Cover` / `Contain` and the
+    // auto-side of a single-axis `Explicit` return the origin dimension
+    // unchanged — the origin (padding-box by default) can legitimately
+    // be sub-min, and rewriting it would change the tile size CSS never
+    // asked for. Only attacker-supplied `background-size: 0.001px` etc.
+    // enters the clamp path.
     fn floor_gradient_tile(v: f32) -> f32 {
         if v > 0.0 && v < crate::MIN_GRADIENT_TILE_PT {
             crate::MIN_GRADIENT_TILE_PT
@@ -1833,21 +1842,20 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
             v
         }
     }
-    let (raw_w, raw_h) = match size {
+    match size {
         BgSize::Auto | BgSize::Cover | BgSize::Contain => (origin_w, origin_h),
         BgSize::Explicit(w_opt, h_opt) => {
             let rw = w_opt
                 .as_ref()
-                .map(|v| resolve_lp(v, origin_w))
+                .map(|v| floor_gradient_tile(resolve_lp(v, origin_w)))
                 .unwrap_or(origin_w);
             let rh = h_opt
                 .as_ref()
-                .map(|v| resolve_lp(v, origin_h))
+                .map(|v| floor_gradient_tile(resolve_lp(v, origin_h)))
                 .unwrap_or(origin_h);
             (rw, rh)
         }
-    };
-    (floor_gradient_tile(raw_w), floor_gradient_tile(raw_h))
+    }
 }
 
 /// Resolve `background-size` for a layer relative to the origin area.
@@ -2674,6 +2682,41 @@ mod tests {
         let (w, h) = resolve_gradient_size(&layer_size, 100.0, 100.0);
         assert!((w - 0.75).abs() < 1e-6, "1 px must remain 0.75 pt, got {w}");
         assert!((h - 1.5).abs() < 1e-6, "2 px must remain 1.5 pt, got {h}");
+    }
+
+    #[test]
+    fn resolve_gradient_size_auto_does_not_clamp_sub_min_origin() {
+        // `BgSize::Auto` must pass origin dimensions through unchanged, even
+        // when the origin is legitimately sub-`MIN_GRADIENT_TILE_PT`. Only
+        // attacker-supplied explicit `background-size: 0.001px` values enter
+        // the clamp path — an element whose padding-box happens to be
+        // 0.005 pt (or 0.0) still gets its own dimensions, not 0.01 pt.
+        let layer_size = BgSize::Auto;
+        let (w, h) = resolve_gradient_size(&layer_size, 0.005, 0.005);
+        assert_eq!(
+            (w, h),
+            (0.005, 0.005),
+            "Auto must not lift origin dims above MIN_GRADIENT_TILE_PT"
+        );
+    }
+
+    #[test]
+    fn resolve_gradient_size_explicit_with_auto_side_preserves_origin_on_auto_axis() {
+        // `background-size: 0.001px auto` — the width is explicit (clamps),
+        // the height is auto (falls back to origin, must NOT clamp).
+        let layer_size = BgSize::Explicit(
+            Some(BgLengthPercentage::Length(0.0001_f32.as_px().in_pt())),
+            None,
+        );
+        let (w, h) = resolve_gradient_size(&layer_size, 0.005, 0.005);
+        assert!(
+            (w - crate::MIN_GRADIENT_TILE_PT).abs() < 1e-6,
+            "explicit width must clamp, got {w}"
+        );
+        assert_eq!(
+            h, 0.005,
+            "auto-side height must inherit origin unchanged, got {h}"
+        );
     }
 
     #[test]
