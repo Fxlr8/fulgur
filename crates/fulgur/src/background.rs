@@ -2140,13 +2140,110 @@ struct SplitGrid<'a> {
 }
 
 /// Detect a `MAX_TILES` mid-row-truncated grid and split it into a
-/// leading uniform rectangle + a trailing partial-row remainder. Placeholder
-/// implementation (Task 1): returns `None`/`tiles` so the current per-tile
-/// callers behave unchanged; the row-length inspection lands in Task 2.
+/// leading uniform rectangle + a trailing partial-row remainder.
+///
+/// `compute_tile_positions_slow` (see the outer y / inner x loop above)
+/// generates tiles in row-major order and truncates at `MAX_TILES`, so
+/// a truncated output is always shaped as "k full rows of length N
+/// followed by one partial row of length M < N". This function detects
+/// that shape by scanning per-row tile counts by y-coordinate blocks
+/// and, when found, hands the leading `k × N` tiles to `try_uniform_grid`
+/// for full geometry validation (uniform steps + identical x-positions
+/// across rows). The trailing `M` tiles are returned as `remainder` for
+/// the caller to draw per-tile.
+///
+/// Returns `full=None, remainder=tiles` (unchanged) for:
+/// - tiles.len() < 2 (nothing to split)
+/// - non-uniform cell size across the tile set
+/// - single row (nothing to split; caller either used try_uniform_grid
+///   or falls through to per-tile)
+/// - all rows same length (either a complete grid — caller already
+///   ran try_uniform_grid — or geometry is irregular)
+/// - the leading rectangle is not itself a well-formed uniform grid
+///   (non-uniform x-steps or misaligned x-positions across rows)
 fn split_truncated_grid(tiles: &[(f32, f32, f32, f32)]) -> SplitGrid<'_> {
-    SplitGrid {
-        full: None,
-        remainder: tiles,
+    if tiles.len() < 2 {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+    let eps = 1e-3_f32;
+
+    // Cell size must be uniform across the whole tile set.
+    let (tw0, th0) = (tiles[0].2, tiles[0].3);
+    if !tiles
+        .iter()
+        .all(|t| (t.2 - tw0).abs() < eps && (t.3 - th0).abs() < eps)
+    {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+
+    // Row-major traversal: identify per-row tile counts by y-coordinate
+    // blocks. Consecutive entries with matching y form a row.
+    let mut row_starts: Vec<usize> = Vec::with_capacity(16);
+    row_starts.push(0);
+    let mut cur_y = tiles[0].1;
+    for (i, t) in tiles.iter().enumerate().skip(1) {
+        if (t.1 - cur_y).abs() >= eps {
+            row_starts.push(i);
+            cur_y = t.1;
+        }
+    }
+    let row_count = row_starts.len();
+    if row_count < 2 {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+    // Compute per-row lengths from start offsets + total tile count.
+    let row_len = |r: usize| -> usize {
+        let start = row_starts[r];
+        let end = if r + 1 < row_count {
+            row_starts[r + 1]
+        } else {
+            tiles.len()
+        };
+        end - start
+    };
+
+    // Count leading rows whose length matches the first row.
+    let full_row_len = row_len(0);
+    let mut full_row_count = 1usize;
+    while full_row_count < row_count && row_len(full_row_count) == full_row_len {
+        full_row_count += 1;
+    }
+
+    // All rows equal length → complete grid. try_uniform_grid handles
+    // this on the fast path; return None so the caller does not
+    // double-emit the same tile set.
+    if full_row_count == row_count {
+        return SplitGrid {
+            full: None,
+            remainder: tiles,
+        };
+    }
+
+    let full_tile_count = full_row_count * full_row_len;
+    let full_tiles = &tiles[..full_tile_count];
+    let remainder = &tiles[full_tile_count..];
+
+    // Delegate geometry validation (step uniformity + x-position match)
+    // to the existing helper — the leading rectangle must itself be a
+    // well-formed uniform grid for Pattern emission to be sound.
+    match try_uniform_grid(full_tiles) {
+        Some(grid) => SplitGrid {
+            full: Some(grid),
+            remainder,
+        },
+        None => SplitGrid {
+            full: None,
+            remainder: tiles,
+        },
     }
 }
 
@@ -4627,6 +4724,85 @@ mod additional_conic_and_grid_tests {
         let split = split_truncated_grid(&tiles);
         assert!(split.full.is_none());
         assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    // ─── split_truncated_grid: truncated-grid detection ─────────────────────
+
+    #[test]
+    fn split_truncated_grid_two_full_rows_plus_partial_returns_full_and_remainder() {
+        // 3 cols × 2 full rows + 1 partial row of 2 tiles.
+        // Cell 5×5, step 5 (no gap), row-major order per compute_tile_positions_slow.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (10.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+            (10.0, 5.0, 5.0, 5.0),
+            (0.0, 10.0, 5.0, 5.0),
+            (5.0, 10.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        let grid = split.full.expect("full grid must be detected");
+        assert_eq!(grid.count, (3, 2));
+        assert_eq!(grid.cell, (5.0, 5.0));
+        assert_eq!(grid.step, (5.0, 5.0));
+        assert_eq!(grid.origin, (0.0, 0.0));
+        assert_eq!(split.remainder.len(), 2);
+        assert_eq!(split.remainder[0], (0.0, 10.0, 5.0, 5.0));
+        assert_eq!(split.remainder[1], (5.0, 10.0, 5.0, 5.0));
+    }
+
+    #[test]
+    fn split_truncated_grid_all_rows_same_length_returns_none() {
+        // Complete uniform grid — try_uniform_grid catches this on the
+        // fast path; split_truncated_grid declines so the caller does
+        // not double-emit.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 5.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+            (5.0, 5.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(
+            split.full.is_none(),
+            "complete grid must fall through to try_uniform_grid fast path"
+        );
+    }
+
+    #[test]
+    fn split_truncated_grid_mismatched_cell_sizes_returns_none() {
+        // Non-uniform cell size — cannot be a truncated grid.
+        let tiles = vec![
+            (0.0_f32, 0.0_f32, 5.0_f32, 5.0_f32),
+            (5.0, 0.0, 3.0, 5.0),
+            (0.0, 5.0, 5.0, 5.0),
+        ];
+        let split = split_truncated_grid(&tiles);
+        assert!(split.full.is_none());
+        assert_eq!(split.remainder, tiles.as_slice());
+    }
+
+    #[test]
+    fn split_truncated_grid_exploit_shape_100x16_plus_400() {
+        // Emulate the MAX_TILES = 10_000 truncation shape used by the
+        // exploit: 100 cols × 16 full rows + 1 partial row of 400 tiles.
+        // Cell 1×1, step 1.
+        let mut tiles = Vec::with_capacity(2000);
+        for r in 0..16 {
+            for c in 0..100 {
+                tiles.push((c as f32, r as f32, 1.0, 1.0));
+            }
+        }
+        for c in 0..400 {
+            tiles.push((c as f32, 16.0, 1.0, 1.0));
+        }
+        assert_eq!(tiles.len(), 2000);
+        let split = split_truncated_grid(&tiles);
+        let grid = split.full.expect("full rectangle must be detected");
+        assert_eq!(grid.count, (100, 16));
+        assert_eq!(split.remainder.len(), 400);
     }
 }
 
