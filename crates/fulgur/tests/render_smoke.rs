@@ -5814,18 +5814,26 @@ fn font_size_zero_does_not_produce_nan_glyphs() {
 
 /// Attack fixture builder: `<N>` color-stops evenly distributed as a
 /// red/blue alternation. Used by the gradient-fallback OOM tests below.
+///
+/// Guards `n <= 1` degenerate inputs so the helper can be reused
+/// without hitting `100 / (n - 1) = ∞ → NaN` — invalid CSS that would
+/// silently produce an unrenderable payload.
 fn many_color_stops(n: usize) -> String {
-    let mut s = String::new();
-    let step = 100.0f32 / (n as f32 - 1.0);
-    for i in 0..n {
-        if i > 0 {
-            s.push_str(", ");
+    match n {
+        0 => String::new(),
+        1 => "red 0%".to_string(),
+        _ => {
+            let step = 100.0f32 / (n as f32 - 1.0);
+            (0..n)
+                .map(|i| {
+                    let pct = (i as f32) * step;
+                    let color = if i % 2 == 0 { "red" } else { "blue" };
+                    format!("{color} {pct:.4}%")
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         }
-        let pct = (i as f32) * step;
-        let color = if i % 2 == 0 { "red" } else { "blue" };
-        s.push_str(&format!("{color} {pct:.4}%"));
     }
-    s
 }
 
 /// Codex Security finding `01f477e4` — "Repeated tiny gradients can
