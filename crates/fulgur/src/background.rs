@@ -1803,10 +1803,10 @@ fn resolve_gradient_size(size: &BgSize, origin_w: f32, origin_h: f32) -> (f32, f
     // (`1e-3` pt). Tiles narrower than the eps otherwise collapse in
     // the grid-shape dedup and re-enter per-tile emission (the Codex
     // `01f477e4` subpixel residual = 425 MB / 975 MB RSS from ~300 B
-    // HTML). See `MIN_GRADIENT_TILE_PT` for the exact resolution basis
-    // and trade-off discussion (0.01 pt equals one dot at commercial
-    // 7200 dpi printing, so single-dot gradients at that ceiling get
-    // lifted by ≤ 2× — accepted defense-in-depth cost).
+    // HTML). See `MIN_GRADIENT_TILE_PT` for the resolution basis, the
+    // per-value lift factor (grows unbounded as the raw value
+    // approaches zero — `0.001 pt` becomes `10×`, `0.0001 pt` becomes
+    // `100×`), and the trade-off discussion.
     //
     // The clamp applies to the **final** tile size — both explicit
     // `background-size` axes AND the origin-derived `Auto` / `Cover` /

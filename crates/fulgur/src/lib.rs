@@ -88,7 +88,7 @@ pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
 /// defensive floor applied to the resolved tile size (explicit
 /// `background-size`, origin-derived `Auto`/`Cover`/`Contain`, and the
 /// `background-repeat: round`–adjusted axis). Strictly-positive values
-/// below this are clamped up; zero remains zero.
+/// below this are clamped up to the constant; zero remains zero.
 ///
 /// `background.rs::try_uniform_grid` uses a `1e-3` pt epsilon to identify
 /// tile position clusters as "the same column/row"; tiles narrower than
@@ -101,19 +101,28 @@ pub(crate) const MAX_GRADIENT_STOPS: usize = 256;
 /// Resolution context: `0.01 pt = 72 pt/inch / 7200 dpi`, i.e. **exactly
 /// one physical dot at commercial-max 7200 dpi printing** — the clamp
 /// equals a single dot at that ceiling, not below it. At more common
-/// resolutions (300–1200 dpi, `1 dot ≈ 0.06–0.24 pt`) the clamp is 6–24×
-/// smaller than a printed dot, so no visible legitimate rendering
-/// changes. A design that meaningfully targets a single-dot-wide
-/// gradient at 7200 dpi would see that tile lifted by ≤ 2×; accepted
-/// as a defense-in-depth trade-off, since no realistic design uses
-/// gradient tiles at that scale (a one-dot gradient does not read as a
-/// gradient).
+/// resolutions (300–1200 dpi, `1 dot ≈ 0.06–0.24 pt`) the clamp is
+/// 6–24× smaller than a printed dot; content authored at those
+/// resolutions is unaffected because no legitimate value falls between
+/// the min and the printer dot.
+///
+/// **Impact on values below the clamp**: the lift factor depends on
+/// how far below the min the raw tile is (`0.005 pt → 0.01 pt = 2×`,
+/// `0.001 pt → 0.01 pt = 10×`, `0.0001 pt → 0.01 pt = 100×`; the ratio
+/// grows unbounded as the raw value approaches zero). Sub-min values
+/// are still not guaranteed invisible — antialiasing and sub-pixel
+/// positioning can make them contribute to rendered output — but a
+/// gradient authored with a tile of that scale cannot itself be read
+/// as a gradient (a single physical dot or less is either one flat
+/// color or an AA artifact of one), so the design intent is not
+/// preserved either way. Lifting to the min is accepted as a
+/// defense-in-depth trade-off against the exploit path above.
 ///
 /// Sibling of the [`MAX_GRADIENT_STOPS`] gradient bound. Also applies
 /// to raster/SVG tiles that transit `resolve_repeat_axis::Round` since
-/// that helper is shared; sub-min raster tiles are invisible on any
-/// output device, so the shared clamp is a defense-in-depth consistency
-/// win rather than a behavior change for legitimate content.
+/// that helper is shared; the same "visibility not guaranteed, design
+/// intent not preserved either way" caveat applies to raster tiles at
+/// that scale.
 pub(crate) const MIN_GRADIENT_TILE_PT: f32 = 0.01;
 
 /// Maximum byte length of a CSS named page (`page: <custom-ident>` /
