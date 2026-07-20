@@ -5891,3 +5891,26 @@ body{{background-size:1.33px 1.33px;background-repeat:repeat;height:1130px;
         pdf.len()
     );
 }
+
+/// Conic-gradient variant of the Codex `01f477e4` sibling issue
+/// `6aa94631` — conic wedges (~360 per draw) multiplied across the
+/// truncated-grid fallback produced ~46 MB PDF / ~833 MB RSS from
+/// ~300 B HTML. Same Pattern fold applied.
+#[test]
+fn conic_gradient_nonuniform_tile_repeat_is_bounded() {
+    let html = r#"<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;padding:0}
+body{background-size:1.33px 1.33px;background-repeat:repeat;height:1130px;
+     background-image:conic-gradient(from 0deg,red,yellow,green,blue,red)}
+</style></head><body></body></html>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("conic-gradient exploit render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+    assert!(
+        pdf.len() < 5_000_000,
+        "conic gradient with tiny repeat must be bounded, got {} bytes",
+        pdf.len()
+    );
+}

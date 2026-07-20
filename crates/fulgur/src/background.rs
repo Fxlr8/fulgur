@@ -765,7 +765,19 @@ fn draw_background_layer(
             // Linear/Radial と同じく uniform-tile grid なら 1 個の Tiling Pattern
             // resource に集約する。Conic は wedge path 群 (~数百 byte/conic) が
             // 各 tile で完全同一になるため、特に N×M タイルで効果が大きい。
-            if let Some(grid) = try_uniform_grid(&tiles) {
+            // Codex `01f477e4`: also route the truncated-grid leading
+            // rectangle + trailing strip through Pattern emission —
+            // pre-fix conic non-uniform + repeat produced ~46 MB PDF /
+            // ~833 MB RSS from ~300 B HTML.
+            let split = if let Some(grid) = try_uniform_grid(&tiles) {
+                SplitGrid {
+                    full: Some(grid),
+                    remainder: &[],
+                }
+            } else {
+                split_truncated_grid(&tiles)
+            };
+            let draw_conic_grid = |canvas: &mut Canvas<'_, '_>, grid: UniformGrid| {
                 draw_gradient_tiling_pattern(canvas, grid, |surface, tw, th| {
                     draw_conic_gradient(
                         surface,
@@ -780,20 +792,28 @@ fn draw_background_layer(
                         th,
                     );
                 });
-            } else {
-                for (tx, ty, tw, th) in &tiles {
-                    draw_conic_gradient(
-                        canvas.surface,
-                        *from_angle,
-                        position_x,
-                        position_y,
-                        stops,
-                        *repeating,
-                        *tx,
-                        *ty,
-                        *tw,
-                        *th,
-                    );
+            };
+            if let Some(grid) = split.full {
+                draw_conic_grid(canvas, grid);
+            }
+            if !split.remainder.is_empty() {
+                if let Some(grid) = try_uniform_grid(split.remainder) {
+                    draw_conic_grid(canvas, grid);
+                } else {
+                    for (tx, ty, tw, th) in split.remainder {
+                        draw_conic_gradient(
+                            canvas.surface,
+                            *from_angle,
+                            position_x,
+                            position_y,
+                            stops,
+                            *repeating,
+                            *tx,
+                            *ty,
+                            *tw,
+                            *th,
+                        );
+                    }
                 }
             }
         }
