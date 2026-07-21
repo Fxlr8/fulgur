@@ -380,11 +380,7 @@ mod tests {
     fn convert_html_basic_html_returns_pdf() {
         let pdf = convert_html("<html><body><h1>Hello, fulgur</h1><p>World</p></body></html>")
             .expect("convert_html failed on basic HTML");
-        assert!(
-            pdf.starts_with(b"%PDF"),
-            "expected PDF header; got {} bytes",
-            pdf.len()
-        );
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
     }
 
     #[test]
