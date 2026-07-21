@@ -3017,15 +3017,21 @@ pub(crate) fn build_static_content_css(mappings: &[StaticContentMapping]) -> Str
 /// raises the rule's specificity so a surviving author rule on the same
 /// element (the inline-`<style>` case in fulgur-da3u) loses the cascade.
 ///
-/// `id`, `class`, and the tag name all come from arbitrary HTML attributes
-/// and are routed through [`css_escape_ident`]. For the tag prefix the
-/// escaped form is compared against the lowercased source: when it round-
-/// trips unchanged the tag is a plain CSS identifier and is emitted as-is
-/// (the common case for `div`, `h2`, custom-element names, …). Anything
-/// else — a tag name html5ever accepted verbatim that contains CSS
-/// metacharacters — is dropped from the prefix. `[data-fulgur-cid="N"]` on
-/// its own still pins the element uniquely, so specificity is preserved
-/// even without the type selector.
+/// `id` and `class` come from arbitrary HTML attributes; the tag name
+/// comes from `elem.name.local` (the element name html5ever produced).
+/// All three are routed through [`css_escape_ident`]. For the tag prefix
+/// the escaped form is compared against the lowercased source: when it
+/// round-trips unchanged the tag is a plain CSS identifier and is
+/// emitted as-is (the common case for `div`, `h2`, custom-element
+/// names, …). Anything else — a tag name html5ever accepted verbatim
+/// that contains CSS metacharacters — is dropped from the prefix.
+///
+/// Omitting the tag lowers the *type-selector* specificity component
+/// (one type selector = specificity (0,0,1)), but `[data-fulgur-cid="N"]`
+/// still pins the element uniquely and contributes an attribute-selector
+/// specificity (0,1,0), which is what carries the cascade over a
+/// surviving author rule on the same element (id/class prefixes stack
+/// on top of that).
 fn element_specificity_prefix(element: Option<&blitz_dom::node::ElementData>) -> String {
     let Some(elem) = element else {
         return String::new();
