@@ -367,3 +367,34 @@ pub fn convert_html(html: &str) -> Result<Vec<u8>> {
     let engine = Engine::builder().build();
     engine.render(html)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::convert_html;
+
+    /// `convert_html` is a thin public-API wrapper over `Engine::builder().build().render()`.
+    /// These smoke tests ensure the function is reachable from lib-mode coverage and that
+    /// the default-settings path produces valid PDF output for representative inputs.
+
+    #[test]
+    fn convert_html_basic_html_returns_pdf() {
+        let pdf = convert_html("<html><body><h1>Hello, fulgur</h1><p>World</p></body></html>")
+            .expect("convert_html failed on basic HTML");
+        assert!(pdf.starts_with(b"%PDF"), "expected PDF header");
+    }
+
+    #[test]
+    fn convert_html_empty_body_returns_pdf() {
+        let pdf =
+            convert_html("<html><body></body></html>").expect("convert_html failed on empty body");
+        assert!(!pdf.is_empty(), "expected non-empty PDF for empty body");
+    }
+
+    #[test]
+    fn convert_html_minimal_fragment_returns_pdf() {
+        // A bare fragment without explicit <html>/<body> tags is valid HTML5.
+        let pdf =
+            convert_html("<h2>Section</h2><ul><li>item</li></ul>").expect("convert_html failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+}
