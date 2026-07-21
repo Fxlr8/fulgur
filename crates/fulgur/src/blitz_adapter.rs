@@ -2983,9 +2983,14 @@ pub(crate) fn build_static_content_css(mappings: &[StaticContentMapping]) -> Str
     let mut css = String::new();
     for m in mappings {
         let selector = match &m.parsed {
-            // Tag names come from the HTML parser as valid identifiers and
-            // match case-insensitively for HTML — lowercased for good measure
-            // (mirrors `element_specificity_prefix`).
+            // Selector components here come from the trusted author CSS via
+            // `gcpm::parser` (`Token::Ident` in cssparser), not from
+            // arbitrary HTML. Tag names are lowercased to match HTML's
+            // case-insensitive convention; id/class are still escaped
+            // because a hostile author can craft a bare token containing
+            // metacharacters via CSS escapes — defense in depth on the
+            // trusted side, and required by `element_specificity_prefix`
+            // for the untrusted case (fulgur-ka6c).
             ParsedSelector::Tag(name) => name.to_ascii_lowercase(),
             ParsedSelector::Class(name) => format!(".{}", css_escape_ident(name)),
             ParsedSelector::Id(name) => format!("#{}", css_escape_ident(name)),
@@ -3012,14 +3017,31 @@ pub(crate) fn build_static_content_css(mappings: &[StaticContentMapping]) -> Str
 /// raises the rule's specificity so a surviving author rule on the same
 /// element (the inline-`<style>` case in fulgur-da3u) loses the cascade.
 ///
-/// `id` / `class` values come from arbitrary HTML attributes and are
-/// escaped with [`css_escape_ident`]. Tag names from the HTML parser are
-/// already valid identifiers; they are lowercased for good measure.
+/// `id` and `class` come from arbitrary HTML attributes; the tag name
+/// comes from `elem.name.local` (the element name html5ever produced).
+/// All three are routed through [`css_escape_ident`]. For the tag prefix
+/// the escaped form is compared against the lowercased source: when it
+/// round-trips unchanged the tag is a plain CSS identifier and is
+/// emitted as-is (the common case for `div`, `h2`, custom-element
+/// names, …). Anything else — a tag name html5ever accepted verbatim
+/// that contains CSS metacharacters — is dropped from the prefix.
+///
+/// Omitting the tag lowers the *type-selector* specificity component
+/// (one type selector = specificity (0,0,1)), but `[data-fulgur-cid="N"]`
+/// still pins the element uniquely and contributes an attribute-selector
+/// specificity (0,1,0), which is what carries the cascade over a
+/// surviving author rule on the same element (id/class prefixes stack
+/// on top of that).
 fn element_specificity_prefix(element: Option<&blitz_dom::node::ElementData>) -> String {
     let Some(elem) = element else {
         return String::new();
     };
-    let mut prefix = elem.name.local.as_ref().to_ascii_lowercase();
+    let tag_lower = elem.name.local.as_ref().to_ascii_lowercase();
+    let mut prefix = if css_escape_ident(&tag_lower) == tag_lower {
+        tag_lower
+    } else {
+        String::new()
+    };
     if let Some(id) = get_attr(elem, "id").filter(|s| !s.is_empty()) {
         prefix.push('#');
         prefix.push_str(&css_escape_ident(id));
@@ -5863,6 +5885,88 @@ mod tests {
             css.contains("div[data-fulgur-cid=\"0\"]::before"),
             "injected selector for a bare element must carry the tag prefix, \
              got: {css}"
+        );
+    }
+
+    #[test]
+    fn counter_pass_specificity_prefix_never_breaks_out_of_the_selector() {
+        // fulgur-ka6c: `element_specificity_prefix` reconstructs the target
+        // element's simple compound (tag + id + classes) so a surviving author
+        // rule loses the cascade. `id` and `class` values are already routed
+        // through `css_escape_ident`; the tag prefix must also be sanitized so
+        // no attribute reached from arbitrary HTML can inject brace-terminated
+        // rule bodies into the generated stylesheet.
+        //
+        // The concrete regression this pins is a class-selector content mapping
+        // (author-trusted) matching an element whose tag name contains raw CSS
+        // punctuation. Without escaping, the generated rule prefixes the class
+        // selector with the raw tag and turns
+        //     .x[data-fulgur-cid="0"]::before { … }
+        // into a two-rule cascade the author never wrote.
+        use crate::gcpm::{ContentCounterMapping, ContentItem, ParsedSelector, PseudoElement};
+
+        let html = concat!(
+            r#"<html><body>"#,
+            r#"<x{}body{color:red} class="x">payload</x{}body{color:red}>"#,
+            r#"</body></html>"#,
+        );
+        let mut doc = parse(html, 400.0, &[]);
+        let content_mappings = vec![ContentCounterMapping {
+            parsed: ParsedSelector::Class("x".into()),
+            pseudo: PseudoElement::Before,
+            content: vec![ContentItem::String("marker".into())],
+        }];
+        let pass = CounterPass::new(Vec::new(), content_mappings);
+        let ctx = PassContext { font_data: &[] };
+        pass.apply(&mut doc, &ctx);
+        let css = pass.generated_css();
+
+        assert!(
+            !css.contains("body{color:red}"),
+            "generated CSS must not include a rule body the author never wrote; got: {css}"
+        );
+        assert!(
+            !css.contains("{}"),
+            "generated CSS must not include an empty rule block leaked from a tag name; got: {css}"
+        );
+    }
+
+    #[test]
+    fn element_specificity_prefix_escapes_tag_metacharacters() {
+        // Direct unit for the escaping contract: any character in the tag name
+        // that is not `css_escape_ident`-safe must either be dropped or
+        // escaped so it cannot terminate the generated selector.
+        //
+        // A tag name that does not survive as a valid CSS identifier is
+        // simply omitted from the prefix — the `[data-fulgur-cid]` attribute
+        // still pins the element uniquely, so specificity is preserved even
+        // without the type selector.
+        let html = r#"<html><body><x{}body{color:red}></x{}body{color:red}></body></html>"#;
+        let doc = parse(html, 400.0, &[]);
+        fn find_crafted_tag(doc: &HtmlDocument, node_id: usize, depth: usize) -> Option<usize> {
+            if depth >= MAX_DOM_DEPTH {
+                return None;
+            }
+            let node = doc.get_node(node_id)?;
+            if let Some(el) = node.element_data() {
+                if el.name.local.as_ref().contains('{') {
+                    return Some(node_id);
+                }
+            }
+            for &child_id in &node.children {
+                if let Some(hit) = find_crafted_tag(doc, child_id, depth + 1) {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+        let node_id = find_crafted_tag(&doc, doc.root_element().id, 0)
+            .expect("html5ever preserves the crafted tag name verbatim");
+        let elem = doc.get_node(node_id).and_then(|n| n.element_data());
+        let prefix = element_specificity_prefix(elem);
+        assert!(
+            !prefix.contains('{') && !prefix.contains('}'),
+            "prefix must not carry raw braces from the tag name; got: {prefix}"
         );
     }
 

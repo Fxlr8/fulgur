@@ -388,3 +388,33 @@ fn test_counter_page_still_works() {
 }
 
 // Snapshot tests (inline <style> variants + migrated integration tests): see crates/fulgur/tests/gcpm_snapshot.rs
+
+#[test]
+fn counter_pass_survives_element_names_with_css_metacharacters() {
+    // fulgur-ka6c: CounterPass reconstructs a specificity prefix from the
+    // matched element's tag/id/classes. The tag prefix must not carry raw
+    // characters through to the generated stylesheet — otherwise a class
+    // pseudo-content rule matching an element with a crafted tag name
+    // could seed unrelated declarations into the Stylo cascade.
+    //
+    // End-to-end guard for the escape contract: rendering must succeed and
+    // produce a well-formed PDF even when html5ever preserves an odd tag
+    // name verbatim.
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        body { counter-reset: c 0; }
+        .x::before { content: counter(c); }
+        "#,
+    );
+    let engine = Engine::builder().assets(assets).build();
+    let html = concat!(
+        "<html><body>",
+        r#"<x{}body{color:red} class="x">payload</x{}body{color:red}>"#,
+        "</body></html>",
+    );
+    let pdf = engine
+        .render(html)
+        .expect("render must succeed even with crafted tag names");
+    assert!(pdf.starts_with(b"%PDF-"), "output should be a PDF");
+}
