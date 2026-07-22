@@ -3391,4 +3391,172 @@ mod tests {
             "multicol without column-rule must not produce a MulticolRuleEntry"
         );
     }
+
+    // ── slice_lines_by_budget: untested branches ─────────────────────
+
+    #[test]
+    fn slice_lines_by_budget_n1_all_lines_go_to_single_column() {
+        // When n=1, `last_col` is always true: the overflow guard
+        // (`!last_col`) is never satisfied, so every line is absorbed by
+        // the single column regardless of budget.
+        let heights = [10.0_f32, 20.0, 30.0];
+        let slices = slice_lines_by_budget(&heights, 15.0, 1);
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0], (0..3, 60.0));
+    }
+
+    #[test]
+    fn slice_lines_by_budget_more_columns_than_lines_pads_empty_slices() {
+        // 3 lines into 5 columns at budget=10: one line per column for
+        // columns 0-2; columns 3 and 4 receive empty ranges.
+        let heights = [10.0_f32, 10.0, 10.0];
+        let slices = slice_lines_by_budget(&heights, 10.0, 5);
+        assert_eq!(slices.len(), 5);
+        assert_eq!(slices[0], (0..1, 10.0));
+        assert_eq!(slices[1], (1..2, 10.0));
+        assert_eq!(slices[2], (2..3, 10.0));
+        assert_eq!(slices[3], (3..3, 0.0)); // empty — no more lines
+        assert_eq!(slices[4], (3..3, 0.0)); // empty — no more lines
+    }
+
+    #[test]
+    fn slice_lines_by_budget_zero_budget_monolithic_rule_forces_one_line_per_non_last_column() {
+        // budget=0: adding any positive-height line to a non-last column
+        // immediately exceeds the budget (consumed + h > 0.0 for h > 0).
+        // The monolithic-line rule still forces the first line of each
+        // non-last column to be placed, so each non-last column gets
+        // exactly one line and the final column absorbs the remainder.
+        let heights = [10.0_f32, 10.0, 10.0];
+        let slices = slice_lines_by_budget(&heights, 0.0, 2);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0], (0..1, 10.0)); // col 0: one line (monolithic rule)
+        assert_eq!(slices[1], (1..3, 20.0)); // col 1 (last): absorbs the rest
+    }
+
+    // ── slice_lines_with_first_col_remainder: untested branches ──────
+
+    #[test]
+    fn slice_lines_with_remainder_remaining_cols_1_single_column_absorbs_all() {
+        // remaining_cols=1 means `last_col` is always true, so the
+        // "zero-budget early emit" guard (`!last_col`) is never satisfied
+        // even when first_col_remainder is zero. All lines are absorbed.
+        let heights = [10.0_f32; 5];
+        let slices =
+            slice_lines_with_first_col_remainder(&heights, 0.0, /*full_budget*/ 30.0, 1);
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].0, 0..5, "single column must absorb all lines");
+        assert_eq!(slices[0].1, 50.0);
+    }
+
+    #[test]
+    fn slice_lines_with_remainder_negative_first_col_is_clamped_to_zero_and_emits_empty_slice() {
+        // A negative first_col_remainder is clamped to 0.0 via `.max(0.0)`,
+        // which triggers the "zero budget → emit empty slice" path for
+        // non-last columns. Subsequent columns use full_budget.
+        let heights = [10.0_f32; 5];
+        let slices = slice_lines_with_first_col_remainder(
+            &heights, -5.0, // negative → clamped to 0.0
+            /*full_budget*/ 30.0, /*remaining_cols*/ 2,
+        );
+        assert_eq!(slices.len(), 2);
+        // col 0: remainder was 0 and it's not the last col → empty slice.
+        assert_eq!(slices[0], (0..0, 0.0));
+        // col 1 (last): full_budget=30 absorbs all 5 lines (overflow allowed).
+        assert_eq!(slices[1].0, 0..5);
+    }
+
+    // ── fits_in_n_columns: boundary and zero-height cases ────────────
+
+    #[test]
+    fn fits_in_n_columns_exact_budget_boundary_does_not_trigger_overflow() {
+        // The overflow condition is `col_y + size.height > budget` (strict >).
+        // When col_y + h == budget exactly, the item must stay in the current
+        // column (no advance). Two items of height 10 in n=1, budget=20:
+        //   • item 0: col_y=0, 0>0 false → add. col_y=10.
+        //   • item 1: col_y=10, 10+10=20, 20>20 false → add. col_y=20.
+        // Returns true (fits). budget=19 would return false (10+10=20>19).
+        let children = fake_sized(2, 10.0);
+        assert!(
+            fits_in_n_columns(&children, 1, 20.0),
+            "col_y + h == budget must not trigger overflow (strict >)"
+        );
+        assert!(
+            !fits_in_n_columns(&children, 1, 19.0),
+            "col_y + h > budget must overflow and spill (single column)"
+        );
+    }
+
+    #[test]
+    fn fits_in_n_columns_zero_height_items_never_trigger_overflow() {
+        // Zero-height items leave col_y at 0.0 forever. The guard
+        // `col_y > 0.0` is never satisfied, so they never advance to the
+        // next column and always return true regardless of n or budget.
+        let children: Vec<(NodeId, Size<f32>)> = (0..10usize)
+            .map(|i| {
+                (
+                    NodeId::from(i),
+                    Size {
+                        width: 100.0,
+                        height: 0.0,
+                    },
+                )
+            })
+            .collect();
+        assert!(fits_in_n_columns(&children, 1, 0.0));
+        assert!(fits_in_n_columns(&children, 1, 100.0));
+        assert!(fits_in_n_columns(&children, 3, 0.0));
+    }
+
+    // ── resolve_column_layout: count == fits_count tie ───────────────
+
+    #[test]
+    fn resolve_column_layout_count_equals_fits_count_tie_uses_same_result_as_count_only() {
+        // When `count == fits_count(width)`, `min(count, fits_count)` equals
+        // count, so the result is the same as the count-only path — but the
+        // `(Some(n), Some(w))` branch is taken instead of `(Some(n), None)`.
+        //
+        // content_w=300, gap=10, column-width=100:
+        //   fits_count(100) = floor((300+10)/(100+10)) = floor(2.818…) = 2
+        // column-count=2: min(2, 2) = 2 (tie). col_w = (300 − 10) / 2 = 145.
+        let (n_both, w_both) = resolve_column_layout(300.0, Some(2), Some(100.0), 10.0);
+        let (n_count, w_count) = resolve_column_layout(300.0, Some(2), None, 10.0);
+        assert_eq!(n_both, n_count, "tie must yield same n as count-only");
+        assert!(
+            (w_both - w_count).abs() < 1e-3,
+            "tie must yield same col_w as count-only: both={w_both}, count={w_count}"
+        );
+        assert_eq!(n_both, 2);
+        assert!(
+            (w_both - 145.0).abs() < 1e-3,
+            "col_w expected 145, got {w_both}"
+        );
+    }
+
+    // ── balance_budget: edge cases ───────────────────────────────────
+
+    #[test]
+    fn balance_budget_empty_children_returns_smallest_ideal() {
+        // No children → `fits_in_n_columns` is vacuously true on the first
+        // iteration (ideal = max(ceil(0/n), 1) = 1). Returns 1.0.
+        let children: Vec<(NodeId, Size<f32>)> = vec![];
+        let budget = balance_budget(&children, 2, 100.0, 0.0);
+        assert!(
+            (budget - 1.0).abs() < 0.01,
+            "empty children: expected budget=1.0, got {budget}"
+        );
+    }
+
+    #[test]
+    fn balance_budget_single_item_fits_immediately_at_ideal() {
+        // 1 item of height 10 in n=2: ideal = ceil(10/2) = 5.
+        // `fits_in_n_columns([10], 2, 5)`:
+        //   col_y=0, 0>0 false → add h=10. col_y=10. (loop ends)
+        //   Returns true → budget converges at 5 on the first iteration.
+        let children = fake_sized(1, 10.0);
+        let budget = balance_budget(&children, 2, 100.0, 10.0);
+        assert!(
+            (budget - 5.0).abs() < 0.01,
+            "single item: expected ideal budget=5.0, got {budget}"
+        );
+    }
 }
