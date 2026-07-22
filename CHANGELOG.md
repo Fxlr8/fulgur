@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.38.0] - 2026-07-22
+
+<!-- release-notes:auto:begin -->
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* fix(security): sanitize element tag prefix in CounterPass-generated CSS by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/657
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.37.0...v0.38.0
+<!-- release-notes:auto:end -->
+
 ## [0.37.0] - 2026-07-20
 
 <!-- release-notes:auto:begin -->
