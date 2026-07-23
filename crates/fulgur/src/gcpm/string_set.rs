@@ -179,4 +179,120 @@ mod tests {
         assert_eq!(normalize_whitespace("   "), "");
         assert_eq!(normalize_whitespace("no-whitespace"), "no-whitespace");
     }
+
+    #[test]
+    fn default_produces_empty_store() {
+        let store = StringSetStore::default();
+        assert!(store.is_empty());
+        assert_eq!(store.entries().len(), 0);
+    }
+
+    #[test]
+    fn push_drops_entry_when_budget_exceeded() {
+        let mut store = StringSetStore::new();
+
+        // Fill the store to just below the limit with one large entry whose
+        // name + value payload + STRING_ENTRY_OVERHEAD_BYTES equals exactly
+        // MAX_STRING_SET_STORE_BYTES.  The exact payload size needed:
+        //   payload = MAX_STRING_SET_STORE_BYTES - STRING_ENTRY_OVERHEAD_BYTES
+        let budget = crate::MAX_STRING_SET_STORE_BYTES;
+        let overhead = crate::STRING_ENTRY_OVERHEAD_BYTES;
+        let payload = budget - overhead; // name.len() + value.len()
+        let value = "x".repeat(payload);
+        store.push(StringSetEntry {
+            name: String::new(),
+            value,
+            node_id: 1,
+        });
+        assert_eq!(store.entries().len(), 1, "first entry should fit exactly");
+
+        // A second entry of any size must be dropped — the budget is now full.
+        store.push(StringSetEntry {
+            name: "overflow".into(),
+            value: "ignored".into(),
+            node_id: 2,
+        });
+        assert_eq!(
+            store.entries().len(),
+            1,
+            "entry over budget must be silently dropped"
+        );
+    }
+
+    #[test]
+    fn push_allows_small_entries_after_earlier_large_entry_fails() {
+        let mut store = StringSetStore::new();
+
+        let budget = crate::MAX_STRING_SET_STORE_BYTES;
+        let overhead = crate::STRING_ENTRY_OVERHEAD_BYTES;
+
+        // Push an entry that is just one byte over the budget: it must be
+        // dropped because the total would exceed MAX_STRING_SET_STORE_BYTES.
+        let too_large = "x".repeat(budget - overhead + 1);
+        store.push(StringSetEntry {
+            name: String::new(),
+            value: too_large,
+            node_id: 1,
+        });
+        assert!(store.is_empty(), "over-budget entry must be dropped");
+
+        // A small entry should still be accepted since the budget wasn't consumed.
+        store.push(StringSetEntry {
+            name: "k".into(),
+            value: "v".into(),
+            node_id: 2,
+        });
+        assert_eq!(
+            store.entries().len(),
+            1,
+            "small entry must be accepted after a dropped entry"
+        );
+        assert_eq!(store.entries()[0].node_id, 2);
+    }
+
+    #[test]
+    fn push_tracks_total_bytes_correctly() {
+        let mut store = StringSetStore::new();
+        let overhead = crate::STRING_ENTRY_OVERHEAD_BYTES;
+
+        // Push two entries whose combined size is well within the budget.
+        store.push(StringSetEntry {
+            name: "a".into(),   // 1 byte
+            value: "bb".into(), // 2 bytes
+            node_id: 1,
+        });
+        store.push(StringSetEntry {
+            name: "cc".into(),   // 2 bytes
+            value: "ddd".into(), // 3 bytes
+            node_id: 2,
+        });
+
+        // Both entries should be present; total_bytes = 2*(overhead) + 1+2+2+3.
+        assert_eq!(store.entries().len(), 2);
+
+        // Now push an entry whose size alone equals the remaining budget.
+        // Expected total after the two entries: 2*overhead + 8
+        let consumed = 2 * overhead + 8;
+        let remaining = crate::MAX_STRING_SET_STORE_BYTES - consumed;
+        // Subtract overhead for the new entry's accounting.
+        let fill_value = "y".repeat(remaining - overhead);
+        store.push(StringSetEntry {
+            name: String::new(),
+            value: fill_value,
+            node_id: 3,
+        });
+        assert_eq!(store.entries().len(), 3, "third entry must fit");
+
+        // Now the budget is full — a fourth entry must be dropped.
+        store.push(StringSetEntry {
+            name: "x".into(),
+            value: "x".into(),
+            node_id: 4,
+        });
+        assert_eq!(
+            store.entries().len(),
+            3,
+            "fourth entry must be dropped when budget is full"
+        );
+    }
 }
