@@ -349,10 +349,23 @@ impl Quad {
             && self.points[2][1] == self.points[3][1];
 
         if is_axis_aligned {
-            let qx0 = self.points[3][0].min(self.points[0][0]);
-            let qx1 = self.points[1][0].max(self.points[2][0]);
-            let qy0 = self.points[2][1].min(self.points[3][1]);
-            let qy1 = self.points[0][1].max(self.points[1][1]);
+            // Survey all four points instead of the un-reflected krilla
+            // pairing (points[0]/[3] on the left, points[1]/[2] on the
+            // right). `transform: scaleX(-1)` / `scaleY(-1)` mirrors
+            // the rect, swapping the paired positions while still
+            // leaving the quad axis-aligned; deriving `qx0` / `qx1`
+            // from fixed pairs would produce `qx1 <= qx0` after
+            // reflection and drop the annotation even though the
+            // reflected rect is still on-page.
+            let (qx0, qy0, qx1, qy1) = self.points.iter().fold(
+                (
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ),
+                |(x0, y0, x1, y1), &[px, py]| (x0.min(px), y0.min(py), x1.max(px), y1.max(py)),
+            );
             let x0 = qx0.max(ax0);
             let x1 = qx1.min(ax1);
             let y0 = qy0.max(ay0);
@@ -1919,6 +1932,78 @@ mod dp_unit_tests {
             ],
         };
         assert!(q.clip_to_rect(&area).is_none());
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_after_x_reflection_is_preserved() {
+        // `transform: scaleX(-1)` (or an equivalent matrix) mirrors the
+        // rect horizontally. The result is still axis-aligned in the
+        // `is_axis_aligned` sense (paired corners share x/y), but the
+        // BL/TL pair now sits at the *right* edge and BR/TR pair at the
+        // *left* edge — the reverse of the un-reflected order.
+        //
+        // Original 100x14 rect at (100, 200) → corners:
+        //   BL=(100,214)  BR=(200,214)  TR=(200,200)  TL=(100,200)
+        // After scaleX(-1) about x=0 → corners:
+        //   BL=(-100,214) BR=(-200,214) TR=(-200,200) TL=(-100,200)
+        //
+        // A clip that assumed BL/TL held min_x and BR/TR held max_x
+        // (the original orientation) would derive `qx1 <= qx0` for the
+        // reflected quad and drop the annotation even though it lies
+        // fully inside `area`. `clip_to_rect` must survey all four
+        // points instead of paired positions.
+        let area = Rect {
+            x: (-300.0).as_pt(),
+            y: 100.0.as_pt(),
+            width: 400.0.as_pt(),
+            height: 500.0.as_pt(),
+        };
+        let q = Quad {
+            points: [
+                [-100.0, 214.0],
+                [-200.0, 214.0],
+                [-200.0, 200.0],
+                [-100.0, 200.0],
+            ],
+        };
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("reflected quad fully inside area must survive");
+        let (min_x, min_y, max_x, max_y) = quad_bounds(&clipped);
+        assert!((min_x - (-200.0)).abs() < 1e-4);
+        assert!((max_x - (-100.0)).abs() < 1e-4);
+        assert!((min_y - 200.0).abs() < 1e-4);
+        assert!((max_y - 214.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_after_y_reflection_is_preserved() {
+        // Symmetric case: `transform: scaleY(-1)` (or matrix equivalent)
+        // mirrors vertically. BL/BR now hold the *smaller* y and TR/TL
+        // the *larger* y, the reverse of the un-reflected pairing.
+        let area = Rect {
+            x: 0.0.as_pt(),
+            y: (-300.0).as_pt(),
+            width: 500.0.as_pt(),
+            height: 400.0.as_pt(),
+        };
+        // Original y0=200 y1=214 flipped to y0'=-200 y1'=-214.
+        let q = Quad {
+            points: [
+                [100.0, -214.0],
+                [200.0, -214.0],
+                [200.0, -200.0],
+                [100.0, -200.0],
+            ],
+        };
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("y-reflected quad fully inside area must survive");
+        let (min_x, min_y, max_x, max_y) = quad_bounds(&clipped);
+        assert!((min_x - 100.0).abs() < 1e-4);
+        assert!((max_x - 200.0).abs() < 1e-4);
+        assert!((min_y - (-214.0)).abs() < 1e-4);
+        assert!((max_y - (-200.0)).abs() < 1e-4);
     }
 
     // ── compute_overflow_clip_path branches ─────────────────
