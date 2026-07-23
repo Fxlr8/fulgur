@@ -318,6 +318,62 @@ impl Quad {
         (ax * by - ay * bx).abs() <= f32::EPSILON
     }
 
+    /// Clip this quad against an axis-aligned `Rect`.
+    ///
+    /// Axis-aligned quads are clamped to the rect (min/max on both axes),
+    /// producing a smaller axis-aligned quad; if the intersection is empty
+    /// this returns `None`. Non-axis-aligned (rotated) quads are dropped
+    /// whenever any point lies outside the rect, because clamping a
+    /// rotated shape's corners to axis-aligned bounds distorts the
+    /// clickable region into a different quadrilateral than the visible
+    /// text — safer to drop entirely.
+    ///
+    /// Used by `render_v2` to keep body-collected link annotations inside
+    /// the content area. The v2 paint order draws `@page` margin boxes
+    /// AFTER body content, so a body link falling in a page-margin strip
+    /// would visually be covered by the margin box but remain clickable
+    /// with its original URI — click target and visible text disagree.
+    pub fn clip_to_rect(&self, area: &Rect) -> Option<Quad> {
+        let ax0 = area.x.to_f32();
+        let ay0 = area.y.to_f32();
+        let ax1 = ax0 + area.width.to_f32();
+        let ay1 = ay0 + area.height.to_f32();
+
+        // Detect axis-aligned quads in the krilla point order
+        // (BL, BR, TR, TL). Comparing exactly is correct because
+        // `transform_rect` and `push_rect` write matching floats to the
+        // paired corners when no rotation is present.
+        let is_axis_aligned = self.points[0][0] == self.points[3][0]
+            && self.points[1][0] == self.points[2][0]
+            && self.points[0][1] == self.points[1][1]
+            && self.points[2][1] == self.points[3][1];
+
+        if is_axis_aligned {
+            let qx0 = self.points[3][0].min(self.points[0][0]);
+            let qx1 = self.points[1][0].max(self.points[2][0]);
+            let qy0 = self.points[2][1].min(self.points[3][1]);
+            let qy1 = self.points[0][1].max(self.points[1][1]);
+            let x0 = qx0.max(ax0);
+            let x1 = qx1.min(ax1);
+            let y0 = qy0.max(ay0);
+            let y1 = qy1.min(ay1);
+            if x1 <= x0 || y1 <= y0 {
+                return None;
+            }
+            return Some(Quad {
+                points: [[x0, y1], [x1, y1], [x1, y0], [x0, y0]],
+            });
+        }
+
+        // Non-axis-aligned: preserve iff every point is inside `area`.
+        for [x, y] in self.points {
+            if x < ax0 || x > ax1 || y < ay0 || y > ay1 {
+                return None;
+            }
+        }
+        Some(*self)
+    }
+
     /// Convert to krilla's `Quadrilateral` for PDF annotation emission.
     pub fn to_krilla(&self) -> krilla::geom::Quadrilateral {
         krilla::geom::Quadrilateral([
@@ -1721,6 +1777,148 @@ mod dp_unit_tests {
         );
         collector.pop_transform();
         assert!(collector.occurrences().is_empty());
+    }
+
+    // ── Quad::clip_to_rect ─────────────────────────────────
+    //
+    // Body-collected link annotations may extend into a page-margin box
+    // strip (e.g. via `position: fixed`, negative margins, or an oversized
+    // element). Margin boxes are painted AFTER body content — see the
+    // paint order comment in `render.rs` — so a body link that falls in a
+    // margin area is *visually replaced by the margin-box content but
+    // still emitted as an active PDF link annotation with its original
+    // URI*. `clip_to_rect` clamps axis-aligned body quads to the content
+    // area and drops any rotated quad that has a point outside the
+    // content area, so the click target and the visible text always agree.
+
+    fn aa_quad(x0: f32, y0: f32, x1: f32, y1: f32) -> Quad {
+        // bottom-left → bottom-right → top-right → top-left (Y-down)
+        Quad {
+            points: [[x0, y1], [x1, y1], [x1, y0], [x0, y0]],
+        }
+    }
+
+    fn quad_bounds(q: &Quad) -> (f32, f32, f32, f32) {
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for p in q.points {
+            min_x = min_x.min(p[0]);
+            min_y = min_y.min(p[1]);
+            max_x = max_x.max(p[0]);
+            max_y = max_y.max(p[1]);
+        }
+        (min_x, min_y, max_x, max_y)
+    }
+
+    fn content_area() -> Rect {
+        // A4 with 60pt top/bottom, 40pt left/right margins → content area
+        // (40, 60) to (555, 782) in Y-down coordinates.
+        Rect {
+            x: 40.0.as_pt(),
+            y: 60.0.as_pt(),
+            width: 515.0.as_pt(),
+            height: 722.0.as_pt(),
+        }
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_fully_inside_returns_self() {
+        let area = content_area();
+        // 50x14 quad at (100, 200) — well inside content area.
+        let q = aa_quad(100.0, 200.0, 150.0, 214.0);
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("fully-inside quad must survive clipping");
+        assert_eq!(clipped.points, q.points);
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_in_bottom_margin_returns_none() {
+        let area = content_area();
+        // Quad entirely inside bottom margin strip (y in [800, 820]);
+        // content area's max y is 782 — no overlap. This is the shape
+        // that produces a click-target / visible-text mismatch: body
+        // anchor positioned where `@bottom-*` margin boxes will paint.
+        let q = aa_quad(100.0, 800.0, 250.0, 820.0);
+        assert!(q.clip_to_rect(&area).is_none());
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_in_top_margin_returns_none() {
+        let area = content_area();
+        // Quad entirely inside top margin strip (y in [10, 40]);
+        // content area starts at y=60.
+        let q = aa_quad(100.0, 10.0, 250.0, 40.0);
+        assert!(q.clip_to_rect(&area).is_none());
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_straddling_bottom_boundary_clamps() {
+        let area = content_area();
+        // Quad y in [770, 800] straddles content-area bottom (y=782).
+        // Intersection y range = [770, 782].
+        let q = aa_quad(100.0, 770.0, 250.0, 800.0);
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("straddling quad must produce clipped remainder");
+        let (min_x, min_y, max_x, max_y) = quad_bounds(&clipped);
+        assert!((min_x - 100.0).abs() < 1e-4);
+        assert!((max_x - 250.0).abs() < 1e-4);
+        assert!((min_y - 770.0).abs() < 1e-4);
+        assert!((max_y - 782.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_straddling_left_boundary_clamps() {
+        let area = content_area();
+        // Quad x in [30, 100] straddles content-area left (x=40).
+        // Intersection x range = [40, 100].
+        let q = aa_quad(30.0, 200.0, 100.0, 214.0);
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("straddling quad must produce clipped remainder");
+        let (min_x, min_y, max_x, max_y) = quad_bounds(&clipped);
+        assert!((min_x - 40.0).abs() < 1e-4);
+        assert!((max_x - 100.0).abs() < 1e-4);
+        assert!((min_y - 200.0).abs() < 1e-4);
+        assert!((max_y - 214.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quad_clip_rotated_all_points_inside_returns_self() {
+        let area = content_area();
+        // Rotated (non-axis-aligned) quad, all 4 points inside area.
+        let q = Quad {
+            points: [
+                [100.0, 250.0],
+                [200.0, 260.0],
+                [190.0, 210.0],
+                [90.0, 200.0],
+            ],
+        };
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("rotated fully-inside quad must survive");
+        assert_eq!(clipped.points, q.points);
+    }
+
+    #[test]
+    fn quad_clip_rotated_any_point_outside_returns_none() {
+        let area = content_area();
+        // Rotated quad with one point outside (x=560 > area.right=555).
+        // Rotated quads can't be safely clamped to axis-aligned bounds
+        // without producing a wrong shape, so any-point-outside → drop.
+        let q = Quad {
+            points: [
+                [100.0, 250.0],
+                [560.0, 260.0],
+                [540.0, 210.0],
+                [90.0, 200.0],
+            ],
+        };
+        assert!(q.clip_to_rect(&area).is_none());
     }
 
     // ── compute_overflow_clip_path branches ─────────────────

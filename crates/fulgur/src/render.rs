@@ -117,7 +117,15 @@ pub fn render_v2(
         }
     }
 
-    let mut link_collector = crate::draw_primitives::LinkCollector::new();
+    // Body content and margin boxes get separate LinkCollectors. Body
+    // occurrences are clipped to the content area before emission so a
+    // body link positioned into a page-margin strip (via CSS positioning
+    // or overflow) cannot leave a click target under a later-painted
+    // margin box — the paint order would otherwise let the visible text
+    // and the clickable URI disagree. Margin-box occurrences are emitted
+    // unclipped so `@page @bottom-*` anchors remain clickable.
+    let mut body_link_collector = crate::draw_primitives::LinkCollector::new();
+    let mut margin_link_collector = crate::draw_primitives::LinkCollector::new();
 
     let mut link_annot_ids: BTreeMap<usize, Vec<krilla::tagging::Identifier>> = BTreeMap::new();
 
@@ -197,14 +205,15 @@ pub fn render_v2(
         if let Some(c) = bookmark_collector.as_mut() {
             c.set_current_page(page_idx);
         }
-        link_collector.set_current_page(page_idx);
+        body_link_collector.set_current_page(page_idx);
+        margin_link_collector.set_current_page(page_idx);
         {
             let mut surface = page.surface();
             {
                 let mut canvas = crate::draw_primitives::Canvas {
                     surface: &mut surface,
                     bookmark_collector: bookmark_collector.as_mut(),
-                    link_collector: Some(&mut link_collector),
+                    link_collector: Some(&mut body_link_collector),
                     tag_collector: tag_collector.as_mut(),
                     link_run_node_id: None,
                     in_marked_content: false,
@@ -289,12 +298,14 @@ pub fn render_v2(
             }
             // Paint margin boxes after body content so page headers /
             // footers are not hidden by page-filling body backgrounds.
-            // Keep bookmarks disabled for repeated running elements, but
-            // collect links so margin-box anchors remain clickable.
+            // Keep bookmarks disabled for repeated running elements.
+            // Margin-box links go into their own collector so their
+            // occurrences do not get clipped to the body content area
+            // (they live in the margin strips by design).
             let mut margin_canvas = crate::draw_primitives::Canvas {
                 surface: &mut surface,
                 bookmark_collector: None,
-                link_collector: Some(&mut link_collector),
+                link_collector: Some(&mut margin_link_collector),
                 tag_collector: None,
                 link_run_node_id: None,
                 in_marked_content: false,
@@ -311,7 +322,24 @@ pub fn render_v2(
                 anchor_map,
             );
         }
-        let per_page = link_collector.take_page(page_idx);
+        // Body occurrences are clipped to the content area rect before
+        // emission, so a body link that fell into a page-margin strip
+        // (e.g. via `position: fixed; bottom: 0`) cannot leave a click
+        // target under a later-painted margin box — the paint order
+        // would otherwise leave the visible text and the clickable URI
+        // out of sync. Margin occurrences are emitted unclipped — they
+        // live in the margin strips by design.
+        let content_area = crate::draw_primitives::Rect {
+            x: resolved_margin.left.as_pt(),
+            y: resolved_margin.top.as_pt(),
+            width: (page_size.width - resolved_margin.left - resolved_margin.right).as_pt(),
+            height: (page_size.height - resolved_margin.top - resolved_margin.bottom).as_pt(),
+        };
+        let body_per_page = crate::link::clip_body_occurrences_to_content_area(
+            body_link_collector.take_page(page_idx),
+            &content_area,
+        );
+        let margin_per_page = margin_link_collector.take_page(page_idx);
         // Only span_ptrs that are wired into the struct tree via
         // ParagraphRunItem::LinkContent entries should use add_tagged_annotation;
         // others fall back to add_annotation so that Krilla's invariant
@@ -320,7 +348,15 @@ pub fn render_v2(
         let wired_ptrs = tag_collector.as_ref().map(|tc| tc.wired_link_span_ptrs());
         for (ptr, id) in crate::link::emit_link_annotations(
             &mut page,
-            &per_page,
+            &body_per_page,
+            &dest_registry,
+            wired_ptrs.as_ref(),
+        ) {
+            link_annot_ids.entry(ptr).or_default().push(id);
+        }
+        for (ptr, id) in crate::link::emit_link_annotations(
+            &mut page,
+            &margin_per_page,
             &dest_registry,
             wired_ptrs.as_ref(),
         ) {

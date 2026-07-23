@@ -5954,3 +5954,90 @@ body{{background-size:0.001px 0.001px;background-repeat:repeat;height:1130px;
         pdf.len()
     );
 }
+
+/// Body link annotations must never leak into the page-margin strips
+/// where `@page @top-*`/`@bottom-*` margin boxes paint. `render_v2`
+/// paints margin boxes AFTER body content so page headers/footers are
+/// not hidden by page-filling body backgrounds; because PDF link
+/// annotations are independent interactive objects, a body anchor
+/// positioned into a margin strip would remain clickable under the
+/// margin-box content that visually replaces it — click target and
+/// visible text disagree. The fix splits `LinkCollector` into body/
+/// margin collectors and clips body occurrences to the content area
+/// rect.
+///
+/// This test pushes a body `<a>` far past the content-area bottom via
+/// `margin-top` so the anchor's Y coordinate lands inside the bottom
+/// margin strip. The rendered PDF must contain zero link annotations
+/// whose rect intersects that strip.
+#[test]
+fn body_link_positioned_into_bottom_margin_strip_is_dropped() {
+    // A4 with 60pt top/bottom margins. Content-area bottom (Y-up) is
+    // 782 → 842 (60pt strip). We push the anchor down so its Y-up
+    // rect lies below 782.
+    let html = r#"<!doctype html><html><head><style>
+@page {
+  size: A4;
+  margin: 60pt 40pt 60pt 40pt;
+  @bottom-center { content: "Page footer"; }
+}
+body { margin: 0; padding: 0; }
+a { display: block; margin-top: 750pt; font-size: 12pt; }
+</style></head><body>
+<a href="https://example.com/target">body link</a>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+
+    // The PoC anchor lands in the bottom-margin strip (Y-up y < 60).
+    // No link annotation may reference that strip in its /Rect.
+    let text = String::from_utf8_lossy(&pdf);
+    for cap in regex_lite_link_rects(&text) {
+        let (llx, lly, urx, ury) = cap;
+        // `ury` is the top edge of the annotation in PDF-native Y-up.
+        // Any annotation whose top edge is at or below the content-
+        // area bottom (Y-up = 60) has crept into the bottom margin
+        // strip — that must not happen.
+        assert!(
+            ury >= 60.0,
+            "body link annotation leaked into bottom margin strip: \
+             /Rect [{llx} {lly} {urx} {ury}] — top edge (Y-up ury) \
+             must be >= 60pt (content-area bottom in Y-up)"
+        );
+    }
+}
+
+/// Parse `/Subtype /Link ... /Rect [llx lly urx ury]` from a raw PDF
+/// text stream. Returns `(llx, lly, urx, ury)` tuples in PDF-native
+/// Y-up coordinates. Used by the security regression test above so
+/// no new dependency (`regex`, `pdf-extract`) is pulled in just for
+/// one assertion — the raw content stream shape is stable enough for
+/// a bespoke scan.
+fn regex_lite_link_rects(text: &str) -> Vec<(f32, f32, f32, f32)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(link_off) = text[i..].find("/Subtype /Link") {
+        let start = i + link_off;
+        // Look ahead for /Rect [ ... ] within the next 512 bytes.
+        let window_end = (start + 512).min(text.len());
+        if let Some(rect_off) = text[start..window_end].find("/Rect [") {
+            let after = start + rect_off + "/Rect [".len();
+            if let Some(close) = text[after..window_end].find(']') {
+                let body = &text[after..after + close];
+                let nums: Vec<f32> = body
+                    .split_whitespace()
+                    .filter_map(|s| s.parse::<f32>().ok())
+                    .collect();
+                if nums.len() == 4 {
+                    out.push((nums[0], nums[1], nums[2], nums[3]));
+                }
+            }
+        }
+        i = start + "/Subtype /Link".len();
+    }
+    out
+}
