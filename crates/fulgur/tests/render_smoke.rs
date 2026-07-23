@@ -5973,8 +5973,8 @@ body{{background-size:0.001px 0.001px;background-repeat:repeat;height:1130px;
 #[test]
 fn body_link_positioned_into_bottom_margin_strip_is_dropped() {
     // A4 with 60pt top/bottom margins. Content-area bottom (Y-up) is
-    // 782 → 842 (60pt strip). We push the anchor down so its Y-up
-    // rect lies below 782.
+    // 782 → 842 (60pt strip). The `.push` anchor gets margin-top: 750pt,
+    // sending its Y-up rect below 782 (into the bottom-margin strip).
     let html = r#"<!doctype html><html><head><style>
 @page {
   size: A4;
@@ -5993,20 +5993,48 @@ a { display: block; margin-top: 750pt; font-size: 12pt; }
         .expect("render must succeed");
     assert!(pdf.starts_with(b"%PDF"));
 
-    // The PoC anchor lands in the bottom-margin strip (Y-up y < 60).
-    // No link annotation may reference that strip in its /Rect.
     let text = String::from_utf8_lossy(&pdf);
-    for cap in regex_lite_link_rects(&text) {
-        let (llx, lly, urx, ury) = cap;
-        // `ury` is the top edge of the annotation in PDF-native Y-up.
-        // Any annotation whose top edge is at or below the content-
-        // area bottom (Y-up = 60) has crept into the bottom margin
-        // strip — that must not happen.
+    let rects = regex_lite_link_rects(&text);
+    // Every /Rect that survives must lie inside the content area
+    // (Y-up ury >= 60pt).
+    for cap in &rects {
+        let (llx, lly, urx, ury) = *cap;
         assert!(
             ury >= 60.0,
             "body link annotation leaked into bottom margin strip: \
              /Rect [{llx} {lly} {urx} {ury}] — top edge (Y-up ury) \
              must be >= 60pt (content-area bottom in Y-up)"
+        );
+    }
+    // Positive control for the scanner: without this, a hypothetical
+    // break in `regex_lite_link_rects` (returning an empty vec) would
+    // let the ury loop pass vacuously and hide a real regression.
+    // A companion render with an anchor plainly inside the content
+    // area must produce at least one /Rect the same scanner can find.
+    let legit_html = r#"<!doctype html><html><head><style>
+@page { size: A4; margin: 60pt 40pt 60pt 40pt; }
+body { margin: 0; padding: 20pt; font-size: 12pt; }
+</style></head><body>
+<p>Visit <a href="https://example.com/in-content">our documentation</a>.</p>
+</body></html>"#;
+    let legit_pdf = Engine::builder()
+        .build()
+        .render(legit_html)
+        .expect("positive-control render must succeed");
+    let legit_text = String::from_utf8_lossy(&legit_pdf);
+    let legit_rects = regex_lite_link_rects(&legit_text);
+    assert!(
+        !legit_rects.is_empty(),
+        "scanner returned no /Rect entries for a plainly in-content link; \
+         the primary loop above would pass vacuously if the scanner \
+         itself broke, so guard against that here."
+    );
+    for cap in legit_rects {
+        let (llx, lly, urx, ury) = cap;
+        assert!(
+            ury >= 60.0,
+            "positive-control link ended up in a margin strip: \
+             /Rect [{llx} {lly} {urx} {ury}]"
         );
     }
 }

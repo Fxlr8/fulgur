@@ -201,6 +201,7 @@ pub fn render_v2(
         };
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
+        let content_area = resolved_content_area(page_size, resolved_margin);
         let mut page = document.start_page_with(settings);
         if let Some(c) = bookmark_collector.as_mut() {
             c.set_current_page(page_idx);
@@ -257,8 +258,7 @@ pub fn render_v2(
                 if let Some(body_id) = drawables.body_id
                     && let Some(body_block) = drawables.block_styles.get(&body_id)
                 {
-                    let content_area_h =
-                        page_size.height - resolved_margin.top - resolved_margin.bottom;
+                    let content_area_h = content_area.height.to_f32();
                     let body_bg_y = if page_idx == 0 {
                         resolved_margin.top + drawables.body_offset_pt.1.to_f32()
                     } else {
@@ -310,7 +310,7 @@ pub fn render_v2(
                 link_run_node_id: None,
                 in_marked_content: false,
             };
-            let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
+            let page_content_width = content_area.width.to_f32();
             margin_box_renderer.render_page(
                 &mut margin_canvas,
                 page_idx,
@@ -328,13 +328,10 @@ pub fn render_v2(
         // target under a later-painted margin box — the paint order
         // would otherwise leave the visible text and the clickable URI
         // out of sync. Margin occurrences are emitted unclipped — they
-        // live in the margin strips by design.
-        let content_area = crate::draw_primitives::Rect {
-            x: resolved_margin.left.as_pt(),
-            y: resolved_margin.top.as_pt(),
-            width: (page_size.width - resolved_margin.left - resolved_margin.right).as_pt(),
-            height: (page_size.height - resolved_margin.top - resolved_margin.bottom).as_pt(),
-        };
+        // live in the margin strips by design. `content_area` is the
+        // same rect the body background clamp and the margin-box
+        // renderer used earlier this iteration — see
+        // `resolved_content_area`.
         let body_per_page = crate::link::clip_body_occurrences_to_content_area(
             body_link_collector.take_page(page_idx),
             &content_area,
@@ -397,6 +394,24 @@ pub fn render_v2(
 /// other maps.
 /// Build the three page-independent skip sets used by `draw_v2_page`.
 ///
+/// Content-area rect for a page: the region inside `resolved_margin`,
+/// where body content is laid out. Single source of truth for the three
+/// downstream consumers — body background clamp height, GCPM margin-box
+/// renderer width, and body-link annotation clip rect — so a future
+/// change to how `resolved_margin` subtracts from `page_size` shifts
+/// all three together instead of leaving one behind.
+fn resolved_content_area(
+    page_size: crate::config::PageSize,
+    resolved_margin: crate::config::Margin,
+) -> crate::draw_primitives::Rect {
+    crate::draw_primitives::Rect {
+        x: resolved_margin.left.as_pt(),
+        y: resolved_margin.top.as_pt(),
+        width: (page_size.width - resolved_margin.left - resolved_margin.right).as_pt(),
+        height: (page_size.height - resolved_margin.top - resolved_margin.bottom).as_pt(),
+    }
+}
+
 /// - `transformed_descendants`: every node listed in some
 ///   `TransformEntry::descendants` — drawn inside that transform's
 ///   `push_transform / pop` group, so the main per-fragment loop must
