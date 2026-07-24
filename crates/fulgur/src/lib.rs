@@ -205,14 +205,14 @@ pub(crate) const MAX_COUNTER_CHAIN_ENTRIES: usize = MAX_DOM_DEPTH;
 /// [`MAX_DOM_DEPTH`] defensive traversal bound.
 pub(crate) const MAX_PDF_PARENT_DEPTH: usize = 128;
 
-/// Upper bound on the size of a single *decoded* page content stream that
+/// Upper bound on the total size of a page's *decoded* content that
 /// [`inspect::inspect`] will hand to `lopdf::content::Content::decode`.
 ///
 /// `Content::decode` materialises the entire operation list up front, at a
 /// measured ~570 bytes of heap per operation for bare `q` operators — which
 /// occupy 2 input bytes each, a ~285× expansion. Page content streams are also
 /// Flate-compressed, so a few kilobytes on disk can decompress into megabytes
-/// of operators, an expansion the caller never sees in the file size. Streams
+/// of operators, an expansion the caller never sees in the file size. Pages
 /// above this bound are skipped rather than parsed.
 ///
 /// 1 MiB is ~22× the largest content stream produced by any document in the
@@ -220,10 +220,46 @@ pub(crate) const MAX_PDF_PARENT_DEPTH: usize = 128;
 /// peak at 47 KB), and bounds the worst-case operation list at roughly 285 MB
 /// — the same order as an extra-large fulgur render. Peak memory stays bounded
 /// *per page* because the decoded operation list is dropped before the next
-/// page is read. The residual per-operation constant belongs to `lopdf`, not
-/// to fulgur; this bound is the only lever over it, since `Content::decode`
-/// has already allocated by the time an operation count could be observed.
+/// page is read.
+///
+/// Enforced *incrementally*, by [`inspect::gather_page_content`], as the page's
+/// content streams are decoded and concatenated. `lopdf`'s own
+/// `Document::get_page_content` inflates every stream of the page and joins
+/// them before returning, so testing the length of its result would bound only
+/// what gets parsed, not what gets allocated: a page carrying many small
+/// compressed streams would still inflate all of them first.
+///
+/// Two residual amplification constants belong to `lopdf` rather than to
+/// fulgur, and this bound is the only lever over either, since both have
+/// already allocated by the time fulgur could observe a size:
+///
+/// - `Content::decode`'s ~570 bytes per operation, above.
+/// - A *single* content stream whose decoded size exceeds this bound is still
+///   inflated in full by `Stream::decompressed_content` before its length can
+///   be measured. Bounding that from fulgur would mean reimplementing the
+///   filter chain (Flate/LZW/ASCII85 plus predictors, and `lopdf`'s raw-deflate
+///   retry for streams with a corrupt adler32 checksum) against a size-limited
+///   reader — which would silently stop inspecting PDFs that decode today.
 pub(crate) const MAX_PDF_CONTENT_BYTES: usize = 1024 * 1024;
+
+/// Upper bound on the length of a `/Tf` font resource name that
+/// [`inspect::inspect`] will retain and report.
+///
+/// Every extracted [`inspect::TextItem`] owns a copy of the font name in
+/// effect, so the retained and serialised size of a result is
+/// `items × name_len`, not `items` alone. [`MAX_PDF_CONTENT_BYTES`] does not
+/// bound that product: it is a *per-page* budget, so a document can spend one
+/// page's budget on a wide `/Tf` name followed by a run of 5-byte `(A) Tj`
+/// operators and repeat that across pages, up to
+/// [`MAX_PDF_INSPECT_ITEMS`] records each pairing with a name of nearly a
+/// megabyte. Clamping the name bounds the product at ~25 MB.
+///
+/// 127 bytes is the architectural limit the PDF specification's implementation
+/// notes give for a name object (ISO 32000-1 Annex C.2), so no name a
+/// conforming producer emits is affected — fulgur's own are `F0`, `F1`, ….
+/// Longer names are truncated on a UTF-8 character boundary rather than
+/// rejected, which keeps a record's other fields usable.
+pub(crate) const MAX_PDF_FONT_NAME_BYTES: usize = 127;
 
 /// Upper bound on graphics-state (`q` / `Q`) nesting depth tracked by
 /// [`inspect::inspect`] while walking a page content stream.
@@ -232,9 +268,15 @@ pub(crate) const MAX_PDF_CONTENT_BYTES: usize = 1024 * 1024;
 /// `q` operators grows a stack that is proportional to the operator count. The
 /// PDF specification's implementation notes put the historical limit at 28
 /// levels and real generators nest a handful, so this bound is orders of
-/// magnitude above any legitimate document. Pushes beyond it are dropped and
-/// counted, so the matching `Q` operators stay balanced. Sibling of
+/// magnitude above any legitimate document. Sibling of
 /// [`MAX_PDF_PARENT_DEPTH`].
+///
+/// A `q` beyond the bound is dropped and counted, so the matching `Q` unwinds
+/// it instead of popping a real entry. The dropped frame's *contents* are
+/// discarded with it: because the frame has no stack entry of its own, a state
+/// change inside it would otherwise mutate the deepest retained entry and
+/// survive the matching `Q`, leaking into the enclosing scope. Discarding is
+/// what makes the outer state exactly restorable.
 pub(crate) const MAX_PDF_GS_STACK_DEPTH: usize = 1024;
 
 /// Upper bound on how many records [`inspect::inspect`] accumulates in each of

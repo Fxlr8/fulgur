@@ -3,7 +3,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::{
-    MAX_PDF_CONTENT_BYTES, MAX_PDF_GS_STACK_DEPTH, MAX_PDF_INSPECT_ITEMS, MAX_PDF_PARENT_DEPTH,
+    MAX_PDF_CONTENT_BYTES, MAX_PDF_FONT_NAME_BYTES, MAX_PDF_GS_STACK_DEPTH, MAX_PDF_INSPECT_ITEMS,
+    MAX_PDF_PARENT_DEPTH,
 };
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -75,6 +76,73 @@ fn obj_as_name_str(obj: &lopdf::Object) -> Option<&str> {
     obj.as_name().ok().and_then(|b| std::str::from_utf8(b).ok())
 }
 
+/// Clamp a `/Tf` font resource name to [`MAX_PDF_FONT_NAME_BYTES`].
+///
+/// Every [`TextItem`] retains a copy of the font name in effect, so an
+/// unclamped name multiplies into the result once per record — see
+/// [`MAX_PDF_FONT_NAME_BYTES`] for why the per-page content bound does not
+/// cover that product.
+///
+/// Truncation rounds *down* to a UTF-8 character boundary, so a name whose
+/// clamp point falls inside a multi-byte character is cut before that
+/// character rather than panicking on a sliced code point.
+fn clamp_font_name(name: &str) -> &str {
+    if name.len() <= MAX_PDF_FONT_NAME_BYTES {
+        return name;
+    }
+    let mut end = MAX_PDF_FONT_NAME_BYTES;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
+}
+
+/// Gather a page's decoded content streams, abandoning the page as soon as the
+/// running total exceeds [`MAX_PDF_CONTENT_BYTES`].
+///
+/// Returns `None` when the page is over budget — the caller skips it, matching
+/// how the module treats every other malformed or oversized structure.
+///
+/// This exists instead of `lopdf::Document::get_page_content` because that
+/// method inflates *every* content stream of the page and concatenates them
+/// before returning: checking the length of its result would bound only what
+/// gets parsed, not what gets allocated. Accumulating with a running budget
+/// bounds the concatenated total.
+///
+/// For a page under the bound the result is byte-for-byte what
+/// `get_page_content` returns, which is what keeps extraction unchanged for
+/// real documents: each stream contributes its decoded bytes — or its raw,
+/// still-encoded bytes when decoding fails, as `lopdf` does — followed by the
+/// `\n` separator that stops tokens merging across a stream boundary
+/// (`…Tj` + `q…` would otherwise lex as `Tjq`). Content stream ids that do not
+/// resolve to a stream object are skipped individually, not treated as
+/// abandoning the page.
+///
+/// The `\n` separators count against the budget, so the accept/reject decision
+/// is identical to testing `get_page_content`'s total: the running total rises
+/// monotonically to exactly that sum, so some prefix exceeds the bound if and
+/// only if the total does.
+fn gather_page_content(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> Option<Vec<u8>> {
+    let mut content: Vec<u8> = Vec::new();
+    for object_id in doc.get_page_contents(page_id) {
+        let Ok(stream) = doc.get_object(object_id).and_then(lopdf::Object::as_stream) else {
+            continue;
+        };
+        let decoded = stream.decompressed_content();
+        let bytes: &[u8] = match decoded {
+            Ok(ref d) => d,
+            Err(_) => &stream.content,
+        };
+        // +1 for the `\n` separator appended after every stream.
+        if content.len() + bytes.len() + 1 > MAX_PDF_CONTENT_BYTES {
+            return None;
+        }
+        content.extend_from_slice(bytes);
+        content.push(b'\n');
+    }
+    Some(content)
+}
+
 fn extract_metadata(doc: &lopdf::Document) -> Metadata {
     let mut meta = Metadata::default();
     let info_id = match doc.trailer.get(b"Info") {
@@ -112,13 +180,10 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
         if items.len() >= MAX_PDF_INSPECT_ITEMS {
             break;
         }
-        let content_bytes = match doc.get_page_content(page_id) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let content_bytes = match gather_page_content(doc, page_id) {
+            Some(b) => b,
+            None => continue,
         };
-        if content_bytes.len() > MAX_PDF_CONTENT_BYTES {
-            continue;
-        }
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
@@ -155,6 +220,21 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
             if items.len() >= MAX_PDF_INSPECT_ITEMS {
                 break;
             }
+            // Inside a `q` frame dropped for exceeding MAX_PDF_GS_STACK_DEPTH.
+            // The frame has no stack entry of its own, so a state change here
+            // would mutate the deepest *retained* entry and survive the
+            // matching `Q`, leaking into the enclosing scope. Discard the
+            // frame's contents entirely — only the `q`/`Q` bookkeeping that
+            // finds the end of the frame is honoured — which is what keeps the
+            // outer state exactly restorable.
+            if dropped_pushes > 0 {
+                match operator.as_str() {
+                    "q" => dropped_pushes += 1,
+                    "Q" => dropped_pushes -= 1,
+                    _ => {}
+                }
+                continue;
+            }
             match operator.as_str() {
                 "q" if gs_stack.len() >= MAX_PDF_GS_STACK_DEPTH => {
                     dropped_pushes += 1;
@@ -162,9 +242,6 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                 "q" => {
                     let top = gs_stack.last().expect("gs_stack non-empty").clone();
                     gs_stack.push(top);
-                }
-                "Q" if dropped_pushes > 0 => {
-                    dropped_pushes -= 1;
                 }
                 "Q" if gs_stack.len() > 1 => {
                     gs_stack.pop();
@@ -188,7 +265,9 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                 }
                 "Tf" => {
                     if let (Some(name_obj), Some(size)) = (operands.first(), operands.get(1)) {
-                        font_name = Rc::from(obj_as_name_str(name_obj).unwrap_or("unknown"));
+                        font_name = Rc::from(clamp_font_name(
+                            obj_as_name_str(name_obj).unwrap_or("unknown"),
+                        ));
                         font_size = obj_to_f32(size);
                         if let Some(gs) = gs_stack.last_mut() {
                             gs.1 = Rc::clone(&font_name);
@@ -385,13 +464,10 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
         }
 
         // Step 2: content stream から Do オペレータで位置を取得し、突き合わせて push
-        let content_bytes = match doc.get_page_content(page_id) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let content_bytes = match gather_page_content(doc, page_id) {
+            Some(b) => b,
+            None => continue,
         };
-        if content_bytes.len() > MAX_PDF_CONTENT_BYTES {
-            continue;
-        }
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
@@ -406,6 +482,17 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
             if items.len() >= MAX_PDF_INSPECT_ITEMS {
                 break;
             }
+            // See `extract_text_items`: the contents of a `q` frame dropped for
+            // exceeding MAX_PDF_GS_STACK_DEPTH are discarded with the frame, so
+            // a `cm` inside it cannot leak past the matching `Q`.
+            if dropped_pushes > 0 {
+                match op.operator.as_str() {
+                    "q" => dropped_pushes += 1,
+                    "Q" => dropped_pushes -= 1,
+                    _ => {}
+                }
+                continue;
+            }
             match op.operator.as_str() {
                 "q" if ctm_stack.len() >= MAX_PDF_GS_STACK_DEPTH => {
                     dropped_pushes += 1;
@@ -413,9 +500,6 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
                 "q" => {
                     let top = *ctm_stack.last().unwrap_or(&identity);
                     ctm_stack.push(top);
-                }
-                "Q" if dropped_pushes > 0 => {
-                    dropped_pushes -= 1;
                 }
                 "Q" if ctm_stack.len() > 1 => {
                     ctm_stack.pop();
@@ -1117,6 +1201,61 @@ mod tests {
         make_pdf_with_raw_contents(vec![raw_content])
     }
 
+    /// Build a *single-page* PDF whose `/Contents` is an array of several
+    /// streams, each carrying pre-encoded operator bytes.
+    ///
+    /// Unlike [`make_pdf_with_raw_contents`], which puts one stream on each of
+    /// several pages, this puts several streams on one page — the shape that
+    /// distinguishes a per-stream content budget from a per-page one.
+    fn make_pdf_with_multiple_content_streams(streams: Vec<Vec<u8>>) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type1",
+                    "BaseFont" => "Courier",
+                },
+            },
+        });
+        let content_refs: Vec<Object> = streams
+            .into_iter()
+            .map(|raw| Object::Reference(doc.add_object(Stream::new(dictionary! {}, raw))))
+            .collect();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_refs,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
     /// Build a single-page PDF carrying one image XObject named `/Im0`, whose
     /// content stream is exactly `raw_content`.
     ///
@@ -1259,6 +1398,9 @@ mod tests {
     /// saved graphics states share the name instead of cloning it. Deep
     /// nesting with a wide name is the highest-amplification shape for this
     /// module, so the bound is asserted through the restored state.
+    ///
+    /// The name is clamped to [`MAX_PDF_FONT_NAME_BYTES`] on the way in, so what
+    /// must survive the round trip is the clamped form, not the input.
     #[test]
     fn wide_font_name_survives_deep_nesting_and_restore() {
         let name = "F".repeat(4096);
@@ -1277,9 +1419,53 @@ mod tests {
             .first()
             .expect("text after balanced nesting must still be extracted");
         assert_eq!(
-            item.font, name,
-            "font name must survive save/restore intact"
+            item.font,
+            "F".repeat(MAX_PDF_FONT_NAME_BYTES),
+            "clamped font name must survive save/restore intact"
         );
+    }
+
+    /// A `/Tf` name longer than [`MAX_PDF_FONT_NAME_BYTES`] is clamped in every
+    /// emitted record, so the retained size of a result is bounded by
+    /// `items × MAX_PDF_FONT_NAME_BYTES` rather than by the name's length.
+    ///
+    /// A per-page content budget alone does not bound that product: this shape
+    /// spends one page on a wide name plus a run of cheap `Tj` operators, and a
+    /// document may repeat it per page.
+    #[test]
+    fn wide_font_name_is_clamped_in_every_record() {
+        let name = "F".repeat(64 * 1024);
+        let mut content = format!("BT /{name} 12 Tf\n").into_bytes();
+        for _ in 0..1000 {
+            content.extend_from_slice(b"(A) Tj\n");
+        }
+        content.extend_from_slice(b"ET\n");
+
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert_eq!(result.text_items.len(), 1000);
+        for item in &result.text_items {
+            assert_eq!(item.font.len(), MAX_PDF_FONT_NAME_BYTES);
+        }
+    }
+
+    /// Clamping a `/Tf` name must round down to a UTF-8 character boundary: a
+    /// name whose clamp point falls inside a multi-byte character is cut before
+    /// that character instead of panicking on a sliced code point.
+    #[test]
+    fn wide_font_name_clamp_respects_char_boundaries() {
+        // 3 bytes per `あ`, so no multiple of 3 lands on 127 — the clamp point
+        // falls strictly inside a character and has to round down to 126.
+        let name = "あ".repeat(128);
+        assert!(name.len() > MAX_PDF_FONT_NAME_BYTES);
+        let content = format!("BT /{name} 12 Tf (Multi) Tj ET\n").into_bytes();
+
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        let item = result
+            .text_items
+            .first()
+            .expect("text with a multi-byte font name must still be extracted");
+        assert_eq!(item.font, "あ".repeat(MAX_PDF_FONT_NAME_BYTES / 3));
+        assert!(item.font.len() <= MAX_PDF_FONT_NAME_BYTES);
     }
 
     /// Extraction stops at [`MAX_PDF_INSPECT_ITEMS`] rather than returning a
@@ -1381,15 +1567,239 @@ mod tests {
             <p>Second paragraph, also with words.</p>\
             </body></html>";
         let result = inspect_bytes(&render_test_pdf(html));
-        // One record per laid-out line: heading plus the two paragraphs.
-        assert_eq!(result.text_items.len(), 3);
+        // At least one record per source block: heading plus the two
+        // paragraphs. The exact count depends on line breaking, which depends
+        // on font metrics, so only the floor is asserted.
+        assert!(
+            result.text_items.len() >= 3,
+            "expected >=3 text items, got {}",
+            result.text_items.len()
+        );
         for item in &result.text_items {
             assert_eq!(item.page, 1);
             assert!(!item.text.is_empty());
             assert!(item.font_size > 0.0);
             assert!(item.width > 0.0);
         }
-        // Headroom check: the caps are orders of magnitude above this document.
-        assert!(result.text_items.len() * 1000 < MAX_PDF_INSPECT_ITEMS);
+        // Headroom check: the cap is orders of magnitude above this document,
+        // so the result must be nowhere near truncation.
+        assert!(result.text_items.len() < MAX_PDF_INSPECT_ITEMS / 1000);
+    }
+
+    /// A `q` past [`MAX_PDF_GS_STACK_DEPTH`] is dropped, so the frame it opens
+    /// has no stack entry of its own. State set inside that frame must not
+    /// survive its matching `Q`: without isolation the `cm` below would mutate
+    /// the deepest *retained* entry, and because that entry is never popped it
+    /// would keep transforming everything that follows.
+    ///
+    /// The existing `graphics_state_nesting_beyond_cap_stays_balanced` closes
+    /// *all* the nesting, which pops the polluted entry and hides the leak; the
+    /// distinguishing shape is closing only the dropped frame.
+    #[test]
+    fn dropped_frame_state_does_not_leak_past_matching_q() {
+        // Fill the stack exactly, then one more `q` — that last one is dropped.
+        let mut content = b"1 0 0 1 100 700 cm\n".to_vec();
+        for _ in 0..MAX_PDF_GS_STACK_DEPTH {
+            content.extend_from_slice(b"q\n");
+        }
+        // Belongs to the dropped frame, and must be discarded with it.
+        content.extend_from_slice(b"1 0 0 1 50 50 cm\n");
+        // Closes only the dropped frame; the real entries stay on the stack.
+        content.extend_from_slice(b"Q\n");
+        content.extend_from_slice(b"BT /F1 12 Tf (Anchor) Tj ET\n");
+
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        let item = result
+            .text_items
+            .first()
+            .expect("text after the dropped frame closes must still be extracted");
+        assert_eq!(item.text, "Anchor");
+        assert!(
+            (item.x - 100.0).abs() < 0.01 && (item.y - 700.0).abs() < 0.01,
+            "dropped-frame `cm` leaked: expected outer CTM (100, 700), got ({}, {})",
+            item.x,
+            item.y
+        );
+    }
+
+    /// The image pass keeps its own CTM stack, so it needs the same isolation of
+    /// dropped-frame state as the text pass.
+    #[test]
+    fn image_dropped_frame_state_does_not_leak_past_matching_q() {
+        let mut content = b"1 0 0 1 100 700 cm\n".to_vec();
+        for _ in 0..MAX_PDF_GS_STACK_DEPTH {
+            content.extend_from_slice(b"q\n");
+        }
+        // Belongs to the dropped frame: a 10x scale that must not reach the `Do`.
+        content.extend_from_slice(b"10 0 0 10 33 44 cm\n");
+        content.extend_from_slice(b"Q\n");
+        // Scale the unit image square to 50x50 at the outer origin.
+        content.extend_from_slice(b"50 0 0 50 0 0 cm\n/Im0 Do\n");
+
+        let result = inspect_bytes(&make_pdf_with_image_and_raw_content(content));
+        let img = result
+            .images
+            .first()
+            .expect("image after the dropped frame closes must still be extracted");
+        assert!(
+            (img.x - 100.0).abs() < 0.01 && (img.y - 700.0).abs() < 0.01,
+            "dropped-frame `cm` leaked: expected outer CTM (100, 700), got ({}, {})",
+            img.x,
+            img.y
+        );
+        assert!((img.width - 50.0).abs() < 0.01, "width {}", img.width);
+        assert!((img.height - 50.0).abs() < 0.01, "height {}", img.height);
+    }
+
+    /// [`MAX_PDF_CONTENT_BYTES`] bounds a page's *whole* content, not each of
+    /// its streams: a page may carry any number of `/Contents` streams, so a
+    /// per-stream check would leave the concatenated total unbounded.
+    #[test]
+    fn page_content_total_is_capped_across_streams() {
+        // Ten streams, each an eighth of the budget: every one is individually
+        // well under the cap, but together they are over it.
+        let mut stream = b"BT /F1 12 Tf\n".to_vec();
+        while stream.len() < MAX_PDF_CONTENT_BYTES / 8 {
+            stream.extend_from_slice(b"(A) Tj\n");
+        }
+        stream.extend_from_slice(b"ET\n");
+        assert!(stream.len() < MAX_PDF_CONTENT_BYTES);
+        let streams = vec![stream; 10];
+        assert!(streams.iter().map(Vec::len).sum::<usize>() > MAX_PDF_CONTENT_BYTES);
+
+        let result = inspect_bytes(&make_pdf_with_multiple_content_streams(streams));
+        assert!(
+            result.text_items.is_empty(),
+            "page over the total budget must be skipped, got {} items",
+            result.text_items.len()
+        );
+        assert_eq!(result.pages, 1);
+    }
+
+    /// Several content streams summing to under [`MAX_PDF_CONTENT_BYTES`] are
+    /// still parsed, and are joined with the separator that keeps tokens from
+    /// merging across the boundary: `…Tj` followed by `q…` must not lex as
+    /// `Tjq`. Each stream's text is extracted, in order.
+    #[test]
+    fn page_content_under_cap_is_joined_across_streams() {
+        let streams = vec![
+            b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (First) Tj".to_vec(),
+            b"1 0 0 1 10 780 Tm (Second) Tj".to_vec(),
+            b"1 0 0 1 10 760 Tm (Third) Tj ET".to_vec(),
+        ];
+
+        let result = inspect_bytes(&make_pdf_with_multiple_content_streams(streams));
+        let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["First", "Second", "Third"],
+            "streams must be joined with a separator and parsed in order"
+        );
+    }
+
+    /// A `/Contents` entry that does not resolve to a stream object is skipped
+    /// individually; it must not abandon the rest of the page, matching how
+    /// `lopdf::Document::get_page_content` treats the same input.
+    #[test]
+    fn page_content_skips_entries_that_are_not_streams() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        // A dictionary where a content stream is expected, then a real stream.
+        let not_a_stream = doc.add_object(dictionary! { "Type" => "ExampleNotAStream" });
+        let real = doc.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (Survivor) Tj ET".to_vec(),
+        ));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => vec![Object::Reference(not_a_stream), Object::Reference(real)],
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["Survivor"]);
+    }
+
+    /// A stream whose filter chain cannot be decoded contributes its raw,
+    /// still-encoded bytes, which is what `lopdf` does — the fallback matters
+    /// because those bytes sometimes still lex as operators.
+    #[test]
+    fn page_content_falls_back_to_raw_bytes_when_decoding_fails() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        // `/Crypt` is not among the filters lopdf implements, so
+        // `decompressed_content` reports an error and the raw bytes are used.
+        let mut stream = Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (Undecoded) Tj ET".to_vec(),
+        );
+        stream.dict.set("Filter", "Crypt");
+        assert!(
+            stream.decompressed_content().is_err(),
+            "test relies on this filter being undecodable by lopdf"
+        );
+        let content_id = doc.add_object(stream);
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["Undecoded"]);
     }
 }
