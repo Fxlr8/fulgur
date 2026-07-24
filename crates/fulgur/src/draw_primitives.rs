@@ -339,20 +339,25 @@ impl Quad {
         let ax1 = ax0 + area.width.to_f32();
         let ay1 = ay0 + area.height.to_f32();
 
-        // Detect axis-aligned quads by edge orientation rather than
-        // paired-position equality. A quad is axis-aligned iff every
-        // edge is exactly horizontal (dy == 0) or exactly vertical
-        // (dx == 0). This catches every quarter turn (0°, 90°, 180°,
-        // 270°) and every reflection, all of which produce quads with
-        // horizontal/vertical edges but with different paired-position
-        // orders (`points[0]/[3]` vs `points[0]/[1]` etc.). A rotated
-        // quad at, say, 45° has non-zero dx AND dy on every edge and
-        // correctly falls through to the rotated branch.
+        // Detect axis-aligned quads by edge orientation, with an f32-
+        // noise tolerance. A quad is axis-aligned iff every edge is
+        // (nearly) horizontal or (nearly) vertical — i.e. its smaller
+        // component is negligible relative to its larger component.
+        // Exact `== 0.0` would miss quads whose matrix reached them
+        // via `Affine2D::rotation(FRAC_PI_2)`, since `sin_cos` in f32
+        // has `cos(π/2) ≈ -4.4e-8` and the transformed edges pick up
+        // tiny non-zero components on both axes. `1e-4` relative
+        // tolerance is well above that noise but far below any real
+        // rotation (arc-second scale), so a 45° quad still correctly
+        // falls through to the rotated branch.
         let is_axis_aligned = (0..4).all(|i| {
             let j = (i + 1) % 4;
-            let dx = self.points[j][0] - self.points[i][0];
-            let dy = self.points[j][1] - self.points[i][1];
-            dx == 0.0 || dy == 0.0
+            let dx = (self.points[j][0] - self.points[i][0]).abs();
+            let dy = (self.points[j][1] - self.points[i][1]).abs();
+            let (small, large) = if dx < dy { (dx, dy) } else { (dy, dx) };
+            // Zero-length edge (degenerate) — treat as axis-aligned;
+            // the downstream clamp is a no-op on it anyway.
+            large <= f32::EPSILON || small <= large * 1e-4
         });
 
         if is_axis_aligned {
@@ -2024,6 +2029,64 @@ mod dp_unit_tests {
         assert!((max_x - (-200.0)).abs() < 1e-4);
         assert!((min_y - 100.0).abs() < 1e-4);
         assert!((max_y - 200.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_after_realistic_rotate_90_matrix_clamps() {
+        // CSS `rotate(90deg)` reaches `Affine2D::rotation(FRAC_PI_2)`
+        // whose matrix comes from `sin_cos`: `cos(π/2)` is not exactly
+        // 0 in f32 (~ -4.37e-8), so a transformed axis-aligned rect
+        // has tiny non-zero components on both edge deltas. An exact
+        // `dx == 0.0 || dy == 0.0` axis-alignment check misses this
+        // shape and routes it to the rotated branch, which drops the
+        // whole occurrence when any corner lies outside the clip
+        // area. Use `Affine2D::rotation` end-to-end (the same path
+        // real content takes) and assert the straddling quad clamps
+        // to the AABB intersection with `area` instead of dropping.
+        use std::f32::consts::FRAC_PI_2;
+        let r = Affine2D::rotation(FRAC_PI_2);
+        // Rotation(π/2) maps (x,y) → (-y, x). We want the rotated
+        // quad to straddle `area.x = 0` on the left boundary while
+        // staying inside `area.y ∈ [0, 500]`.
+        //   rotated_x = -original_y  → so original y must straddle 0
+        //     to produce rotated x that straddles 0 in area coords.
+        //     base y ∈ [-40, 60] → rotated x ∈ [-60, 40].
+        //   rotated_y = original_x   → so original x must lie in
+        //     [0, 500]. base x ∈ [50, 150] → rotated y ∈ [50, 150].
+        let base = Rect {
+            x: 50.0.as_pt(),
+            y: (-40.0).as_pt(),
+            width: 100.0.as_pt(),
+            height: 100.0.as_pt(),
+        };
+        let q = r.transform_rect(&base);
+        let area = Rect {
+            x: 0.0.as_pt(),
+            y: 0.0.as_pt(),
+            width: 500.0.as_pt(),
+            height: 500.0.as_pt(),
+        };
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("realistic quarter-turn quad straddling area must clamp, not drop");
+        // Every clipped point must lie inside `area` (with the same
+        // 1e-4 slack the epsilon check uses for numerical noise from
+        // `Affine2D::rotation`).
+        for &[px, py] in &clipped.points {
+            assert!(
+                (-1e-4..=500.0 + 1e-4).contains(&px),
+                "clipped x out of range: {px}"
+            );
+            assert!(
+                (-1e-4..=500.0 + 1e-4).contains(&py),
+                "clipped y out of range: {py}"
+            );
+        }
+        // Sanity: the clipped quad must include the in-content slice
+        // (rotated y range [50, 150]), so its bounds must span at
+        // least most of that range.
+        let (_, min_y, _, max_y) = quad_bounds(&clipped);
+        assert!(min_y <= 60.0 && max_y >= 140.0);
     }
 
     #[test]
