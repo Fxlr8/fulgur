@@ -242,6 +242,78 @@ pub(crate) const MAX_PDF_PARENT_DEPTH: usize = 128;
 ///   reader — which would silently stop inspecting PDFs that decode today.
 pub(crate) const MAX_PDF_CONTENT_BYTES: usize = 1024 * 1024;
 
+/// Whole-document budget on how many bytes of *decoded* page content
+/// [`inspect::inspect`] will parse, across all pages, in each of its two passes.
+///
+/// [`MAX_PDF_CONTENT_BYTES`] is per page, and a page's cost is only ever paid
+/// per page — but the number of pages is bounded by nothing except input size,
+/// and several page objects may share one `/Contents` stream. So a small file
+/// can define a great many pages that each re-pay the full per-page cost:
+/// measured, 200 pages sharing one 256 KB stream of bare `q` operators is 27 KB
+/// on disk and 8.8 s of CPU, scaling linearly with the page count while
+/// [`MAX_PDF_INSPECT_ITEMS`] never fires because such a page emits no records.
+/// Peak memory stays bounded there — it is the repeated work that is not.
+///
+/// Charged as content is decoded, *including* for a page that is then skipped
+/// for exceeding the per-page bound: the decoding work has been done either
+/// way, so charging only usable pages would leave the same hole open. Once the
+/// budget is spent the page walk stops rather than continuing to the next page.
+///
+/// This also bounds retained output that a record *count* cannot: a `Tj`
+/// operand is retained as [`inspect::TextItem::text`], and its bytes appear
+/// literally in the content stream, so total retained text is at most this
+/// budget times the worst-case widening of `decode_pdf_string` (2×, one Latin-1
+/// byte becoming two UTF-8 bytes). [`MAX_PDF_INSPECT_TEXT_BYTES`] bounds that
+/// directly and more tightly; this bound is what makes it unnecessary to trust
+/// that derivation.
+///
+/// 128 MiB is ~2,500 pages at the corpus's largest content stream (47 KB),
+/// matching the ~2,500-page scale [`MAX_PDF_INSPECT_ITEMS`] is calibrated for,
+/// so for realistic documents the item cap is reached at about the same point
+/// and this bound never binds first.
+pub(crate) const MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+
+/// Whole-document budget on how many decoded content-stream *operations*
+/// [`inspect::inspect`] will walk, across all pages, in each of its two passes.
+///
+/// Sibling of [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`], which bounds decoding by
+/// input bytes. Both are needed because they bound different work and neither
+/// implies the other:
+///
+/// - Bytes alone cannot bound operator work, because work per byte varies by
+///   ~285×: a `q` is 2 bytes and ~570 bytes of operation list. 128 MiB of bare
+///   `q` is ~67M operations, measured at ~26 s — bounded, but a poor bound.
+/// - Operations alone cannot bound decompression work, because a page can
+///   decompress a full [`MAX_PDF_CONTENT_BYTES`] of *whitespace* and decode to
+///   zero operations, paying nothing, and repeat that per page.
+///
+/// Charged after a page's operations are decoded, so the page whose decode was
+/// already paid for is still extracted and the next page is refused. Overshoot
+/// is therefore bounded by one page's operation count.
+///
+/// 20M operations is far above realistic content — a text-heavy page runs to a
+/// few thousand — so the ~2,500-page scale the other bounds target is roughly an
+/// order of magnitude below this. It caps adversarial operator work at ~8 s.
+pub(crate) const MAX_PDF_INSPECT_OPERATIONS: usize = 20_000_000;
+
+/// Whole-document budget on the total bytes of extracted text that
+/// [`inspect::inspect`] will retain in [`inspect::InspectResult::text_items`].
+///
+/// [`MAX_PDF_INSPECT_ITEMS`] counts records but not their payload, and a single
+/// `Tj` operand can be nearly as large as a whole page's content allowance. One
+/// content stream holding one ~900 KB string, shared by many page objects,
+/// therefore yields one very large record per page: measured, 500 pages is
+/// 67 KB on disk, 869 MB of peak RSS and 450 MB of JSON, and it scales with the
+/// page count up to the item cap.
+///
+/// Extraction stops once the budget is spent. The overshoot is bounded by the
+/// last record pushed, itself bounded by [`MAX_PDF_CONTENT_BYTES`].
+///
+/// 64 MiB is far above realistic content — the corpus averages ~80 records per
+/// page of a few dozen bytes each, so the ~2,500-page document
+/// [`MAX_PDF_INSPECT_ITEMS`] targets carries single-digit MB of text.
+pub(crate) const MAX_PDF_INSPECT_TEXT_BYTES: usize = 64 * 1024 * 1024;
+
 /// Upper bound on the length of a `/Tf` font resource name that
 /// [`inspect::inspect`] will retain and report.
 ///

@@ -3,8 +3,9 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::{
-    MAX_PDF_CONTENT_BYTES, MAX_PDF_FONT_NAME_BYTES, MAX_PDF_GS_STACK_DEPTH, MAX_PDF_INSPECT_ITEMS,
-    MAX_PDF_PARENT_DEPTH,
+    MAX_PDF_CONTENT_BYTES, MAX_PDF_FONT_NAME_BYTES, MAX_PDF_GS_STACK_DEPTH,
+    MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES, MAX_PDF_INSPECT_ITEMS, MAX_PDF_INSPECT_OPERATIONS,
+    MAX_PDF_INSPECT_TEXT_BYTES, MAX_PDF_PARENT_DEPTH,
 };
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -97,11 +98,23 @@ fn clamp_font_name(name: &str) -> &str {
     &name[..end]
 }
 
+/// Outcome of gathering one page's content, which distinguishes "skip this
+/// page" from "stop walking pages".
+enum PageContent {
+    /// Decoded content for this page, within both the per-page and the
+    /// whole-document bound.
+    Ready(Vec<u8>),
+    /// This page exceeds [`MAX_PDF_CONTENT_BYTES`]. Later pages are still
+    /// walked — only this one is skipped.
+    Skip,
+    /// The whole-document budget is spent; the caller stops walking pages.
+    Exhausted,
+}
+
 /// Gather a page's decoded content streams, abandoning the page as soon as the
-/// running total exceeds [`MAX_PDF_CONTENT_BYTES`].
-///
-/// Returns `None` when the page is over budget — the caller skips it, matching
-/// how the module treats every other malformed or oversized structure.
+/// running total exceeds [`MAX_PDF_CONTENT_BYTES`] and reporting exhaustion once
+/// `doc_budget` — the document's remaining
+/// [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`] allowance — is spent.
 ///
 /// This exists instead of `lopdf::Document::get_page_content` because that
 /// method inflates *every* content stream of the page and concatenates them
@@ -109,7 +122,7 @@ fn clamp_font_name(name: &str) -> &str {
 /// gets parsed, not what gets allocated. Accumulating with a running budget
 /// bounds the concatenated total.
 ///
-/// For a page under the bound the result is byte-for-byte what
+/// For a page within both bounds the result is byte-for-byte what
 /// `get_page_content` returns, which is what keeps extraction unchanged for
 /// real documents: each stream contributes its decoded bytes — or its raw,
 /// still-encoded bytes when decoding fails, as `lopdf` does — followed by the
@@ -118,11 +131,21 @@ fn clamp_font_name(name: &str) -> &str {
 /// resolve to a stream object are skipped individually, not treated as
 /// abandoning the page.
 ///
-/// The `\n` separators count against the budget, so the accept/reject decision
-/// is identical to testing `get_page_content`'s total: the running total rises
-/// monotonically to exactly that sum, so some prefix exceeds the bound if and
-/// only if the total does.
-fn gather_page_content(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> Option<Vec<u8>> {
+/// The `\n` separators count against the per-page budget, so the per-page
+/// accept/reject decision is identical to testing `get_page_content`'s total:
+/// the running total rises monotonically to exactly that sum, so some prefix
+/// exceeds the bound if and only if the total does.
+///
+/// `doc_budget` is charged for every stream decoded, *before* the per-page
+/// verdict is known, so a page that is about to be skipped still pays for the
+/// work its decoding cost. Charging only usable pages would leave the aggregate
+/// unbounded, since a page can be made to decode a full per-page allowance and
+/// then be rejected.
+fn gather_page_content(
+    doc: &lopdf::Document,
+    page_id: lopdf::ObjectId,
+    doc_budget: &mut usize,
+) -> PageContent {
     let mut content: Vec<u8> = Vec::new();
     for object_id in doc.get_page_contents(page_id) {
         let Ok(stream) = doc.get_object(object_id).and_then(lopdf::Object::as_stream) else {
@@ -133,14 +156,18 @@ fn gather_page_content(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> Optio
             Ok(ref d) => d,
             Err(_) => &stream.content,
         };
+        *doc_budget = doc_budget.saturating_sub(bytes.len());
+        if *doc_budget == 0 {
+            return PageContent::Exhausted;
+        }
         // +1 for the `\n` separator appended after every stream.
         if content.len() + bytes.len() + 1 > MAX_PDF_CONTENT_BYTES {
-            return None;
+            return PageContent::Skip;
         }
         content.extend_from_slice(bytes);
         content.push(b'\n');
     }
-    Some(content)
+    PageContent::Ready(content)
 }
 
 fn extract_metadata(doc: &lopdf::Document) -> Metadata {
@@ -175,19 +202,32 @@ fn extract_metadata(doc: &lopdf::Document) -> Metadata {
 fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
     use lopdf::content::Operation;
     let mut items = Vec::new();
+    // Whole-document budgets. Page count is bounded only by input size, so the
+    // per-page content bound and the record *count* cap both leave a document
+    // total unbounded — see the constants for the measured shapes.
+    let mut content_budget = MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES;
+    let mut op_budget = MAX_PDF_INSPECT_OPERATIONS;
+    let mut text_bytes: usize = 0;
 
     for (&page_num, &page_id) in &doc.get_pages() {
-        if items.len() >= MAX_PDF_INSPECT_ITEMS {
+        if items.len() >= MAX_PDF_INSPECT_ITEMS
+            || text_bytes >= MAX_PDF_INSPECT_TEXT_BYTES
+            || op_budget == 0
+        {
             break;
         }
-        let content_bytes = match gather_page_content(doc, page_id) {
-            Some(b) => b,
-            None => continue,
+        let content_bytes = match gather_page_content(doc, page_id, &mut content_budget) {
+            PageContent::Ready(b) => b,
+            PageContent::Skip => continue,
+            PageContent::Exhausted => break,
         };
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
         };
+        // Charged after decoding, so this page — already paid for — is still
+        // walked and the *next* page is the one refused.
+        op_budget = op_budget.saturating_sub(content.operations.len());
 
         let identity = IDENTITY;
         // Graphics state stack: (CTM, font_name, font_size).
@@ -217,7 +257,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
         let mut text_leading: f32 = 0.0;
 
         for Operation { operator, operands } in &content.operations {
-            if items.len() >= MAX_PDF_INSPECT_ITEMS {
+            if items.len() >= MAX_PDF_INSPECT_ITEMS || text_bytes >= MAX_PDF_INSPECT_TEXT_BYTES {
                 break;
             }
             // Inside a `q` frame dropped for exceeding MAX_PDF_GS_STACK_DEPTH.
@@ -332,6 +372,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                             let text = decode_pdf_string(bytes);
                             if !text.trim().is_empty() {
                                 let w = estimate_width(&text, font_size);
+                                text_bytes += text.len();
                                 items.push(TextItem {
                                     page: page_num,
                                     x: tx,
@@ -358,6 +399,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                             }
                             if !combined.trim().is_empty() {
                                 let w = estimate_width(&combined, font_size);
+                                text_bytes += combined.len();
                                 items.push(TextItem {
                                     page: page_num,
                                     x: tx,
@@ -414,9 +456,13 @@ fn transform_point(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
 
 fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
     let mut items = Vec::new();
+    // Each pass decodes content independently, so each carries its own
+    // whole-document budget. See `extract_text_items`.
+    let mut content_budget = MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES;
+    let mut op_budget = MAX_PDF_INSPECT_OPERATIONS;
 
     for (&page_num, &page_id) in &doc.get_pages() {
-        if items.len() >= MAX_PDF_INSPECT_ITEMS {
+        if items.len() >= MAX_PDF_INSPECT_ITEMS || op_budget == 0 {
             break;
         }
         // Step 1: XObject から画像情報を一時 map に収集
@@ -464,14 +510,17 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
         }
 
         // Step 2: content stream から Do オペレータで位置を取得し、突き合わせて push
-        let content_bytes = match gather_page_content(doc, page_id) {
-            Some(b) => b,
-            None => continue,
+        let content_bytes = match gather_page_content(doc, page_id, &mut content_budget) {
+            PageContent::Ready(b) => b,
+            PageContent::Skip => continue,
+            PageContent::Exhausted => break,
         };
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
         };
+        // See `extract_text_items`: charged after decoding this page.
+        op_budget = op_budget.saturating_sub(content.operations.len());
 
         let identity = IDENTITY;
         let mut ctm_stack: Vec<[f32; 6]> = vec![identity];
@@ -1695,6 +1744,264 @@ mod tests {
             ["First", "Second", "Third"],
             "streams must be joined with a separator and parsed in order"
         );
+    }
+
+    /// Build a PDF with `pages` page objects that all share a **single**
+    /// `/Contents` stream object holding `payload`.
+    ///
+    /// This is the shape that distinguishes a per-page bound from a
+    /// whole-document one: page count is bounded only by input size, and
+    /// sharing the stream means each additional page costs ~60 bytes on disk
+    /// while re-paying the full per-page decode and extraction cost.
+    fn make_pdf_with_shared_content_stream(
+        pages: usize,
+        payload: Vec<u8>,
+        with_image: bool,
+    ) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let mut resources = dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        };
+        if with_image {
+            // `extract_image_items` skips a page that resolves no image XObject,
+            // so the image pass is unreachable without this. Kept opt-in: adding
+            // it unconditionally would make the image pass re-walk the content of
+            // every text-only fixture too.
+            let image_id = doc.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Image",
+                    "Width" => Object::Integer(4), "Height" => Object::Integer(4),
+                    "ColorSpace" => "DeviceGray", "BitsPerComponent" => Object::Integer(8),
+                },
+                vec![0u8; 16],
+            ));
+            resources.set(
+                "XObject",
+                dictionary! { "Im0" => Object::Reference(image_id) },
+            );
+        }
+        let resources_id = doc.add_object(resources);
+        let shared_content = doc.add_object(Stream::new(dictionary! {}, payload));
+        let mut kids = Vec::with_capacity(pages);
+        for _ in 0..pages {
+            kids.push(Object::Reference(doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => Object::Reference(shared_content),
+                "Resources" => resources_id,
+                "MediaBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(595), Object::Integer(842),
+                ],
+            })));
+        }
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => Object::Integer(pages as i64),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    /// [`MAX_PDF_INSPECT_TEXT_BYTES`] bounds retained payload, which a record
+    /// *count* cannot: one `Tj` operand can be nearly a whole page's content
+    /// allowance, so many pages sharing one such stream retain far more text
+    /// than [`MAX_PDF_INSPECT_ITEMS`] records of realistic size ever would.
+    #[test]
+    fn retained_text_bytes_are_capped_across_pages() {
+        const STRING_LEN: usize = 512 * 1024;
+        let payload = {
+            let mut p = b"BT /F1 12 Tf (".to_vec();
+            p.extend(std::iter::repeat_n(b'A', STRING_LEN));
+            p.extend_from_slice(b") Tj ET\n");
+            p
+        };
+        assert!(
+            payload.len() <= MAX_PDF_CONTENT_BYTES,
+            "page must be in bound"
+        );
+
+        // Twice as many pages as the text budget can hold, so it has to stop
+        // mid-document rather than at the end of the input.
+        let pages = (MAX_PDF_INSPECT_TEXT_BYTES / STRING_LEN) * 2;
+        let result = inspect_bytes(&make_pdf_with_shared_content_stream(pages, payload, false));
+
+        let total: usize = result.text_items.iter().map(|i| i.text.len()).sum();
+        // Bounded, with the overshoot limited to the last record pushed.
+        assert!(
+            total <= MAX_PDF_INSPECT_TEXT_BYTES + STRING_LEN,
+            "retained text {total} exceeds the budget plus one record"
+        );
+        // And it genuinely truncated rather than the input being too small.
+        assert!(
+            result.text_items.len() < pages,
+            "expected truncation: got {} records from {} pages",
+            result.text_items.len(),
+            pages
+        );
+        assert!(
+            !result.text_items.is_empty(),
+            "must still extract some text"
+        );
+    }
+
+    /// A page whose content is mostly filler: one cheap record, then enough
+    /// bytes to spend nearly a full [`MAX_PDF_CONTENT_BYTES`] of the
+    /// whole-document budget.
+    ///
+    /// The filler is whitespace rather than the bare `q` operators an attacker
+    /// would use, because it charges the byte budget identically while costing
+    /// ~240× less to decode (measured: 4 MiB of `q` takes 523 ms, the same
+    /// whitespace 2.2 ms). The bound under test counts bytes, not operators, so
+    /// the cheap filler exercises it just as well and keeps the test fast.
+    fn budget_filler_page(op: &[u8]) -> Vec<u8> {
+        let mut payload = op.to_vec();
+        payload.resize(MAX_PDF_CONTENT_BYTES - 64, b' ');
+        payload
+    }
+
+    /// [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`] bounds aggregate decoding work,
+    /// which the per-page bound cannot: every page re-pays it, and page count is
+    /// bounded only by input size.
+    ///
+    /// Asserted through the page walk stopping early — later pages carry the
+    /// same extractable record as earlier ones, so a document of `pages` pages
+    /// yielding fewer than `pages` records can only have been truncated.
+    #[test]
+    fn aggregate_content_decoding_is_capped_across_pages() {
+        let payload = budget_filler_page(b"BT /F1 12 Tf (P) Tj ET\n");
+        let per_page = payload.len() + 1; // +1 for the stream separator
+        // Half again as many pages as the budget can pay for.
+        let pages = (MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES / per_page) * 3 / 2;
+
+        let result = inspect_bytes(&make_pdf_with_shared_content_stream(pages, payload, false));
+        // Every page is still counted: the page tree is walked cheaply and the
+        // bound is on content decoded, not on pages listed.
+        assert_eq!(result.pages as usize, pages);
+        assert!(
+            !result.text_items.is_empty(),
+            "pages within the budget must still be extracted"
+        );
+        assert!(
+            result.text_items.len() < pages,
+            "expected truncation: got {} records from {} pages",
+            result.text_items.len(),
+            pages
+        );
+    }
+
+    /// [`MAX_PDF_INSPECT_OPERATIONS`] bounds operator work, which a byte budget
+    /// cannot do tightly: a `q` is 2 input bytes and ~570 bytes of operation
+    /// list, so operator-dense content buys ~285× the work per byte that
+    /// [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`] is calibrated against.
+    ///
+    /// The page carries a `Tj` so each page within budget yields a record, which
+    /// is what makes the truncation observable; the rest is bare `q` operators.
+    ///
+    /// `#[ignore]`d because tripping this bound means decoding tens of millions
+    /// of operations — ~70 s in a debug build — and there is no cheaper way in:
+    /// the per-page content bound caps a page at ~500k operations, so the budget
+    /// can only be reached by paying for it. Unlike the byte and text budgets,
+    /// this one cannot be exercised quickly, and the constant is chosen for
+    /// where realistic content sits (see [`MAX_PDF_INSPECT_OPERATIONS`]) rather
+    /// than for testability. Run with:
+    ///
+    /// ```text
+    /// cargo test -p fulgur --lib --release aggregate_operation_count -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "decodes >20M operations to reach the bound; ~70s debug, run explicitly"]
+    fn aggregate_operation_count_is_capped_across_pages() {
+        const OPS_PER_PAGE: usize = 64 * 1024;
+        let payload = {
+            let mut p = b"BT /F1 12 Tf (P) Tj ET\n".to_vec();
+            p.extend_from_slice(&b"q\n".repeat(OPS_PER_PAGE));
+            p
+        };
+        assert!(payload.len() <= MAX_PDF_CONTENT_BYTES);
+        // Well under the byte budget at this page count, so only the operation
+        // budget can stop the walk — that is the point of the test.
+        let pages = (MAX_PDF_INSPECT_OPERATIONS / OPS_PER_PAGE) * 3 / 2;
+        assert!(
+            pages * (payload.len() + 1) < MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES,
+            "byte budget must not be the binding constraint here"
+        );
+
+        let result = inspect_bytes(&make_pdf_with_shared_content_stream(pages, payload, false));
+        assert_eq!(result.pages as usize, pages);
+        assert!(!result.text_items.is_empty());
+        assert!(
+            result.text_items.len() < pages,
+            "expected truncation: got {} records from {} pages",
+            result.text_items.len(),
+            pages
+        );
+    }
+
+    /// The image pass decodes content independently, so it carries its own
+    /// whole-document budget and stops the page walk the same way.
+    #[test]
+    fn aggregate_content_decoding_is_capped_across_pages_for_images() {
+        let payload = budget_filler_page(b"q 50 0 0 50 0 0 cm /Im0 Do Q\n");
+        let per_page = payload.len() + 1;
+        let pages = (MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES / per_page) * 3 / 2;
+
+        let result = inspect_bytes(&make_pdf_with_shared_content_stream(pages, payload, true));
+        assert_eq!(result.pages as usize, pages);
+        assert!(
+            !result.images.is_empty(),
+            "pages within the budget must still be extracted"
+        );
+        assert!(
+            result.images.len() < pages,
+            "expected truncation: got {} images from {} pages",
+            result.images.len(),
+            pages
+        );
+    }
+
+    /// The whole-document content budget is charged for pages that are *skipped*
+    /// for exceeding the per-page bound, not only for usable ones.
+    ///
+    /// Otherwise the aggregate stays unbounded: a page can be made to decode a
+    /// full per-page allowance and then be rejected, paying nothing.
+    #[test]
+    fn skipped_pages_are_charged_against_the_content_budget() {
+        let mut budget = 4096;
+        let over_page = {
+            let mut p = Vec::new();
+            while p.len() <= MAX_PDF_CONTENT_BYTES {
+                p.extend_from_slice(b"(A) Tj\n");
+            }
+            p
+        };
+        let pdf = make_pdf_with_shared_content_stream(1, over_page, false);
+        let doc = lopdf::Document::load_mem(&pdf).unwrap();
+        let page_id = *doc.get_pages().values().next().unwrap();
+
+        // The page is over the per-page bound, so it cannot be used — but the
+        // decoding it cost must still have drawn the budget down to zero, which
+        // is reported as exhaustion rather than a plain skip.
+        assert!(matches!(
+            gather_page_content(&doc, page_id, &mut budget),
+            PageContent::Exhausted
+        ));
+        assert_eq!(budget, 0);
     }
 
     /// A `/Contents` entry that does not resolve to a stream object is skipped
