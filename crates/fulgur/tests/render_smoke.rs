@@ -6039,6 +6039,53 @@ body { margin: 0; padding: 20pt; font-size: 12pt; }
     }
 }
 
+/// When a page has margins but no effective `@page` margin-box rule,
+/// nothing paints on top of body content in the margin strips. Body
+/// links that extend into those strips are visually present AND have
+/// nothing later covering them, so their PDF annotation must remain
+/// clickable — `clip_body_occurrences_to_content_area` must not be
+/// applied on pages with no margin boxes. Otherwise a `position:
+/// fixed; bottom: 0` page number rendered from body content ends up
+/// visible but unclickable.
+#[test]
+fn body_link_in_margin_area_is_preserved_when_no_margin_box_paints() {
+    // Same `margin-top: 750pt` shape as the security regression test,
+    // but with no `@page` margin box: the anchor's rect lands in the
+    // bottom-margin strip yet the annotation must survive because
+    // nothing paints on top of it.
+    let html = r#"<!doctype html><html><head><style>
+@page { size: A4; margin: 60pt 40pt 60pt 40pt; }
+body { margin: 0; padding: 0; }
+a { display: block; margin-top: 750pt; font-size: 12pt; }
+</style></head><body>
+<a href="https://example.com/target">body-drawn footer link</a>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render must succeed");
+    let text = String::from_utf8_lossy(&pdf);
+    let rects = regex_lite_link_rects(&text);
+    // The annotation MUST reach the PDF — a page with no margin box
+    // never overpaints body content, so dropping the annotation would
+    // leave the visible link unclickable.
+    assert!(
+        !rects.is_empty(),
+        "body link in a margin strip on a page with no margin box was \
+         dropped; nothing paints on top of it, so the annotation must \
+         survive"
+    );
+    // Sanity: the annotation should be in the bottom margin strip
+    // (Y-up ury < 60), matching the visible text position.
+    let (_, _, _, ury) = rects[0];
+    assert!(
+        ury < 60.0,
+        "positive-control render did not put the anchor in the bottom \
+         margin strip as expected; rects = {rects:?}"
+    );
+}
+
 /// Parse `/Subtype /Link ... /Rect [llx lly urx ury]` from a raw PDF
 /// text stream. Returns `(llx, lly, urx, ury)` tuples in PDF-native
 /// Y-up coordinates. Used by the security regression test above so

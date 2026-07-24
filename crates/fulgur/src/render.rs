@@ -208,6 +208,7 @@ pub fn render_v2(
         }
         body_link_collector.set_current_page(page_idx);
         margin_link_collector.set_current_page(page_idx);
+        let page_has_margin_box_paint;
         {
             let mut surface = page.surface();
             {
@@ -311,7 +312,7 @@ pub fn render_v2(
                 in_marked_content: false,
             };
             let page_content_width = content_area.width.to_f32();
-            margin_box_renderer.render_page(
+            let any_margin_box_painted = margin_box_renderer.render_page(
                 &mut margin_canvas,
                 page_idx,
                 page_num,
@@ -321,21 +322,26 @@ pub fn render_v2(
                 page_content_width,
                 anchor_map,
             );
+            page_has_margin_box_paint = any_margin_box_painted;
         }
-        // Body occurrences are clipped to the content area rect before
-        // emission, so a body link that fell into a page-margin strip
-        // (e.g. via `position: fixed; bottom: 0`) cannot leave a click
-        // target under a later-painted margin box — the paint order
-        // would otherwise leave the visible text and the clickable URI
-        // out of sync. Margin occurrences are emitted unclipped — they
-        // live in the margin strips by design. `content_area` is the
-        // same rect the body background clamp and the margin-box
-        // renderer used earlier this iteration — see
-        // `resolved_content_area`.
-        let body_per_page = crate::link::clip_body_occurrences_to_content_area(
-            body_link_collector.take_page(page_idx),
-            &content_area,
-        );
+        // Body occurrences are clipped to the content area rect ONLY
+        // when at least one `@page` margin box actually painted on
+        // this page — that's the only scenario where a later-painted
+        // margin box could visually cover a body link and leave the
+        // click target out of sync with the visible text. When no
+        // margin box painted, nothing overlays the body layer, and
+        // clipping would drop visible body-drawn page furniture
+        // (`position: fixed; bottom: 0` page numbers, `margin-top`
+        // overflow into the strip, etc.) making it unclickable
+        // without any security benefit. `content_area` is the same
+        // rect the body background clamp and the margin-box renderer
+        // used earlier this iteration — see `resolved_content_area`.
+        let raw_body_page = body_link_collector.take_page(page_idx);
+        let body_per_page = if page_has_margin_box_paint {
+            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &content_area)
+        } else {
+            raw_body_page
+        };
         let margin_per_page = margin_link_collector.take_page(page_idx);
         // Only span_ptrs that are wired into the struct tree via
         // ParagraphRunItem::LinkContent entries should use add_tagged_annotation;
@@ -3593,6 +3599,13 @@ impl<'a> MarginBoxRenderer<'a> {
     /// `<a href="#...">` whose first fragment lands on each page.
     /// Pages with no such anchor look up `None` and the resolver
     /// returns an empty string.
+    /// Returns `true` if any effective margin box resolved to non-empty
+    /// content on this page (regardless of edge). Callers use this to
+    /// decide whether body-link annotations that landed in a page-
+    /// margin strip must be clipped: on a page with zero margin boxes
+    /// nothing paints on top of body content in the strips, so
+    /// preserving body annotations there keeps `position: fixed;
+    /// bottom: 0`-style body-drawn page furniture clickable.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_page(
         &mut self,
@@ -3604,7 +3617,7 @@ impl<'a> MarginBoxRenderer<'a> {
         resolved_margin: crate::config::Margin,
         content_width: f32,
         anchor_map: Option<&AnchorMap>,
-    ) {
+    ) -> bool {
         // Resolve effective boxes: pick the most specific matching rule
         // per position. Pseudo-class selectors (`:first`, `:left`,
         // `:right`) override the default `@page` rule.
@@ -3871,6 +3884,14 @@ impl<'a> MarginBoxRenderer<'a> {
                 );
             }
         }
+        // Body-link clip gate: `true` iff at least one effective margin
+        // box on this page produced non-empty content, i.e. something
+        // was actually painted on top of the body layer. When `false`,
+        // the caller must NOT clip body annotations that landed in a
+        // margin strip — nothing covers them, so dropping the click
+        // target would leave visible body-drawn page furniture
+        // unclickable.
+        !resolved_htmls.is_empty()
     }
 }
 
