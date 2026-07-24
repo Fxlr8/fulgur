@@ -1,7 +1,10 @@
 use serde::Serialize;
 use std::path::Path;
+use std::rc::Rc;
 
-use crate::MAX_PDF_PARENT_DEPTH;
+use crate::{
+    MAX_PDF_CONTENT_BYTES, MAX_PDF_GS_STACK_DEPTH, MAX_PDF_INSPECT_ITEMS, MAX_PDF_PARENT_DEPTH,
+};
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -106,10 +109,16 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
     let mut items = Vec::new();
 
     for (&page_num, &page_id) in &doc.get_pages() {
+        if items.len() >= MAX_PDF_INSPECT_ITEMS {
+            break;
+        }
         let content_bytes = match doc.get_page_content(page_id) {
             Ok(b) => b,
             Err(_) => continue,
         };
+        if content_bytes.len() > MAX_PDF_CONTENT_BYTES {
+            continue;
+        }
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
@@ -118,8 +127,15 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
         let identity = IDENTITY;
         // Graphics state stack: (CTM, font_name, font_size).
         // Tf is part of the graphics state (PDF §8.4.5 Table 52), so q/Q save/restore it.
-        let mut gs_stack: Vec<([f32; 6], String, f32)> =
-            vec![(identity, "unknown".to_string(), 12.0)];
+        //
+        // The font name is an `Rc<str>` rather than a `String` because `q` saves a
+        // copy of the whole entry: a deep run of `q` operators against a wide
+        // `/Tf` resource name would otherwise duplicate that name once per level.
+        let mut gs_stack: Vec<([f32; 6], Rc<str>, f32)> =
+            vec![(identity, Rc::from("unknown"), 12.0)];
+        // `q` pushes dropped for exceeding MAX_PDF_GS_STACK_DEPTH. Counted so the
+        // matching `Q` operators unwind them instead of popping real entries.
+        let mut dropped_pushes: usize = 0;
         // Text matrix linear components (scale/rotation); updated by Tm, reset by BT.
         let mut tm_a: f32 = 1.0;
         let mut tm_b: f32 = 0.0;
@@ -131,21 +147,30 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
         // Current text origin in page space.
         let mut tx: f32 = 0.0;
         let mut ty: f32 = 0.0;
-        let mut font_name = String::from("unknown");
+        let mut font_name: Rc<str> = Rc::from("unknown");
         let mut font_size: f32 = 12.0;
         let mut text_leading: f32 = 0.0;
 
         for Operation { operator, operands } in &content.operations {
+            if items.len() >= MAX_PDF_INSPECT_ITEMS {
+                break;
+            }
             match operator.as_str() {
+                "q" if gs_stack.len() >= MAX_PDF_GS_STACK_DEPTH => {
+                    dropped_pushes += 1;
+                }
                 "q" => {
                     let top = gs_stack.last().expect("gs_stack non-empty").clone();
                     gs_stack.push(top);
+                }
+                "Q" if dropped_pushes > 0 => {
+                    dropped_pushes -= 1;
                 }
                 "Q" if gs_stack.len() > 1 => {
                     gs_stack.pop();
                     let (_, ref saved_font, saved_size) =
                         *gs_stack.last().expect("gs_stack non-empty after Q");
-                    font_name = saved_font.clone();
+                    font_name = Rc::clone(saved_font);
                     font_size = saved_size;
                 }
                 "cm" if operands.len() == 6 => {
@@ -163,10 +188,10 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                 }
                 "Tf" => {
                     if let (Some(name_obj), Some(size)) = (operands.first(), operands.get(1)) {
-                        font_name = obj_as_name_str(name_obj).unwrap_or("unknown").to_string();
+                        font_name = Rc::from(obj_as_name_str(name_obj).unwrap_or("unknown"));
                         font_size = obj_to_f32(size);
                         if let Some(gs) = gs_stack.last_mut() {
-                            gs.1 = font_name.clone();
+                            gs.1 = Rc::clone(&font_name);
                             gs.2 = font_size;
                         }
                     }
@@ -235,7 +260,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                                     width: w,
                                     height: font_size,
                                     text,
-                                    font: font_name.clone(),
+                                    font: font_name.to_string(),
                                     font_size,
                                 });
                                 tx += w;
@@ -261,7 +286,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
                                     width: w,
                                     height: font_size,
                                     text: combined,
-                                    font: font_name.clone(),
+                                    font: font_name.to_string(),
                                     font_size,
                                 });
                                 tx += w;
@@ -312,6 +337,9 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
     let mut items = Vec::new();
 
     for (&page_num, &page_id) in &doc.get_pages() {
+        if items.len() >= MAX_PDF_INSPECT_ITEMS {
+            break;
+        }
         // Step 1: XObject から画像情報を一時 map に収集
         // Resources は親 /Pages ノードから継承される場合があるため、継承チェーンを辿る。
         // key = XObject name, value = (format, width_px, height_px)
@@ -361,6 +389,9 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
             Ok(b) => b,
             Err(_) => continue,
         };
+        if content_bytes.len() > MAX_PDF_CONTENT_BYTES {
+            continue;
+        }
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
@@ -368,11 +399,23 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
 
         let identity = IDENTITY;
         let mut ctm_stack: Vec<[f32; 6]> = vec![identity];
+        // See `extract_text_items`: dropped `q` pushes are counted so the matching
+        // `Q` operators unwind them rather than popping a real entry.
+        let mut dropped_pushes: usize = 0;
         for op in &content.operations {
+            if items.len() >= MAX_PDF_INSPECT_ITEMS {
+                break;
+            }
             match op.operator.as_str() {
+                "q" if ctm_stack.len() >= MAX_PDF_GS_STACK_DEPTH => {
+                    dropped_pushes += 1;
+                }
                 "q" => {
                     let top = *ctm_stack.last().unwrap_or(&identity);
                     ctm_stack.push(top);
+                }
+                "Q" if dropped_pushes > 0 => {
+                    dropped_pushes -= 1;
                 }
                 "Q" if ctm_stack.len() > 1 => {
                     ctm_stack.pop();
@@ -1008,5 +1051,345 @@ mod tests {
         );
 
         assert_eq!(resolve_page_resources(&doc, (1, 0)), None);
+    }
+
+    // --- Resource bounds on attacker-controlled content streams ---
+
+    /// Build a PDF with one page per entry in `page_contents`, each page's
+    /// content stream being exactly those bytes.
+    ///
+    /// Unlike [`make_pdf_with_text_positioning_ops`] this takes pre-encoded
+    /// operator bytes, so a test can hand it a stream that is deliberately
+    /// larger — or more deeply nested — than any operation list it would be
+    /// convenient to build through `lopdf::content::Content`.
+    fn make_pdf_with_raw_contents(page_contents: Vec<Vec<u8>>) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type1",
+                    "BaseFont" => "Courier",
+                },
+            },
+        });
+        let page_count = page_contents.len();
+        let mut kids = Vec::with_capacity(page_count);
+        for raw_content in page_contents {
+            let content_id = doc.add_object(Stream::new(dictionary! {}, raw_content));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+                "Resources" => resources_id,
+                "MediaBox" => vec![
+                    Object::Integer(0),
+                    Object::Integer(0),
+                    Object::Integer(595),
+                    Object::Integer(842),
+                ],
+            });
+            kids.push(Object::Reference(page_id));
+        }
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => Object::Integer(page_count as i64),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    fn make_pdf_with_raw_content(raw_content: Vec<u8>) -> Vec<u8> {
+        make_pdf_with_raw_contents(vec![raw_content])
+    }
+
+    /// Build a single-page PDF carrying one image XObject named `/Im0`, whose
+    /// content stream is exactly `raw_content`.
+    ///
+    /// `extract_image_items` only walks a page's content stream when that page
+    /// resolves at least one image XObject, so the image pass is unreachable
+    /// without a resource dictionary like this one.
+    fn make_pdf_with_image_and_raw_content(raw_content: Vec<u8>) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => Object::Integer(4),
+                "Height" => Object::Integer(4),
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => Object::Integer(8),
+            },
+            vec![0u8; 16],
+        ));
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! {
+                "Im0" => Object::Reference(image_id),
+            },
+        });
+        let content_id = doc.add_object(Stream::new(dictionary! {}, raw_content));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    /// A decoded content stream above [`MAX_PDF_CONTENT_BYTES`] is skipped
+    /// instead of being parsed into an operation list.
+    ///
+    /// The stream below carries real `Tj` operators, so without the bound the
+    /// same input yields text items; the assertion is that the cap fires, not
+    /// that the process survives.
+    #[test]
+    fn content_stream_above_byte_cap_is_skipped() {
+        let mut content = b"BT /F1 12 Tf\n".to_vec();
+        while content.len() <= MAX_PDF_CONTENT_BYTES {
+            content.extend_from_slice(b"(A) Tj\n");
+        }
+        content.extend_from_slice(b"ET\n");
+        assert!(content.len() > MAX_PDF_CONTENT_BYTES);
+
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "oversized content stream must be skipped, got {} items",
+            result.text_items.len()
+        );
+        // The page itself is still counted; only its content is not parsed.
+        assert_eq!(result.pages, 1);
+    }
+
+    /// A stream just under [`MAX_PDF_CONTENT_BYTES`] is still parsed, so the
+    /// cap does not reject content merely for being large.
+    #[test]
+    fn content_stream_below_byte_cap_is_parsed() {
+        let mut content = b"BT /F1 12 Tf\n".to_vec();
+        while content.len() + 7 <= MAX_PDF_CONTENT_BYTES - 16 {
+            content.extend_from_slice(b"(A) Tj\n");
+        }
+        content.extend_from_slice(b"ET\n");
+        assert!(content.len() <= MAX_PDF_CONTENT_BYTES);
+
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            !result.text_items.is_empty(),
+            "content stream under the cap must still be parsed"
+        );
+    }
+
+    /// A run of `q` operators deeper than [`MAX_PDF_GS_STACK_DEPTH`] must not
+    /// grow the graphics-state stack past the bound, and the dropped pushes
+    /// must stay balanced against their matching `Q` operators: text drawn
+    /// after the nesting closes has to land where the outer CTM puts it.
+    #[test]
+    fn graphics_state_nesting_beyond_cap_stays_balanced() {
+        let depth = MAX_PDF_GS_STACK_DEPTH + 500;
+
+        // Outer `cm` shifts the page by (100, 700). Then `depth` nested `q`s,
+        // each of which would be dropped past the cap, an inner `cm` that must
+        // be discarded with them, and `depth` matching `Q`s. The trailing text
+        // must therefore be positioned by the *outer* CTM alone.
+        let mut content = b"1 0 0 1 100 700 cm\n".to_vec();
+        for _ in 0..depth {
+            content.extend_from_slice(b"q\n");
+        }
+        content.extend_from_slice(b"1 0 0 1 50 50 cm\n");
+        for _ in 0..depth {
+            content.extend_from_slice(b"Q\n");
+        }
+        content.extend_from_slice(b"BT /F1 12 Tf (Anchor) Tj ET\n");
+
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        let item = result
+            .text_items
+            .first()
+            .expect("text after balanced nesting must still be extracted");
+        assert_eq!(item.text, "Anchor");
+        assert!(
+            (item.x - 100.0).abs() < 0.01 && (item.y - 700.0).abs() < 0.01,
+            "expected outer CTM origin (100, 700), got ({}, {})",
+            item.x,
+            item.y
+        );
+    }
+
+    /// A long `/Tf` resource name must not be duplicated once per `q`: the
+    /// saved graphics states share the name instead of cloning it. Deep
+    /// nesting with a wide name is the highest-amplification shape for this
+    /// module, so the bound is asserted through the restored state.
+    #[test]
+    fn wide_font_name_survives_deep_nesting_and_restore() {
+        let name = "F".repeat(4096);
+        let mut content = format!("BT /{name} 12 Tf\n").into_bytes();
+        for _ in 0..(MAX_PDF_GS_STACK_DEPTH + 500) {
+            content.extend_from_slice(b"q\n");
+        }
+        for _ in 0..(MAX_PDF_GS_STACK_DEPTH + 500) {
+            content.extend_from_slice(b"Q\n");
+        }
+        content.extend_from_slice(b"(Deep) Tj ET\n");
+
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        let item = result
+            .text_items
+            .first()
+            .expect("text after balanced nesting must still be extracted");
+        assert_eq!(
+            item.font, name,
+            "font name must survive save/restore intact"
+        );
+    }
+
+    /// Extraction stops at [`MAX_PDF_INSPECT_ITEMS`] rather than returning a
+    /// result whose size is proportional to the operator count.
+    ///
+    /// The cap is a whole-document total, so the input spreads its items over
+    /// several pages: each page stays comfortably under
+    /// [`MAX_PDF_CONTENT_BYTES`], which isolates the item bound from the byte
+    /// bound and also proves a per-page cap would not have sufficed.
+    #[test]
+    fn text_item_count_is_capped_across_pages() {
+        const ITEMS_PER_PAGE: usize = 50_000;
+        let mut page = b"BT /F1 12 Tf\n".to_vec();
+        page.reserve(ITEMS_PER_PAGE * 7 + 32);
+        for _ in 0..ITEMS_PER_PAGE {
+            page.extend_from_slice(b"(A) Tj\n");
+        }
+        page.extend_from_slice(b"ET\n");
+        assert!(
+            page.len() <= MAX_PDF_CONTENT_BYTES,
+            "each page must stay under the byte cap to isolate the item cap"
+        );
+
+        // One page more than the cap needs, so extraction has to stop mid-document.
+        let pages = MAX_PDF_INSPECT_ITEMS / ITEMS_PER_PAGE + 1;
+        let pdf = make_pdf_with_raw_contents(vec![page; pages]);
+
+        let result = inspect_bytes(&pdf);
+        assert_eq!(result.pages as usize, pages);
+        assert_eq!(result.text_items.len(), MAX_PDF_INSPECT_ITEMS);
+    }
+
+    /// The image pass re-reads the same content stream, so it carries the same
+    /// byte bound: an oversized stream yields no image placements even though
+    /// the page does resolve an image XObject.
+    #[test]
+    fn image_pass_skips_content_stream_above_byte_cap() {
+        let mut content = Vec::new();
+        while content.len() <= MAX_PDF_CONTENT_BYTES {
+            content.extend_from_slice(b"q 1 0 0 1 1 1 cm /Im0 Do Q\n");
+        }
+        assert!(content.len() > MAX_PDF_CONTENT_BYTES);
+
+        let result = inspect_bytes(&make_pdf_with_image_and_raw_content(content));
+        assert!(
+            result.images.is_empty(),
+            "oversized content stream must be skipped, got {} images",
+            result.images.len()
+        );
+        assert_eq!(result.pages, 1);
+    }
+
+    /// The image pass keeps its own CTM stack, so it needs the same balanced
+    /// unwinding of dropped `q` pushes: an image placed after nesting deeper
+    /// than [`MAX_PDF_GS_STACK_DEPTH`] closes must land at the outer CTM.
+    #[test]
+    fn image_placement_survives_graphics_state_nesting_beyond_cap() {
+        let depth = MAX_PDF_GS_STACK_DEPTH + 500;
+
+        let mut content = b"1 0 0 1 100 700 cm\n".to_vec();
+        for _ in 0..depth {
+            content.extend_from_slice(b"q\n");
+        }
+        // Discarded along with the dropped pushes.
+        content.extend_from_slice(b"1 0 0 1 33 44 cm\n");
+        for _ in 0..depth {
+            content.extend_from_slice(b"Q\n");
+        }
+        // Scale the unit image square to 50x50 at the outer origin.
+        content.extend_from_slice(b"50 0 0 50 0 0 cm\n/Im0 Do\n");
+
+        let result = inspect_bytes(&make_pdf_with_image_and_raw_content(content));
+        let img = result
+            .images
+            .first()
+            .expect("image after balanced nesting must still be extracted");
+        assert!(
+            (img.x - 100.0).abs() < 0.01 && (img.y - 700.0).abs() < 0.01,
+            "expected outer CTM origin (100, 700), got ({}, {})",
+            img.x,
+            img.y
+        );
+        assert!((img.width - 50.0).abs() < 0.01, "width {}", img.width);
+        assert!((img.height - 50.0).abs() < 0.01, "height {}", img.height);
+    }
+
+    /// The bounds must not change what a realistic document extracts, and must
+    /// sit far above what one needs.
+    ///
+    /// (The extracted `text` is glyph-id soup rather than readable text because
+    /// `inspect` does not consult the ToUnicode CMap — a separate, pre-existing
+    /// limitation. This test asserts on record structure, which is what the
+    /// bounds can affect.)
+    #[test]
+    fn bounds_do_not_alter_realistic_extraction() {
+        let html = "<html><body>\
+            <h1>Heading</h1>\
+            <p>First paragraph with several words.</p>\
+            <p>Second paragraph, also with words.</p>\
+            </body></html>";
+        let result = inspect_bytes(&render_test_pdf(html));
+        // One record per laid-out line: heading plus the two paragraphs.
+        assert_eq!(result.text_items.len(), 3);
+        for item in &result.text_items {
+            assert_eq!(item.page, 1);
+            assert!(!item.text.is_empty());
+            assert!(item.font_size > 0.0);
+            assert!(item.width > 0.0);
+        }
+        // Headroom check: the caps are orders of magnitude above this document.
+        assert!(result.text_items.len() * 1000 < MAX_PDF_INSPECT_ITEMS);
     }
 }

@@ -205,6 +205,50 @@ pub(crate) const MAX_COUNTER_CHAIN_ENTRIES: usize = MAX_DOM_DEPTH;
 /// [`MAX_DOM_DEPTH`] defensive traversal bound.
 pub(crate) const MAX_PDF_PARENT_DEPTH: usize = 128;
 
+/// Upper bound on the size of a single *decoded* page content stream that
+/// [`inspect::inspect`] will hand to `lopdf::content::Content::decode`.
+///
+/// `Content::decode` materialises the entire operation list up front, at a
+/// measured ~570 bytes of heap per operation for bare `q` operators — which
+/// occupy 2 input bytes each, a ~285× expansion. Page content streams are also
+/// Flate-compressed, so a few kilobytes on disk can decompress into megabytes
+/// of operators, an expansion the caller never sees in the file size. Streams
+/// above this bound are skipped rather than parsed.
+///
+/// 1 MiB is ~22× the largest content stream produced by any document in the
+/// repository's own corpus (`examples/**` and `crates/fulgur-vrt/goldens/**`
+/// peak at 47 KB), and bounds the worst-case operation list at roughly 285 MB
+/// — the same order as an extra-large fulgur render. Peak memory stays bounded
+/// *per page* because the decoded operation list is dropped before the next
+/// page is read. The residual per-operation constant belongs to `lopdf`, not
+/// to fulgur; this bound is the only lever over it, since `Content::decode`
+/// has already allocated by the time an operation count could be observed.
+pub(crate) const MAX_PDF_CONTENT_BYTES: usize = 1024 * 1024;
+
+/// Upper bound on graphics-state (`q` / `Q`) nesting depth tracked by
+/// [`inspect::inspect`] while walking a page content stream.
+///
+/// Each `q` saves a copy of the current graphics state, so an unbounded run of
+/// `q` operators grows a stack that is proportional to the operator count. The
+/// PDF specification's implementation notes put the historical limit at 28
+/// levels and real generators nest a handful, so this bound is orders of
+/// magnitude above any legitimate document. Pushes beyond it are dropped and
+/// counted, so the matching `Q` operators stay balanced. Sibling of
+/// [`MAX_PDF_PARENT_DEPTH`].
+pub(crate) const MAX_PDF_GS_STACK_DEPTH: usize = 1024;
+
+/// Upper bound on how many records [`inspect::inspect`] accumulates in each of
+/// [`inspect::InspectResult::text_items`] and [`inspect::InspectResult::images`].
+///
+/// Page count is bounded only by input size, so a per-page cap would still
+/// leave the aggregate result unbounded; this is a whole-document total. The
+/// repository corpus averages ~80 text items per page, which puts this bound at
+/// roughly 2,500 pages of realistic content, for ~70 MB of retained records.
+/// Extraction stops once the bound is reached — the result is silently
+/// truncated rather than erroring, matching the module's existing behaviour for
+/// malformed structures.
+pub(crate) const MAX_PDF_INSPECT_ITEMS: usize = 200_000;
+
 /// Total-output budget for the generated CSS that
 /// [`blitz_adapter::CounterPass`] injects for resolved pseudo-element
 /// content. Once the accumulated generated CSS reaches this size, further
