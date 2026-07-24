@@ -6623,4 +6623,179 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // --- draw_under_clip: nested opacity branch (lines 1971-1988) ---
+
+    #[test]
+    fn render_smoke_opacity_inside_overflow_clip() {
+        // draw_under_clip (lines 1971-1988): when iterating clip_descendants,
+        // a descendant that is an opacity-scoped block triggers draw_under_opacity
+        // from within draw_under_clip's descendant loop.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <div style="overflow:hidden;width:200px;height:100px">
+              <div style="opacity:0.5">
+                <div style="width:150px;height:60px;background:#cef">inner child</div>
+              </div>
+            </div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- draw_under_clip_table: transform / clip-block / nested-table / opacity branches ---
+
+    #[test]
+    fn render_smoke_transform_inside_clip_table() {
+        // draw_under_clip_table (lines 2868-2881, 2856-2857): a table with
+        // overflow:hidden whose cell contains a transformed element triggers
+        // draw_under_transform from within draw_under_clip_table's
+        // clip_descendants loop. The transformed element's own children are
+        // added to transform_skip and hit the continue at line 2856.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <table style="overflow:hidden;border:1px solid #aaa;width:200px">
+              <tr>
+                <td style="padding:4px">
+                  <div style="transform:rotate(5deg);background:#cef;width:80px;height:40px">
+                    rotated text inside table clip
+                  </div>
+                </td>
+              </tr>
+            </table>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_overflow_clip_block_inside_clip_table() {
+        // draw_under_clip_table (lines 2887-2901): a table with overflow:hidden
+        // containing a block with overflow:hidden triggers draw_under_clip from
+        // within draw_under_clip_table's clip_descendants loop.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <table style="overflow:hidden;border:1px solid #aaa;width:200px">
+              <tr>
+                <td style="padding:4px">
+                  <div style="overflow:hidden;width:120px;height:50px;background:#cef">
+                    <div style="width:300px;height:30px;background:#f99">overflowing child</div>
+                  </div>
+                </td>
+              </tr>
+            </table>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_table_inside_clip_table() {
+        // draw_under_clip_table (lines 2906-2919): a table with overflow:hidden
+        // that contains another table with overflow:hidden triggers a recursive
+        // draw_under_clip_table call from within the outer
+        // draw_under_clip_table's clip_descendants loop.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <table style="overflow:hidden;border:1px solid #aaa;width:220px">
+              <tr>
+                <td style="padding:4px">
+                  <table style="overflow:hidden;border:1px solid #c99;width:180px">
+                    <tr><td style="padding:4px;background:#cef">nested table cell</td></tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_opacity_inside_clip_table() {
+        // draw_under_clip_table (lines 2924-2938): a table with overflow:hidden
+        // containing an opacity-scoped block triggers draw_under_opacity from
+        // within draw_under_clip_table's clip_descendants loop.
+        let pdf = render_html(
+            r#"<!doctype html><html><body>
+            <table style="overflow:hidden;border:1px solid #aaa;width:200px">
+              <tr>
+                <td style="padding:4px">
+                  <div style="opacity:0.5">
+                    <div style="background:#cef;width:80px;height:40px">faded cell content</div>
+                  </div>
+                </td>
+              </tr>
+            </table>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- MarginBoxRenderer::render_page: @page :first / :left / :right selectors ---
+
+    #[test]
+    fn render_smoke_page_first_selector_margin_box() {
+        // MarginBoxRenderer::render_page (lines 3565-3578): the @page :first
+        // pseudo-class selector must match on page 1 and override the generic
+        // @page rule's margin-box content. On subsequent pages :first does not
+        // match (line 3573 `continue`). The `should_replace` logic (line 3578)
+        // is also exercised when the :first rule supersedes the generic rule.
+        let pdf = render_html(
+            r#"<!doctype html><html><head><style>
+            @page { size: A4; margin: 20mm; @top-center { content: "All pages"; } }
+            @page :first { @top-center { content: "First page only"; } }
+            </style></head><body>
+            <p>First page content.</p>
+            <div style="height:900px"></div>
+            <p>Second page content.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn render_smoke_page_left_right_selectors() {
+        // MarginBoxRenderer::render_page (lines 3565-3569, 3573): :left and
+        // :right pseudo-class selectors are evaluated per page_num parity.
+        // On a 3-page document both branches fire and pages where a selector
+        // does not match hit the `continue` at line 3573.
+        let pdf = render_html(
+            r#"<!doctype html><html><head><style>
+            @page { size: A4; margin: 20mm; }
+            @page :left  { @top-center { content: "Left page";  } }
+            @page :right { @top-center { content: "Right page"; } }
+            </style></head><body>
+            <p>Page one.</p>
+            <div style="height:900px"></div>
+            <p>Page two.</p>
+            <div style="height:900px"></div>
+            <p>Page three.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- MarginBoxRenderer stage 1b + stage 2: @left-middle / @right-middle boxes ---
+
+    #[test]
+    fn render_smoke_page_left_right_margin_boxes() {
+        // MarginBoxRenderer::render_page stage 1b (lines 3659-3688): left/right
+        // margin boxes require a separate height-measurement pass. Stage 2 size
+        // lookup for vertical edges (lines 3708-3719) uses those heights to
+        // place the boxes. Stage 1a's `continue` for non-horizontal edges
+        // (line 3624) is also hit.
+        let pdf = render_html(
+            r#"<!doctype html><html><head><style>
+            @page {
+              size: A4; margin: 20mm 40mm;
+              @left-middle  { content: "Left margin";  }
+              @right-middle { content: "Right margin"; }
+            }
+            </style></head><body>
+            <p>Content with left and right margin boxes.</p>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
