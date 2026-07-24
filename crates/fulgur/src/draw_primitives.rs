@@ -339,14 +339,21 @@ impl Quad {
         let ax1 = ax0 + area.width.to_f32();
         let ay1 = ay0 + area.height.to_f32();
 
-        // Detect axis-aligned quads in the krilla point order
-        // (BL, BR, TR, TL). Comparing exactly is correct because
-        // `transform_rect` and `push_rect` write matching floats to the
-        // paired corners when no rotation is present.
-        let is_axis_aligned = self.points[0][0] == self.points[3][0]
-            && self.points[1][0] == self.points[2][0]
-            && self.points[0][1] == self.points[1][1]
-            && self.points[2][1] == self.points[3][1];
+        // Detect axis-aligned quads by edge orientation rather than
+        // paired-position equality. A quad is axis-aligned iff every
+        // edge is exactly horizontal (dy == 0) or exactly vertical
+        // (dx == 0). This catches every quarter turn (0°, 90°, 180°,
+        // 270°) and every reflection, all of which produce quads with
+        // horizontal/vertical edges but with different paired-position
+        // orders (`points[0]/[3]` vs `points[0]/[1]` etc.). A rotated
+        // quad at, say, 45° has non-zero dx AND dy on every edge and
+        // correctly falls through to the rotated branch.
+        let is_axis_aligned = (0..4).all(|i| {
+            let j = (i + 1) % 4;
+            let dx = self.points[j][0] - self.points[i][0];
+            let dy = self.points[j][1] - self.points[i][1];
+            dx == 0.0 || dy == 0.0
+        });
 
         if is_axis_aligned {
             // Survey all four points instead of the un-reflected krilla
@@ -1974,6 +1981,75 @@ mod dp_unit_tests {
         assert!((max_x - (-100.0)).abs() < 1e-4);
         assert!((min_y - 200.0).abs() < 1e-4);
         assert!((max_y - 214.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_after_rotate_90_is_preserved_and_clamped() {
+        // `transform: rotate(90deg)` (matrix (0,1,-1,0) or equivalent)
+        // still leaves every edge either horizontal or vertical, i.e.
+        // the quad is still axis-aligned. But the pairing of equal
+        // coordinates moves — after a quarter turn `points[0]/[1]`
+        // share x (originally `[0]/[3]`), and `points[2]/[3]` share x
+        // (originally `[1]/[2]`). A paired-position axis-alignment
+        // check misses this and falls through to the rotated branch,
+        // which drops the whole occurrence as soon as one corner is
+        // outside — even though the AABB portion inside the content
+        // area is still visible and should stay clickable.
+        //
+        // Rotate original rect (100,200) size 100x14 by 90° CCW about
+        // origin (mapping (x,y) → (-y, x)):
+        //   BL=(-214, 100)  BR=(-214, 200)  TR=(-200, 200)  TL=(-200, 100)
+        // Every edge is horizontal or vertical, so the AABB is the
+        // correct clickable region:
+        //   x ∈ [-214, -200], y ∈ [100, 200]
+        let area = Rect {
+            x: (-300.0).as_pt(),
+            y: 0.0.as_pt(),
+            width: 400.0.as_pt(),
+            height: 500.0.as_pt(),
+        };
+        let q = Quad {
+            points: [
+                [-214.0, 100.0],
+                [-214.0, 200.0],
+                [-200.0, 200.0],
+                [-200.0, 100.0],
+            ],
+        };
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("quarter-turn quad fully inside area must survive");
+        let (min_x, min_y, max_x, max_y) = quad_bounds(&clipped);
+        assert!((min_x - (-214.0)).abs() < 1e-4);
+        assert!((max_x - (-200.0)).abs() < 1e-4);
+        assert!((min_y - 100.0).abs() < 1e-4);
+        assert!((max_y - 200.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quad_clip_axis_aligned_after_rotate_90_straddling_boundary_clamps() {
+        // Same quarter-turn shape but part of the AABB extends into the
+        // margin strip (x < area.x). A correct clip clamps to the
+        // intersection instead of dropping the whole occurrence.
+        let area = Rect {
+            x: 0.0.as_pt(),
+            y: 0.0.as_pt(),
+            width: 500.0.as_pt(),
+            height: 500.0.as_pt(),
+        };
+        // AABB x ∈ [-10, 100], y ∈ [50, 200]. Intersection with
+        // area x ∈ [0, 500] gives clamped x ∈ [0, 100].
+        let q = Quad {
+            points: [[-10.0, 50.0], [-10.0, 200.0], [100.0, 200.0], [100.0, 50.0]],
+        };
+        let clipped = q
+            .clip_to_rect(&area)
+            .expect("straddling quarter-turn quad must clamp, not drop");
+        let (min_x, min_y, max_x, max_y) = quad_bounds(&clipped);
+        assert!((min_x - 0.0).abs() < 1e-4);
+        assert!((max_x - 100.0).abs() < 1e-4);
+        assert!((min_y - 50.0).abs() < 1e-4);
+        assert!((max_y - 200.0).abs() < 1e-4);
     }
 
     #[test]
