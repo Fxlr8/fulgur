@@ -117,26 +117,45 @@ fn tagged_render_with_noto(html: &str) -> Vec<u8> {
 /// Extract text from a PDF via `pdftotext -raw`. `-raw` flattens tagged
 /// PDFs to reading-order content stream text and avoids the column wrap
 /// pdftotext applies in default mode, which would split sentinels like
-/// `[APP: ]` across line breaks. Returns `None` if `pdftotext` is not
-/// installed — callers should gracefully skip in that case (CI has
-/// poppler-utils preinstalled; local dev on macOS needs `brew install
-/// poppler`). pdftotext walks the font's ToUnicode CMap to recover
-/// Unicode from CID-encoded TJ strings, which lopdf 0.40 cannot do —
-/// this is the replacement for the old ActualText hex grep, which was
-/// only viable while the now-fixed `text_range = 0..text_len` bug
-/// triggered Krilla's whole-paragraph ActualText path.
+/// `[APP: ]` across line breaks. Returns `None` only when the pdftotext
+/// binary is not installed (spawn fails with `ErrorKind::NotFound`) —
+/// callers should gracefully skip in that case (CI has poppler-utils
+/// preinstalled; local dev on macOS needs `brew install poppler`). Any
+/// other spawn error (permission denied, corrupt executable, resource
+/// exhaustion, …) and any non-zero exit both return
+/// `Some("[pdftotext ...]")` with the underlying diagnostic embedded,
+/// so the caller's `assert!(text.contains(...))` fires with the error
+/// visible in the panic message instead of silently skipping.
+/// pdftotext walks the font's ToUnicode CMap to recover Unicode from
+/// CID-encoded TJ strings, which lopdf 0.40 cannot do — this is the
+/// replacement for the old ActualText hex grep, which was only viable
+/// while the now-fixed `text_range = 0..text_len` bug triggered
+/// Krilla's whole-paragraph ActualText path.
 fn extract_pdf_text(pdf: &[u8]) -> Option<String> {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("extract.pdf");
     std::fs::write(&path, pdf).expect("write pdf");
-    let output = std::process::Command::new("pdftotext")
+    let output = match std::process::Command::new("pdftotext")
         .arg("-raw")
         .arg(&path)
         .arg("-")
         .output()
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            return Some(format!(
+                "[pdftotext spawn failed: {err} (kind={:?})]",
+                err.kind()
+            ));
+        }
+    };
     if !output.status.success() {
-        return None;
+        return Some(format!(
+            "[pdftotext failed status={} stderr={:?}]",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
     }
     Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
