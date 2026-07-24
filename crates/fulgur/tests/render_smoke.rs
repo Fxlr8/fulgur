@@ -6097,8 +6097,17 @@ fn regex_lite_link_rects(text: &str) -> Vec<(f32, f32, f32, f32)> {
     let mut i = 0;
     while let Some(link_off) = text[i..].find("/Subtype /Link") {
         let start = i + link_off;
-        // Look ahead for /Rect [ ... ] within the next 512 bytes.
-        let window_end = (start + 512).min(text.len());
+        // Look ahead for /Rect [ ... ] within the next ~512 bytes.
+        // `text` came from `String::from_utf8_lossy` over raw PDF
+        // bytes, so it is valid UTF-8, but `start + 512` can still
+        // land in the middle of a multi-byte code point (e.g.
+        // metadata strings containing non-ASCII). Round down to the
+        // nearest char boundary so `text[start..window_end]` cannot
+        // panic on such inputs.
+        let mut window_end = (start + 512).min(text.len());
+        while window_end > start && !text.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
         if let Some(rect_off) = text[start..window_end].find("/Rect [") {
             let after = start + rect_off + "/Rect [".len();
             if let Some(close) = text[after..window_end].find(']') {
