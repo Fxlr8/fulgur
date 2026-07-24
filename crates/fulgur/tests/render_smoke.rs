@@ -5954,3 +5954,174 @@ body{{background-size:0.001px 0.001px;background-repeat:repeat;height:1130px;
         pdf.len()
     );
 }
+
+/// Body link annotations must never leak into the page-margin strips
+/// where `@page @top-*`/`@bottom-*` margin boxes paint. `render_v2`
+/// paints margin boxes AFTER body content so page headers/footers are
+/// not hidden by page-filling body backgrounds; because PDF link
+/// annotations are independent interactive objects, a body anchor
+/// positioned into a margin strip would remain clickable under the
+/// margin-box content that visually replaces it — click target and
+/// visible text disagree. The fix splits `LinkCollector` into body/
+/// margin collectors and clips body occurrences to the content area
+/// rect.
+///
+/// This test pushes a body `<a>` far past the content-area bottom via
+/// `margin-top` so the anchor's Y coordinate lands inside the bottom
+/// margin strip. The rendered PDF must contain zero link annotations
+/// whose rect intersects that strip.
+#[test]
+fn body_link_positioned_into_bottom_margin_strip_is_dropped() {
+    // A4 with 60pt top/bottom margins. Content-area bottom (Y-up) is
+    // 782 → 842 (60pt strip). The `.push` anchor gets margin-top: 750pt,
+    // sending its Y-up rect below 782 (into the bottom-margin strip).
+    let html = r#"<!doctype html><html><head><style>
+@page {
+  size: A4;
+  margin: 60pt 40pt 60pt 40pt;
+  @bottom-center { content: "Page footer"; }
+}
+body { margin: 0; padding: 0; }
+a { display: block; margin-top: 750pt; font-size: 12pt; }
+</style></head><body>
+<a href="https://example.com/target">body link</a>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render must succeed");
+    assert!(pdf.starts_with(b"%PDF"));
+
+    let text = String::from_utf8_lossy(&pdf);
+    let rects = regex_lite_link_rects(&text);
+    // Every /Rect that survives must lie inside the content area
+    // (Y-up ury >= 60pt).
+    for cap in &rects {
+        let (llx, lly, urx, ury) = *cap;
+        assert!(
+            ury >= 60.0,
+            "body link annotation leaked into bottom margin strip: \
+             /Rect [{llx} {lly} {urx} {ury}] — top edge (Y-up ury) \
+             must be >= 60pt (content-area bottom in Y-up)"
+        );
+    }
+    // Positive control for the scanner: without this, a hypothetical
+    // break in `regex_lite_link_rects` (returning an empty vec) would
+    // let the ury loop pass vacuously and hide a real regression.
+    // A companion render with an anchor plainly inside the content
+    // area must produce at least one /Rect the same scanner can find.
+    let legit_html = r#"<!doctype html><html><head><style>
+@page { size: A4; margin: 60pt 40pt 60pt 40pt; }
+body { margin: 0; padding: 20pt; font-size: 12pt; }
+</style></head><body>
+<p>Visit <a href="https://example.com/in-content">our documentation</a>.</p>
+</body></html>"#;
+    let legit_pdf = Engine::builder()
+        .build()
+        .render(legit_html)
+        .expect("positive-control render must succeed");
+    let legit_text = String::from_utf8_lossy(&legit_pdf);
+    let legit_rects = regex_lite_link_rects(&legit_text);
+    assert!(
+        !legit_rects.is_empty(),
+        "scanner returned no /Rect entries for a plainly in-content link; \
+         the primary loop above would pass vacuously if the scanner \
+         itself broke, so guard against that here."
+    );
+    for cap in legit_rects {
+        let (llx, lly, urx, ury) = cap;
+        assert!(
+            ury >= 60.0,
+            "positive-control link ended up in a margin strip: \
+             /Rect [{llx} {lly} {urx} {ury}]"
+        );
+    }
+}
+
+/// When a page has margins but no effective `@page` margin-box rule,
+/// nothing paints on top of body content in the margin strips. Body
+/// links that extend into those strips are visually present AND have
+/// nothing later covering them, so their PDF annotation must remain
+/// clickable — `clip_body_occurrences_to_content_area` must not be
+/// applied on pages with no margin boxes. Otherwise a `position:
+/// fixed; bottom: 0` page number rendered from body content ends up
+/// visible but unclickable.
+#[test]
+fn body_link_in_margin_area_is_preserved_when_no_margin_box_paints() {
+    // Same `margin-top: 750pt` shape as the security regression test,
+    // but with no `@page` margin box: the anchor's rect lands in the
+    // bottom-margin strip yet the annotation must survive because
+    // nothing paints on top of it.
+    let html = r#"<!doctype html><html><head><style>
+@page { size: A4; margin: 60pt 40pt 60pt 40pt; }
+body { margin: 0; padding: 0; }
+a { display: block; margin-top: 750pt; font-size: 12pt; }
+</style></head><body>
+<a href="https://example.com/target">body-drawn footer link</a>
+</body></html>"#;
+
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("render must succeed");
+    let text = String::from_utf8_lossy(&pdf);
+    let rects = regex_lite_link_rects(&text);
+    // The annotation MUST reach the PDF — a page with no margin box
+    // never overpaints body content, so dropping the annotation would
+    // leave the visible link unclickable.
+    assert!(
+        !rects.is_empty(),
+        "body link in a margin strip on a page with no margin box was \
+         dropped; nothing paints on top of it, so the annotation must \
+         survive"
+    );
+    // Sanity: the annotation should be in the bottom margin strip
+    // (Y-up ury < 60), matching the visible text position.
+    let (_, _, _, ury) = rects[0];
+    assert!(
+        ury < 60.0,
+        "positive-control render did not put the anchor in the bottom \
+         margin strip as expected; rects = {rects:?}"
+    );
+}
+
+/// Parse `/Subtype /Link ... /Rect [llx lly urx ury]` from a raw PDF
+/// text stream. Returns `(llx, lly, urx, ury)` tuples in PDF-native
+/// Y-up coordinates. Used by the security regression test above so
+/// no new dependency (`regex`, `pdf-extract`) is pulled in just for
+/// one assertion — the raw content stream shape is stable enough for
+/// a bespoke scan.
+fn regex_lite_link_rects(text: &str) -> Vec<(f32, f32, f32, f32)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(link_off) = text[i..].find("/Subtype /Link") {
+        let start = i + link_off;
+        // Look ahead for /Rect [ ... ] within the next ~512 bytes.
+        // `text` came from `String::from_utf8_lossy` over raw PDF
+        // bytes, so it is valid UTF-8, but `start + 512` can still
+        // land in the middle of a multi-byte code point (e.g.
+        // metadata strings containing non-ASCII). Round down to the
+        // nearest char boundary so `text[start..window_end]` cannot
+        // panic on such inputs.
+        let mut window_end = (start + 512).min(text.len());
+        while window_end > start && !text.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
+        if let Some(rect_off) = text[start..window_end].find("/Rect [") {
+            let after = start + rect_off + "/Rect [".len();
+            if let Some(close) = text[after..window_end].find(']') {
+                let body = &text[after..after + close];
+                let nums: Vec<f32> = body
+                    .split_whitespace()
+                    .filter_map(|s| s.parse::<f32>().ok())
+                    .collect();
+                if nums.len() == 4 {
+                    out.push((nums[0], nums[1], nums[2], nums[3]));
+                }
+            }
+        }
+        i = start + "/Subtype /Link".len();
+    }
+    out
+}

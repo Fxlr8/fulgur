@@ -18,8 +18,38 @@ use krilla::geom::{Point, Quadrilateral};
 use krilla::page::Page;
 use krilla::tagging::Identifier;
 
-use crate::draw_primitives::{DestinationRegistry, LinkOccurrence};
+use crate::draw_primitives::{DestinationRegistry, LinkOccurrence, Rect};
 use crate::paragraph::LinkTarget;
+
+/// Clip each occurrence's quads to `content_area` (in Y-down PDF pt),
+/// dropping any quad that falls entirely outside and dropping any
+/// occurrence whose quads all disappear.
+///
+/// This runs on body-collected occurrences before emission. `render_v2`
+/// paints `@page` margin boxes AFTER body content, so a body link
+/// annotation that extends into a margin-box strip would remain
+/// clickable under the margin-box content that visually replaces it —
+/// click target and visible text disagree. Clipping to the content
+/// area keeps the click target inside the region body content actually
+/// owns. Margin-box occurrences are collected via a separate
+/// `LinkCollector` and emitted unclipped.
+pub(crate) fn clip_body_occurrences_to_content_area(
+    occurrences: Vec<LinkOccurrence>,
+    content_area: &Rect,
+) -> Vec<LinkOccurrence> {
+    let mut out = Vec::with_capacity(occurrences.len());
+    for mut occ in occurrences {
+        occ.quads = occ
+            .quads
+            .into_iter()
+            .filter_map(|q| q.clip_to_rect(content_area))
+            .collect();
+        if !occ.quads.is_empty() {
+            out.push(occ);
+        }
+    }
+    out
+}
 
 /// Emit PDF link annotations for every occurrence on the given page.
 ///
@@ -307,6 +337,164 @@ mod tests {
             assert!(ids.is_empty());
         }
         assert_eq!(page0_annotation_count(doc), 1);
+    }
+
+    // ── content-area clipping (body annotations) ──────────────────────────
+    //
+    // `render_v2` paints `@page` margin boxes AFTER body content so page
+    // headers/footers are not hidden by body backgrounds. Because PDF link
+    // annotations are independent interactive objects, a body link that
+    // happens to fall inside a margin-box strip stays clickable even
+    // though the margin box now paints over it visually — the click
+    // target and the visible text disagree. Body occurrences must
+    // therefore be clipped to the content area before emission;
+    // margin-box occurrences are collected separately and emitted
+    // unclipped.
+
+    fn a4_content_area() -> crate::draw_primitives::Rect {
+        // A4 595x842pt with 60pt top/bottom, 40pt left/right margins.
+        crate::draw_primitives::Rect {
+            x: 40.0.as_pt(),
+            y: 60.0.as_pt(),
+            width: 515.0.as_pt(),
+            height: 722.0.as_pt(),
+        }
+    }
+
+    #[test]
+    fn clip_body_drops_occurrence_entirely_in_bottom_margin() {
+        // Body anchor positioned exactly where the `@bottom-*` margin
+        // box will paint — after clipping there is no residual quad, so
+        // the occurrence is dropped and no annotation reaches the PDF.
+        let area = a4_content_area();
+        let occs = vec![ext_occ(
+            "https://example.com/target",
+            // y range [800, 820] — below the 782 content-area bottom.
+            vec![Quad {
+                points: [
+                    [100.0, 820.0],
+                    [250.0, 820.0],
+                    [250.0, 800.0],
+                    [100.0, 800.0],
+                ],
+            }],
+        )];
+        let clipped = crate::link::clip_body_occurrences_to_content_area(occs, &area);
+        assert!(
+            clipped.is_empty(),
+            "body link fully inside footer strip must be dropped, got {clipped:?}"
+        );
+    }
+
+    #[test]
+    fn clip_body_clamps_straddling_quad_to_content_area() {
+        // Body link crossing the bottom boundary (y in [770, 800],
+        // area bottom = 782) has its clickable strip clamped to
+        // y in [770, 782] so the click target no longer overlaps the
+        // margin-box strip.
+        let area = a4_content_area();
+        let occs = vec![ext_occ(
+            "https://body.example",
+            vec![Quad {
+                points: [
+                    [100.0, 800.0],
+                    [250.0, 800.0],
+                    [250.0, 770.0],
+                    [100.0, 770.0],
+                ],
+            }],
+        )];
+        let clipped = crate::link::clip_body_occurrences_to_content_area(occs, &area);
+        assert_eq!(clipped.len(), 1);
+        assert_eq!(clipped[0].quads.len(), 1);
+        let ys: Vec<f32> = clipped[0].quads[0].points.iter().map(|p| p[1]).collect();
+        let max_y = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_y - 782.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn clip_body_preserves_multi_quad_link_with_partial_overlap() {
+        // A multi-quad link (e.g. a wrapping <a>) with one quad in the
+        // content area and one in the margin strip: keep the first, drop
+        // the second, so the visible-and-clickable portion survives.
+        let area = a4_content_area();
+        let occs = vec![ext_occ(
+            "https://wrap.example",
+            vec![
+                // Inside content area.
+                Quad {
+                    points: [
+                        [100.0, 214.0],
+                        [250.0, 214.0],
+                        [250.0, 200.0],
+                        [100.0, 200.0],
+                    ],
+                },
+                // Bottom margin strip.
+                Quad {
+                    points: [
+                        [100.0, 820.0],
+                        [250.0, 820.0],
+                        [250.0, 800.0],
+                        [100.0, 800.0],
+                    ],
+                },
+            ],
+        )];
+        let clipped = crate::link::clip_body_occurrences_to_content_area(occs, &area);
+        assert_eq!(clipped.len(), 1);
+        assert_eq!(
+            clipped[0].quads.len(),
+            1,
+            "second (in-margin) quad must be dropped"
+        );
+    }
+
+    #[test]
+    fn clip_body_preserves_occurrence_entirely_inside() {
+        let area = a4_content_area();
+        let occs = vec![ext_occ(
+            "https://legit.example",
+            vec![Quad {
+                points: [
+                    [100.0, 214.0],
+                    [250.0, 214.0],
+                    [250.0, 200.0],
+                    [100.0, 200.0],
+                ],
+            }],
+        )];
+        let before = occs.clone();
+        let clipped = crate::link::clip_body_occurrences_to_content_area(occs, &area);
+        assert_eq!(clipped.len(), 1);
+        assert_eq!(clipped[0].quads, before[0].quads);
+    }
+
+    #[test]
+    fn body_link_in_margin_area_emits_no_annotation_via_emit_after_clip() {
+        // End-to-end at the emit layer: a body occurrence positioned in
+        // the bottom margin, run through the clip → emit pipeline, must
+        // produce zero /Annots entries on the resulting page.
+        let mut doc = krilla::Document::new();
+        {
+            let mut page = doc.start_page_with(page_settings());
+            let registry = DestinationRegistry::new();
+            let area = a4_content_area();
+            let body_occs = vec![ext_occ(
+                "https://example.com/target",
+                vec![Quad {
+                    points: [
+                        [100.0, 820.0],
+                        [250.0, 820.0],
+                        [250.0, 800.0],
+                        [100.0, 800.0],
+                    ],
+                }],
+            )];
+            let clipped = crate::link::clip_body_occurrences_to_content_area(body_occs, &area);
+            emit_link_annotations(&mut page, &clipped, &registry, None);
+        }
+        assert_eq!(page0_annotation_count(doc), 0);
     }
 
     // ── mixed occurrences ─────────────────────────────────────────────────

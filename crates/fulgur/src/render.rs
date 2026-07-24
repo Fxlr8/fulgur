@@ -117,7 +117,15 @@ pub fn render_v2(
         }
     }
 
-    let mut link_collector = crate::draw_primitives::LinkCollector::new();
+    // Body content and margin boxes get separate LinkCollectors. Body
+    // occurrences are clipped to the content area before emission so a
+    // body link positioned into a page-margin strip (via CSS positioning
+    // or overflow) cannot leave a click target under a later-painted
+    // margin box — the paint order would otherwise let the visible text
+    // and the clickable URI disagree. Margin-box occurrences are emitted
+    // unclipped so `@page @bottom-*` anchors remain clickable.
+    let mut body_link_collector = crate::draw_primitives::LinkCollector::new();
+    let mut margin_link_collector = crate::draw_primitives::LinkCollector::new();
 
     let mut link_annot_ids: BTreeMap<usize, Vec<krilla::tagging::Identifier>> = BTreeMap::new();
 
@@ -193,18 +201,21 @@ pub fn render_v2(
         };
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
+        let content_area = resolved_content_area(page_size, resolved_margin);
         let mut page = document.start_page_with(settings);
         if let Some(c) = bookmark_collector.as_mut() {
             c.set_current_page(page_idx);
         }
-        link_collector.set_current_page(page_idx);
+        body_link_collector.set_current_page(page_idx);
+        margin_link_collector.set_current_page(page_idx);
+        let page_has_margin_box_paint;
         {
             let mut surface = page.surface();
             {
                 let mut canvas = crate::draw_primitives::Canvas {
                     surface: &mut surface,
                     bookmark_collector: bookmark_collector.as_mut(),
-                    link_collector: Some(&mut link_collector),
+                    link_collector: Some(&mut body_link_collector),
                     tag_collector: tag_collector.as_mut(),
                     link_run_node_id: None,
                     in_marked_content: false,
@@ -248,8 +259,7 @@ pub fn render_v2(
                 if let Some(body_id) = drawables.body_id
                     && let Some(body_block) = drawables.block_styles.get(&body_id)
                 {
-                    let content_area_h =
-                        page_size.height - resolved_margin.top - resolved_margin.bottom;
+                    let content_area_h = content_area.height.to_f32();
                     let body_bg_y = if page_idx == 0 {
                         resolved_margin.top + drawables.body_offset_pt.1.to_f32()
                     } else {
@@ -289,18 +299,20 @@ pub fn render_v2(
             }
             // Paint margin boxes after body content so page headers /
             // footers are not hidden by page-filling body backgrounds.
-            // Keep bookmarks disabled for repeated running elements, but
-            // collect links so margin-box anchors remain clickable.
+            // Keep bookmarks disabled for repeated running elements.
+            // Margin-box links go into their own collector so their
+            // occurrences do not get clipped to the body content area
+            // (they live in the margin strips by design).
             let mut margin_canvas = crate::draw_primitives::Canvas {
                 surface: &mut surface,
                 bookmark_collector: None,
-                link_collector: Some(&mut link_collector),
+                link_collector: Some(&mut margin_link_collector),
                 tag_collector: None,
                 link_run_node_id: None,
                 in_marked_content: false,
             };
-            let page_content_width = page_size.width - resolved_margin.left - resolved_margin.right;
-            margin_box_renderer.render_page(
+            let page_content_width = content_area.width.to_f32();
+            let any_margin_box_painted = margin_box_renderer.render_page(
                 &mut margin_canvas,
                 page_idx,
                 page_num,
@@ -310,8 +322,27 @@ pub fn render_v2(
                 page_content_width,
                 anchor_map,
             );
+            page_has_margin_box_paint = any_margin_box_painted;
         }
-        let per_page = link_collector.take_page(page_idx);
+        // Body occurrences are clipped to the content area rect ONLY
+        // when at least one `@page` margin box actually painted on
+        // this page — that's the only scenario where a later-painted
+        // margin box could visually cover a body link and leave the
+        // click target out of sync with the visible text. When no
+        // margin box painted, nothing overlays the body layer, and
+        // clipping would drop visible body-drawn page furniture
+        // (`position: fixed; bottom: 0` page numbers, `margin-top`
+        // overflow into the strip, etc.) making it unclickable
+        // without any security benefit. `content_area` is the same
+        // rect the body background clamp and the margin-box renderer
+        // used earlier this iteration — see `resolved_content_area`.
+        let raw_body_page = body_link_collector.take_page(page_idx);
+        let body_per_page = if page_has_margin_box_paint {
+            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &content_area)
+        } else {
+            raw_body_page
+        };
+        let margin_per_page = margin_link_collector.take_page(page_idx);
         // Only span_ptrs that are wired into the struct tree via
         // ParagraphRunItem::LinkContent entries should use add_tagged_annotation;
         // others fall back to add_annotation so that Krilla's invariant
@@ -320,7 +351,15 @@ pub fn render_v2(
         let wired_ptrs = tag_collector.as_ref().map(|tc| tc.wired_link_span_ptrs());
         for (ptr, id) in crate::link::emit_link_annotations(
             &mut page,
-            &per_page,
+            &body_per_page,
+            &dest_registry,
+            wired_ptrs.as_ref(),
+        ) {
+            link_annot_ids.entry(ptr).or_default().push(id);
+        }
+        for (ptr, id) in crate::link::emit_link_annotations(
+            &mut page,
+            &margin_per_page,
             &dest_registry,
             wired_ptrs.as_ref(),
         ) {
@@ -361,6 +400,24 @@ pub fn render_v2(
 /// other maps.
 /// Build the three page-independent skip sets used by `draw_v2_page`.
 ///
+/// Content-area rect for a page: the region inside `resolved_margin`,
+/// where body content is laid out. Single source of truth for the three
+/// downstream consumers — body background clamp height, GCPM margin-box
+/// renderer width, and body-link annotation clip rect — so a future
+/// change to how `resolved_margin` subtracts from `page_size` shifts
+/// all three together instead of leaving one behind.
+fn resolved_content_area(
+    page_size: crate::config::PageSize,
+    resolved_margin: crate::config::Margin,
+) -> crate::draw_primitives::Rect {
+    crate::draw_primitives::Rect {
+        x: resolved_margin.left.as_pt(),
+        y: resolved_margin.top.as_pt(),
+        width: (page_size.width - resolved_margin.left - resolved_margin.right).as_pt(),
+        height: (page_size.height - resolved_margin.top - resolved_margin.bottom).as_pt(),
+    }
+}
+
 /// - `transformed_descendants`: every node listed in some
 ///   `TransformEntry::descendants` — drawn inside that transform's
 ///   `push_transform / pop` group, so the main per-fragment loop must
@@ -3542,6 +3599,13 @@ impl<'a> MarginBoxRenderer<'a> {
     /// `<a href="#...">` whose first fragment lands on each page.
     /// Pages with no such anchor look up `None` and the resolver
     /// returns an empty string.
+    /// Returns `true` if any effective margin box resolved to non-empty
+    /// content on this page (regardless of edge). Callers use this to
+    /// decide whether body-link annotations that landed in a page-
+    /// margin strip must be clipped: on a page with zero margin boxes
+    /// nothing paints on top of body content in the strips, so
+    /// preserving body annotations there keeps `position: fixed;
+    /// bottom: 0`-style body-drawn page furniture clickable.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_page(
         &mut self,
@@ -3553,7 +3617,7 @@ impl<'a> MarginBoxRenderer<'a> {
         resolved_margin: crate::config::Margin,
         content_width: f32,
         anchor_map: Option<&AnchorMap>,
-    ) {
+    ) -> bool {
         // Resolve effective boxes: pick the most specific matching rule
         // per position. Pseudo-class selectors (`:first`, `:left`,
         // `:right`) override the default `@page` rule.
@@ -3820,6 +3884,14 @@ impl<'a> MarginBoxRenderer<'a> {
                 );
             }
         }
+        // Body-link clip gate: `true` iff at least one effective margin
+        // box on this page produced non-empty content, i.e. something
+        // was actually painted on top of the body layer. When `false`,
+        // the caller must NOT clip body annotations that landed in a
+        // margin strip — nothing covers them, so dropping the click
+        // target would leave visible body-drawn page furniture
+        // unclickable.
+        !resolved_htmls.is_empty()
     }
 }
 
