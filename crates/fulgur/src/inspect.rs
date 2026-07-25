@@ -135,6 +135,12 @@ fn clamp_font_name(name: &str) -> &str {
     clamp_str_bytes(name, MAX_PDF_FONT_NAME_BYTES)
 }
 
+/// Decoded content-stream bytes, keyed by stream object id, so a stream shared
+/// by several pages is decoded once. Retained bytes are bounded by the same
+/// [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`] budget that charges each distinct
+/// stream as it is decoded.
+type DecodedStreams = std::collections::BTreeMap<lopdf::ObjectId, Rc<Vec<u8>>>;
+
 /// Outcome of gathering one page's content, which distinguishes "skip this
 /// page" from "stop walking pages".
 enum PageContent {
@@ -173,57 +179,91 @@ enum PageContent {
 /// the running total rises monotonically to exactly that sum, so some prefix
 /// exceeds the bound if and only if the total does.
 ///
-/// `doc_budget` is charged for every stream decoded, *before* the per-page
-/// verdict is known, so a page that is about to be skipped still pays for the
-/// work its decoding cost. Charging only usable pages would leave the aggregate
-/// unbounded, since a page can be made to decode a full per-page allowance and
-/// then be rejected.
+/// `doc_budget` is charged *before* the per-page verdict is known, so a page that
+/// is about to be skipped still pays for the work its decoding cost. Charging
+/// only usable pages would leave the aggregate unbounded, since a page can be
+/// made to decode a full per-page allowance and then be rejected.
+///
+/// `decoded_cache` holds each content stream's decoded bytes, so a stream shared
+/// by many pages is decoded once. That matters beyond the saved time: a stream's
+/// *intermediate* filter output is invisible from here — `/Filter [/FlateDecode
+/// /ASCII85Decode]` can expand a small payload into megabytes of whitespace that
+/// the second stage reduces to nothing, leaving both the encoded and decoded
+/// lengths small — so no charge computed from those two lengths can bound
+/// repeated decoding of it. Decoding each stream once reduces that to a single
+/// occurrence per document, which is the same residual as a single oversized
+/// stream (see [`MAX_PDF_CONTENT_BYTES`]).
+///
+/// Charges split accordingly: filter work once per distinct stream, and the copy
+/// into the page's content on every reference to it.
 fn gather_page_content(
     doc: &lopdf::Document,
     page_id: lopdf::ObjectId,
     doc_budget: &mut usize,
+    decoded_cache: &mut DecodedStreams,
 ) -> PageContent {
+    // A page costs something even with no `/Contents` at all: it is still looked
+    // up and walked. Page objects are the cheapest thing to mass-produce in a
+    // compressed object stream, and a page with no content references never
+    // enters the loop below, so without this the walk advances no budget.
+    *doc_budget = doc_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+    if *doc_budget == 0 {
+        return PageContent::Exhausted;
+    }
+
     let mut content: Vec<u8> = Vec::new();
     for object_id in doc.get_page_contents(page_id) {
-        // Charge the floor for *attempting* the reference, before knowing whether
-        // it resolves to a stream. The object lookup costs the same either way,
-        // and a `/Contents` array of references to dictionaries or missing
-        // objects — shareable across pages, like any other array — would
-        // otherwise be walked per page for free.
-        *doc_budget = doc_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
-        if *doc_budget == 0 {
-            return PageContent::Exhausted;
-        }
-        let Ok(stream) = doc.get_object(object_id).and_then(lopdf::Object::as_stream) else {
-            continue;
+        let bytes: Rc<Vec<u8>> = match decoded_cache.get(&object_id) {
+            // Decoded already for an earlier page: no filter work to charge, only
+            // the copy into `content` below.
+            Some(cached) => Rc::clone(cached),
+            None => {
+                // Charge the floor for *attempting* the reference, before knowing
+                // whether it resolves to a stream. The object lookup costs the
+                // same either way, and a `/Contents` array of references to
+                // dictionaries or missing objects — shareable across pages, like
+                // any other array — would otherwise be walked per page for free.
+                // Unresolvable ids are deliberately not cached, so each
+                // occurrence pays this.
+                *doc_budget = doc_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+                if *doc_budget == 0 {
+                    return PageContent::Exhausted;
+                }
+                let Ok(stream) = doc.get_object(object_id).and_then(lopdf::Object::as_stream)
+                else {
+                    continue;
+                };
+                let decoded = match stream.decompressed_content() {
+                    Ok(d) => d,
+                    Err(_) => stream.content.clone(),
+                };
+                // Filter work, charged once per distinct stream: the encoded
+                // length, because a filter reads every one of those bytes even
+                // when it yields nothing — `/ASCII85Decode` over a megabyte of
+                // whitespace decodes to zero after scanning all of it.
+                let encoded = stream.content.len();
+                *doc_budget = doc_budget
+                    .saturating_sub(encoded.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
+                let cached = Rc::new(decoded);
+                decoded_cache.insert(object_id, Rc::clone(&cached));
+                if *doc_budget == 0 {
+                    return PageContent::Exhausted;
+                }
+                cached
+            }
         };
-        let decoded = stream.decompressed_content();
-        let bytes: &[u8] = match decoded {
-            Ok(ref d) => d,
-            Err(_) => &stream.content,
-        };
-        // Charge this stream beyond the floor already paid above, taking the
-        // larger of what it *produced* and what it *consumed*:
-        //
-        // - decoded length plus the separator, the bytes added to `content`;
-        // - encoded length, because a filter reads every one of those bytes even
-        //   when it yields nothing. `/ASCII85Decode` over a megabyte of
-        //   whitespace decodes to zero bytes after scanning all of it, and a
-        //   Flate stream can do the same, so charging only the decoded length
-        //   would let a large encoded stream be re-decoded per page for the
-        //   floor alone.
-        //
-        // The total per stream is therefore `max(decoded + 1, encoded, floor)`.
-        let charge = (bytes.len() + 1).max(stream.content.len());
+        // Charged on every reference, hit or miss: these bytes are copied into
+        // this page's `content` even when the decode was cached, so the
+        // concatenation stays bounded independently of the filter work.
         *doc_budget =
-            doc_budget.saturating_sub(charge.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
+            doc_budget.saturating_sub((bytes.len() + 1).max(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
         if *doc_budget == 0 {
             return PageContent::Exhausted;
         }
         if content.len() + bytes.len() + 1 > MAX_PDF_CONTENT_BYTES {
             return PageContent::Skip;
         }
-        content.extend_from_slice(bytes);
+        content.extend_from_slice(&bytes);
         content.push(b'\n');
     }
     PageContent::Ready(content)
@@ -277,16 +317,18 @@ fn extract_text_items(
     let mut content_budget = limits.content_total_bytes;
     let mut op_budget = limits.operations;
     let mut text_bytes: usize = 0;
+    let mut decoded_cache = DecodedStreams::new();
 
     for (&page_num, &page_id) in &doc.get_pages() {
         if items.len() >= limits.items || text_bytes >= limits.text_bytes || op_budget == 0 {
             break;
         }
-        let content_bytes = match gather_page_content(doc, page_id, &mut content_budget) {
-            PageContent::Ready(b) => b,
-            PageContent::Skip => continue,
-            PageContent::Exhausted => break,
-        };
+        let content_bytes =
+            match gather_page_content(doc, page_id, &mut content_budget, &mut decoded_cache) {
+                PageContent::Ready(b) => b,
+                PageContent::Skip => continue,
+                PageContent::Exhausted => break,
+            };
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
@@ -579,10 +621,23 @@ enum XObjectsOrigin {
 }
 
 /// The identity of the `/XObject` dictionary reachable from `resources`.
-fn xobjects_origin(resources: &lopdf::Dictionary, origin: ResourcesOrigin) -> XObjectsOrigin {
-    match resources.get(b"XObject").and_then(|o| o.as_reference()) {
-        Ok(id) => XObjectsOrigin::Object(id),
-        Err(_) => XObjectsOrigin::DirectIn(origin),
+///
+/// Uses the id `Document::dereference` ends on, not the immediate one, because it
+/// follows reference chains: `/XObject 10 0 R` where object 10 is itself
+/// `11 0 R` reads the dictionary in object 11. Keying on the immediate id would
+/// give every page a distinct key for one shared dictionary whenever each is
+/// handed its own cheap alias object.
+fn xobjects_origin(
+    doc: &lopdf::Document,
+    resources: &lopdf::Dictionary,
+    origin: ResourcesOrigin,
+) -> XObjectsOrigin {
+    match resources.get(b"XObject").and_then(|o| doc.dereference(o)) {
+        // The dictionary is the object the chain ends on.
+        Ok((Some(id), _)) => XObjectsOrigin::Object(id),
+        // Direct dictionary, or a broken/absent entry whose empty result is a
+        // property of this resources dictionary.
+        Ok((None, _)) | Err(_) => XObjectsOrigin::DirectIn(origin),
     }
 }
 
@@ -646,6 +701,7 @@ fn extract_image_items(
     // whole-document budget. See `extract_text_items`.
     let mut content_budget = limits.content_total_bytes;
     let mut op_budget = limits.operations;
+    let mut decoded_cache = DecodedStreams::new();
     // Memoised `collect_image_xobjects` results, keyed by the object id of the
     // resources dictionary they were scanned from.
     //
@@ -671,7 +727,7 @@ fn extract_image_items(
         };
         // Scan once per distinct `/XObject` dictionary, reused by every page that
         // reaches it. Every origin is cacheable; see `XObjectsOrigin`.
-        let origin = xobjects_origin(resources, res_origin);
+        let origin = xobjects_origin(doc, resources, res_origin);
         let image_xobjects: Rc<ImageXObjects> = match xobject_cache.get(&origin) {
             Some(cached) => Rc::clone(cached),
             None => {
@@ -686,11 +742,12 @@ fn extract_image_items(
         }
 
         // Step 2: content stream から Do オペレータで位置を取得し、突き合わせて push
-        let content_bytes = match gather_page_content(doc, page_id, &mut content_budget) {
-            PageContent::Ready(b) => b,
-            PageContent::Skip => continue,
-            PageContent::Exhausted => break,
-        };
+        let content_bytes =
+            match gather_page_content(doc, page_id, &mut content_budget, &mut decoded_cache) {
+                PageContent::Ready(b) => b,
+                PageContent::Skip => continue,
+                PageContent::Exhausted => break,
+            };
         let content = match lopdf::content::Content::decode(&content_bytes) {
             Ok(c) => c,
             Err(_) => continue,
@@ -2600,7 +2657,7 @@ mod tests {
             let (res_origin, resources) = resolve_page_resources(&doc, page_id).expect("resources");
             // Each page's *resources* dictionary is its own.
             assert_eq!(res_origin, ResourcesOrigin::DirectIn(page_id));
-            origins.push(xobjects_origin(resources, res_origin));
+            origins.push(xobjects_origin(&doc, resources, res_origin));
         }
         // But both resolve to the same XObject dictionary, so one cache entry.
         assert_eq!(origins[0], XObjectsOrigin::Object(shared_xobjects));
@@ -2650,6 +2707,146 @@ mod tests {
         );
     }
 
+    /// A shared content stream is decoded once, not once per referring page.
+    ///
+    /// This is what bounds a multi-filter stream whose *intermediate* stage is
+    /// large while both its encoded and decoded lengths are small — no charge
+    /// derived from those two lengths can see that expansion, so the defence is
+    /// to not decode it repeatedly. Asserted through the budget: the same stream
+    /// referenced many times costs its filter work once.
+    #[test]
+    fn shared_content_streams_are_decoded_once() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        const ENCODED: usize = 32 * 1024;
+        const REFS: usize = 64;
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        let mut a85 = vec![b' '; ENCODED];
+        a85.extend_from_slice(b"~>");
+        let mut a85_stream = Stream::new(dictionary! {}, a85);
+        a85_stream.dict.set("Filter", "ASCII85Decode");
+        let shared = doc.add_object(a85_stream);
+        // The same stream object referenced many times from one /Contents array.
+        let contents: Vec<Object> = vec![Object::Reference(shared); REFS];
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => contents,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        let loaded = Document::load_mem(&buf).unwrap();
+        let page = *loaded.get_pages().values().next().unwrap();
+
+        // Enough for one decode of the encoded length plus a floor per reference,
+        // but nowhere near `REFS` decodes of it.
+        let mut budget = ENCODED + REFS * PDF_CONTENT_STREAM_COST_FLOOR_BYTES * 2;
+        assert!(
+            budget < ENCODED * REFS,
+            "budget must be too small for one decode per reference"
+        );
+        let mut cache = DecodedStreams::new();
+        assert!(
+            matches!(
+                gather_page_content(&loaded, page, &mut budget, &mut cache),
+                PageContent::Ready(_)
+            ),
+            "one decode plus per-reference copies must fit the budget"
+        );
+        assert_eq!(cache.len(), 1, "the shared stream must be cached once");
+    }
+
+    /// A page with no `/Contents` at all is still charged, so a page set that
+    /// costs nothing to produce cannot be walked for free.
+    #[test]
+    fn limits_pages_without_content_are_charged() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        // No /Contents entry: `get_page_contents` yields nothing.
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        let loaded = Document::load_mem(&buf).unwrap();
+        let page = *loaded.get_pages().values().next().unwrap();
+
+        let mut budget = PDF_CONTENT_STREAM_COST_FLOOR_BYTES;
+        assert!(matches!(
+            gather_page_content(&loaded, page, &mut budget, &mut DecodedStreams::new()),
+            PageContent::Exhausted
+        ));
+        assert_eq!(budget, 0, "a contentless page must still draw the budget");
+    }
+
+    /// An `/XObject` reached through an alias object resolves to the same origin
+    /// as one reached directly, so per-page aliases share a cache entry.
+    #[test]
+    fn xobjects_origin_canonicalises_reference_aliases() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let real = doc.add_object(dictionary! { "Im0" => Object::Null });
+        // Two distinct alias objects, each just a reference to `real`.
+        let alias_a = doc.add_object(Object::Reference(real));
+        let alias_b = doc.add_object(Object::Reference(real));
+        let mut origins = Vec::new();
+        for alias in [alias_a, alias_b, real] {
+            let page = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Resources" => dictionary! { "XObject" => Object::Reference(alias) },
+            });
+            let (res_origin, resources) = resolve_page_resources(&doc, page).expect("resources");
+            origins.push(xobjects_origin(&doc, resources, res_origin));
+        }
+        // All three name the dictionary the chain ends on, not the alias.
+        assert_eq!(origins[0], XObjectsOrigin::Object(real));
+        assert_eq!(origins[0], origins[1]);
+        assert_eq!(origins[0], origins[2]);
+    }
+
     /// The item budget stops extraction in both passes.
     #[test]
     fn limits_item_budget_stops_extraction() {
@@ -2688,7 +2885,7 @@ mod tests {
         // decoding it cost must still have drawn the budget down to zero, which
         // is reported as exhaustion rather than a plain skip.
         assert!(matches!(
-            gather_page_content(&doc, page_id, &mut budget),
+            gather_page_content(&doc, page_id, &mut budget, &mut DecodedStreams::new()),
             PageContent::Exhausted
         ));
         assert_eq!(budget, 0);
