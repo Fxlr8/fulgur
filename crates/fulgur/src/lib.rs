@@ -229,9 +229,12 @@ pub(crate) const MAX_PDF_PARENT_DEPTH: usize = 128;
 /// what gets parsed, not what gets allocated: a page carrying many small
 /// compressed streams would still inflate all of them first.
 ///
-/// Two residual amplification constants belong to `lopdf` rather than to
-/// fulgur, and this bound is the only lever over either, since both have
-/// already allocated by the time fulgur could observe a size:
+/// Three residual amplifications belong to `lopdf` rather than to fulgur, and
+/// this bound is the only lever over any of them, because each has already
+/// allocated by the time fulgur could observe a size. Reimplementing the
+/// surrounding `lopdf` logic to bound them would risk diverging from it, and the
+/// property being protected here is that `inspect` output stays byte-identical
+/// across the repository corpus:
 ///
 /// - `Content::decode`'s ~570 bytes per operation, above.
 /// - A *single* content stream whose decoded size exceeds this bound is still
@@ -240,6 +243,16 @@ pub(crate) const MAX_PDF_PARENT_DEPTH: usize = 128;
 ///   filter chain (Flate/LZW/ASCII85 plus predictors, and `lopdf`'s raw-deflate
 ///   retry for streams with a corrupt adler32 checksum) against a size-limited
 ///   reader — which would silently stop inspecting PDFs that decode today.
+///   Note that [`inspect::gather_page_content`]'s decoded-stream cache reduces
+///   this to *once per document* rather than once per referring page, including
+///   for a filter chain whose intermediate stage is large while both its encoded
+///   and decoded lengths are small.
+/// - `Document::get_page_contents` materialises a page's whole `/Contents` array
+///   into a `Vec<ObjectId>` before any of it can be charged, so one such build
+///   per pass is unavoidable from here. Measured at ~4 MB for a 500k-reference
+///   array — half of what `lopdf` already holds for the same array — and it does
+///   not scale with page count, because the per-reference charge exhausts the
+///   budget on the first page that walks it.
 pub(crate) const MAX_PDF_CONTENT_BYTES: usize = 1024 * 1024;
 
 /// Whole-document budget on how many bytes of *decoded* page content
