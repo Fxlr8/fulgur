@@ -140,17 +140,26 @@ fn clamp_font_name(name: &str) -> &str {
 /// `Document::get_page_contents` returns the ids written in a `/Contents` array
 /// without dereferencing them, while `get_object` does follow chains — so two
 /// distinct alias objects pointing at one stream reach the same content, and a
-/// cache keyed on the immediate id would miss for every alias. The loop is
-/// bounded like the `/Parent` walk; a chain longer than the bound yields a
-/// mid-chain id, which costs a cache miss but stays correct.
-fn canonical_object_id(doc: &lopdf::Document, mut id: lopdf::ObjectId) -> lopdf::ObjectId {
+/// cache keyed on the immediate id would miss for every alias.
+///
+/// Returns `None` when the chain does not terminate within
+/// [`MAX_PDF_PARENT_DEPTH`] links, which is what makes this the *only*
+/// dereference deciding the cache key. `get_object` starts a fresh `DEREF_LIMIT`
+/// budget from whatever id it is handed, so stopping mid-chain and letting it
+/// finish the walk would compose two limits: aliases converging past this bound
+/// would each yield a different key while still resolving to one stream, and
+/// every one would re-run its filter chain. Rejecting is also the stricter
+/// direction — no producer emits a `/Contents` chain that deep.
+fn canonical_object_id(doc: &lopdf::Document, mut id: lopdf::ObjectId) -> Option<lopdf::ObjectId> {
     for _ in 0..MAX_PDF_PARENT_DEPTH {
         match doc.objects.get(&id) {
             Some(lopdf::Object::Reference(next)) => id = *next,
-            _ => break,
+            // Not a reference (the target), or absent — either way this is the id
+            // the chain names; a missing object is skipped downstream.
+            _ => return Some(id),
         }
     }
-    id
+    None
 }
 
 /// Decoded content-stream bytes, keyed by *canonical* stream object id, so a
@@ -221,36 +230,27 @@ fn gather_page_content(
     doc_budget: &mut usize,
     decoded_cache: &mut DecodedStreams,
 ) -> PageContent {
-    // A page costs something even with no `/Contents` at all: it is still looked
-    // up and walked. Page objects are the cheapest thing to mass-produce in a
-    // compressed object stream, and a page with no content references never
-    // enters the loop below, so without this the walk advances no budget.
-    *doc_budget = doc_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
-    if *doc_budget == 0 {
-        return PageContent::Exhausted;
-    }
-
     let mut content: Vec<u8> = Vec::new();
     for entry_id in doc.get_page_contents(page_id) {
+        // Charge the attempt before anything else — canonicalising, resolving and
+        // decoding all cost a lookup regardless of how they turn out, so an entry
+        // that resolves to nothing, or whose chain is too deep to follow, must not
+        // be free. A `/Contents` array of such entries is shareable across pages
+        // like any other array.
+        *doc_budget = doc_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+        if *doc_budget == 0 {
+            return PageContent::Exhausted;
+        }
         // Alias objects must collapse to the stream they name, or each alias is
         // a fresh cache miss and re-runs the filter chain.
-        let object_id = canonical_object_id(doc, entry_id);
+        let Some(object_id) = canonical_object_id(doc, entry_id) else {
+            continue;
+        };
         let bytes: Rc<Vec<u8>> = match decoded_cache.get(&object_id) {
             // Decoded already for an earlier page: no filter work to charge, only
             // the copy into `content` below.
             Some(cached) => Rc::clone(cached),
             None => {
-                // Charge the floor for *attempting* the reference, before knowing
-                // whether it resolves to a stream. The object lookup costs the
-                // same either way, and a `/Contents` array of references to
-                // dictionaries or missing objects — shareable across pages, like
-                // any other array — would otherwise be walked per page for free.
-                // Unresolvable ids are deliberately not cached, so each
-                // occurrence pays this.
-                *doc_budget = doc_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
-                if *doc_budget == 0 {
-                    return PageContent::Exhausted;
-                }
                 let Ok(stream) = doc.get_object(object_id).and_then(lopdf::Object::as_stream)
                 else {
                     continue;
@@ -276,9 +276,9 @@ fn gather_page_content(
         };
         // Charged on every reference, hit or miss: these bytes are copied into
         // this page's `content` even when the decode was cached, so the
-        // concatenation stays bounded independently of the filter work.
-        *doc_budget =
-            doc_budget.saturating_sub((bytes.len() + 1).max(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
+        // concatenation stays bounded independently of the filter work. The
+        // per-reference floor is already paid at the top of the loop.
+        *doc_budget = doc_budget.saturating_sub(bytes.len() + 1);
         if *doc_budget == 0 {
             return PageContent::Exhausted;
         }
@@ -348,6 +348,13 @@ fn extract_text_items(
 
     for (&page_num, &page_id) in &doc.get_pages() {
         if items.len() >= limits.items || text_bytes >= limits.text_bytes || op_budget == 0 {
+            break;
+        }
+        // Every page costs a floor, charged before any work and before any early
+        // exit, so no page can be walked for free. Page objects are the cheapest
+        // thing to mass-produce in a compressed object stream.
+        content_budget = content_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+        if content_budget == 0 {
             break;
         }
         let content_bytes =
@@ -755,6 +762,14 @@ fn extract_image_items(
 
     for (&page_num, &page_id) in &doc.get_pages() {
         if items.len() >= limits.items || op_budget == 0 {
+            break;
+        }
+        // Charged before resolving resources, which walks the `/Parent` chain and
+        // can `continue` out below. This pass has two early exits ahead of
+        // `gather_page_content`, so a floor charged only in there would leave
+        // resource-free pages free. See `extract_text_items`.
+        content_budget = content_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+        if content_budget == 0 {
             break;
         }
         // Step 1: XObject から画像情報を収集 (共有 resources なら memoise 済みを再利用)
@@ -2846,44 +2861,125 @@ mod tests {
         assert_eq!(cache.len(), 1, "the shared stream must be cached once");
     }
 
-    /// A page with no `/Contents` at all is still charged, so a page set that
-    /// costs nothing to produce cannot be walked for free.
+    /// A page with neither `/Contents` nor `/Resources` is still charged, in
+    /// *both* passes, so a page set that costs nothing to produce cannot be
+    /// walked for free.
+    ///
+    /// The charge lives at the top of each pass's page loop rather than inside
+    /// `gather_page_content`, because the image pass reaches that function only
+    /// after two early exits — resolving no resources, or collecting no images —
+    /// and a floor charged inside it would leave those pages free.
+    ///
+    /// Made observable by putting the cheap pages *first* and a page carrying
+    /// both text and an image last: with a budget the leading pages exhaust, the
+    /// final page is never reached.
     #[test]
-    fn limits_pages_without_content_are_charged() {
-        use lopdf::{Document, Object, dictionary};
+    fn limits_pages_without_content_are_charged_in_both_passes() {
+        use lopdf::{Document, Object, Stream, dictionary};
 
+        const EMPTIES: usize = 200;
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
-        // No /Contents entry: `get_page_contents` yields nothing.
-        let page_id = doc.add_object(dictionary! {
+        let mut kids = Vec::new();
+        // Neither /Contents nor /Resources: both passes exit early on these.
+        for _ in 0..EMPTIES {
+            kids.push(Object::Reference(doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(595), Object::Integer(842),
+                ],
+            })));
+        }
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => Object::Integer(4), "Height" => Object::Integer(4),
+                "ColorSpace" => "DeviceGray", "BitsPerComponent" => Object::Integer(8),
+            },
+            vec![0u8; 16],
+        ));
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+            "XObject" => dictionary! { "Im0" => Object::Reference(image_id) },
+        });
+        let content_id = doc.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (Reached) Tj ET\nq 50 0 0 50 0 0 cm /Im0 Do Q\n"
+                .to_vec(),
+        ));
+        kids.push(Object::Reference(doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
             "MediaBox" => vec![
                 Object::Integer(0), Object::Integer(0),
                 Object::Integer(595), Object::Integer(842),
             ],
-        });
+        })));
+        let count = kids.len() as i64;
         doc.objects.insert(
             pages_id,
             Object::Dictionary(dictionary! {
-                "Type" => "Pages",
-                "Kids" => vec![Object::Reference(page_id)],
-                "Count" => Object::Integer(1),
+                "Type" => "Pages", "Kids" => kids, "Count" => Object::Integer(count),
             }),
         );
         let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         doc.trailer.set("Root", Object::Reference(catalog_id));
         let mut buf = Vec::new();
         doc.save_to(&mut buf).unwrap();
-        let loaded = Document::load_mem(&buf).unwrap();
-        let page = *loaded.get_pages().values().next().unwrap();
 
-        let mut budget = PDF_CONTENT_STREAM_COST_FLOOR_BYTES;
-        assert!(matches!(
-            gather_page_content(&loaded, page, &mut budget, &mut DecodedStreams::new()),
-            PageContent::Exhausted
-        ));
-        assert_eq!(budget, 0, "a contentless page must still draw the budget");
+        let starved = InspectLimits {
+            content_total_bytes: EMPTIES * PDF_CONTENT_STREAM_COST_FLOOR_BYTES / 4,
+            ..InspectLimits::default()
+        };
+        let (text, images) = inspect_bytes_with_limits(&buf, &starved);
+        assert!(
+            text.is_empty(),
+            "text pass must charge cheap pages, got {text:?}"
+        );
+        assert!(images.is_empty(), "image pass must charge cheap pages too");
+
+        // With a budget that covers them, the final page is reached by both.
+        let (text, images) = inspect_bytes_with_limits(&buf, &InspectLimits::default());
+        assert_eq!(
+            text.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
+            ["Reached"]
+        );
+        assert_eq!(images.len(), 1);
+    }
+
+    /// An alias chain too deep to canonicalise is rejected rather than decoded
+    /// under a non-canonical key.
+    ///
+    /// `get_object` would begin a fresh `DEREF_LIMIT` from wherever the walk
+    /// stopped, so a mid-chain id would still resolve — giving each such alias its
+    /// own cache key for one shared stream.
+    #[test]
+    fn overlong_alias_chains_are_rejected() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let real = doc.add_object(Stream::new(dictionary! {}, b"BT ET".to_vec()));
+        // A chain of exactly MAX_PDF_PARENT_DEPTH links resolves.
+        let mut id = real;
+        for _ in 0..MAX_PDF_PARENT_DEPTH - 1 {
+            id = doc.add_object(Object::Reference(id));
+        }
+        assert_eq!(canonical_object_id(&doc, id), Some(real));
+
+        // One link further and it is rejected instead of half-resolved.
+        let too_deep = doc.add_object(Object::Reference(id));
+        assert_eq!(canonical_object_id(&doc, too_deep), None);
+
+        // A plain, non-reference id is its own canonical form.
+        assert_eq!(canonical_object_id(&doc, real), Some(real));
     }
 
     /// An `/XObject` reached through an alias object resolves to the same origin
