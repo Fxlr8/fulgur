@@ -181,6 +181,15 @@ fn gather_page_content(
 ) -> PageContent {
     let mut content: Vec<u8> = Vec::new();
     for object_id in doc.get_page_contents(page_id) {
+        // Charge the floor for *attempting* the reference, before knowing whether
+        // it resolves to a stream. The object lookup costs the same either way,
+        // and a `/Contents` array of references to dictionaries or missing
+        // objects — shareable across pages, like any other array — would
+        // otherwise be walked per page for free.
+        *doc_budget = doc_budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+        if *doc_budget == 0 {
+            return PageContent::Exhausted;
+        }
         let Ok(stream) = doc.get_object(object_id).and_then(lopdf::Object::as_stream) else {
             continue;
         };
@@ -189,14 +198,13 @@ fn gather_page_content(
             Ok(ref d) => d,
             Err(_) => &stream.content,
         };
-        // Charge the bytes this stream adds to `content` — its decoded length
-        // plus the separator appended below — but never less than the fixed cost
-        // of having resolved and decoded it at all. Charging only `bytes.len()`
-        // let a stream that decodes to *nothing* be free, so a `/Contents` array
-        // of many zero-length streams, shared across pages by one reference,
-        // could run for free. See `PDF_CONTENT_STREAM_COST_FLOOR_BYTES`.
-        *doc_budget =
-            doc_budget.saturating_sub((bytes.len() + 1).max(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
+        // Charge whatever this stream adds to `content` — its decoded length plus
+        // the separator appended below — beyond the floor already paid above. The
+        // total per stream is therefore `max(bytes + 1, floor)`: a stream that
+        // decodes to *nothing* still costs the floor, so many zero-length streams
+        // cannot be walked for free. See `PDF_CONTENT_STREAM_COST_FLOOR_BYTES`.
+        *doc_budget = doc_budget
+            .saturating_sub((bytes.len() + 1).saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
         if *doc_budget == 0 {
             return PageContent::Exhausted;
         }
@@ -464,14 +472,20 @@ fn extract_text_items(
 /// Find the `Resources` dictionary in effect for a page, following `/Parent`
 /// inheritance.
 ///
-/// Returns the dictionary *by reference* along with its object id when it was
-/// reached through an indirect reference. Both matter for bounding work: a
-/// resources dictionary is routinely shared by every page in a document, so
-/// cloning it — as this used to — made a page's cost proportional to the
-/// dictionary's size, and the id is what lets the caller recognise the sharing
-/// and scan it only once. `None` for the id means the dictionary is written
-/// inline, in which case no sharing is possible and its cost is already bounded
-/// by the file size.
+/// Returns the dictionary *by reference*, along with an identity the caller can
+/// use to recognise when two pages share it.
+///
+/// Both matter for bounding work: a resources dictionary is routinely shared by
+/// every page in a document, so cloning it — as this used to — made a page's cost
+/// proportional to the dictionary's size, and the identity is what lets the
+/// caller scan it only once.
+///
+/// The identity is [`ResourcesOrigin`], not simply the dereferenced object id,
+/// because a resources dictionary can be shared two different ways. An indirect
+/// `/Resources` reference is the obvious one. The other is a *direct* dictionary
+/// written inside a `/Pages` node, which has no object id of its own yet is
+/// inherited by every descendant page — so treating "no reference id" as
+/// "not shared" would rescan it once per page.
 ///
 /// A fixed depth bound guarantees termination on malformed inputs with cyclic
 /// (`A -> B -> A`) or pathologically long `/Parent` references, without needing
@@ -480,7 +494,7 @@ fn extract_text_items(
 fn resolve_page_resources(
     doc: &lopdf::Document,
     page_id: lopdf::ObjectId,
-) -> Option<(Option<lopdf::ObjectId>, &lopdf::Dictionary)> {
+) -> Option<(ResourcesOrigin, &lopdf::Dictionary)> {
     let mut current_id = page_id;
     for _ in 0..MAX_PDF_PARENT_DEPTH {
         let dict = match doc.get_object(current_id) {
@@ -489,7 +503,16 @@ fn resolve_page_resources(
         };
         if let Ok(res) = dict.get(b"Resources") {
             if let Ok((id, lopdf::Object::Dictionary(resources))) = doc.dereference(res) {
-                return Some((id, resources));
+                let origin = match id {
+                    // Indirect: every page naming this reference shares it.
+                    Some(id) => ResourcesOrigin::Shared(id),
+                    // Direct, but written on an ancestor node, so inherited by
+                    // every page beneath it.
+                    None if current_id != page_id => ResourcesOrigin::Shared(current_id),
+                    // Direct on this page: nothing else can reach it.
+                    None => ResourcesOrigin::Unique,
+                };
+                return Some((origin, resources));
             }
         }
         match dict.get(b"Parent").and_then(|p| p.as_reference()) {
@@ -498,6 +521,18 @@ fn resolve_page_resources(
         }
     }
     None
+}
+
+/// Whether a page's resources dictionary can be reached by other pages, and if
+/// so under what identity — the cache key for [`collect_image_xobjects`].
+#[derive(Debug, PartialEq, Eq)]
+enum ResourcesOrigin {
+    /// Reachable by other pages under this id: either an indirect `/Resources`
+    /// reference, or the page-tree node whose direct `/Resources` is inherited.
+    Shared(lopdf::ObjectId),
+    /// Written directly on the page itself, so no other page can reach it. Not
+    /// worth caching — and caching it would grow the cache once per page.
+    Unique,
 }
 
 /// Image XObjects declared by a page's resources: name -> (format, width_px,
@@ -580,12 +615,13 @@ fn extract_image_items(
         }
         // Step 1: XObject から画像情報を収集 (共有 resources なら memoise 済みを再利用)
         // Resources は親 /Pages ノードから継承される場合があるため、継承チェーンを辿る。
-        let Some((resources_id, resources)) = resolve_page_resources(doc, page_id) else {
+        let Some((origin, resources)) = resolve_page_resources(doc, page_id) else {
             continue;
         };
-        let image_xobjects: Rc<ImageXObjects> = match resources_id {
-            // Shared via an indirect reference: scan once, reuse per page.
-            Some(id) => match xobject_cache.get(&id) {
+        let image_xobjects: Rc<ImageXObjects> = match origin {
+            // Reachable by other pages: scan once, reuse for every page that
+            // shares it.
+            ResourcesOrigin::Shared(id) => match xobject_cache.get(&id) {
                 Some(cached) => Rc::clone(cached),
                 None => {
                     let scanned = Rc::new(collect_image_xobjects(doc, resources));
@@ -593,9 +629,9 @@ fn extract_image_items(
                     scanned
                 }
             },
-            // Written inline in the page, so it cannot be shared and its size is
-            // already charged to the file.
-            None => Rc::new(collect_image_xobjects(doc, resources)),
+            // Written directly on this page, so no other page can reach it and
+            // its size is already charged to the file.
+            ResourcesOrigin::Unique => Rc::new(collect_image_xobjects(doc, resources)),
         };
 
         if image_xobjects.is_empty() {
@@ -2155,6 +2191,124 @@ mod tests {
             text.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
             ["Reached"]
         );
+    }
+
+    /// A `/Contents` reference that does *not* resolve to a stream is still
+    /// charged the cost floor.
+    ///
+    /// The lookup costs the same whether it resolves or not, and a `/Contents`
+    /// array of references to dictionaries or missing objects is as shareable as
+    /// any other array — so skipping the charge would leave `pages × references`
+    /// work unbounded.
+    #[test]
+    fn limits_unresolvable_content_references_are_charged() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        // References that resolve to a dictionary rather than a stream, followed
+        // by a real text stream — so the charge is visible in the output.
+        const DUDS: usize = 200;
+        let dud = doc.add_object(dictionary! { "Type" => "ExampleNotAStream" });
+        let mut contents: Vec<Object> = vec![Object::Reference(dud); DUDS];
+        contents.push(Object::Reference(doc.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (Reached) Tj ET".to_vec(),
+        ))));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => contents,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let starved = InspectLimits {
+            content_total_bytes: DUDS * PDF_CONTENT_STREAM_COST_FLOOR_BYTES / 4,
+            ..InspectLimits::default()
+        };
+        let (text, _) = inspect_bytes_with_limits(&buf, &starved);
+        assert!(
+            text.is_empty(),
+            "non-stream references must draw down the budget, got {text:?}"
+        );
+
+        let ample = InspectLimits {
+            content_total_bytes: DUDS * PDF_CONTENT_STREAM_COST_FLOOR_BYTES * 4,
+            ..InspectLimits::default()
+        };
+        let (text, _) = inspect_bytes_with_limits(&buf, &ample);
+        assert_eq!(
+            text.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
+            ["Reached"]
+        );
+    }
+
+    /// A *direct* `/Resources` dictionary on a `/Pages` node has no object id of
+    /// its own, but is inherited by every descendant page — so it is shared, and
+    /// [`resolve_page_resources`] must report it as such or the image pass
+    /// rescans it once per page.
+    ///
+    /// [`ResourcesOrigin::Unique`] is reserved for a dictionary written directly
+    /// on the page itself, which nothing else can reach.
+    #[test]
+    fn resources_inherited_from_a_parent_node_are_reported_as_shared() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let inheriting = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+        });
+        let own_resources = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            // Direct dictionary on the page itself.
+            "Resources" => dictionary! { "ProcSet" => vec!["PDF".into()] },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(inheriting), Object::Reference(own_resources)],
+                "Count" => Object::Integer(2),
+                // Direct dictionary on the shared parent: no id, yet inherited.
+                "Resources" => dictionary! { "ProcSet" => vec!["Text".into()] },
+            }),
+        );
+
+        let (origin, _) = resolve_page_resources(&doc, inheriting).expect("inherited resources");
+        assert_eq!(
+            origin,
+            ResourcesOrigin::Shared(pages_id),
+            "a direct dictionary on an ancestor is shared by every descendant"
+        );
+
+        let (origin, _) = resolve_page_resources(&doc, own_resources).expect("own resources");
+        assert_eq!(origin, ResourcesOrigin::Unique);
     }
 
     /// The item budget stops extraction in both passes.
