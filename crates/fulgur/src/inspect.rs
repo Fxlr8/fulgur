@@ -687,20 +687,30 @@ type ImageXObjects = std::collections::BTreeMap<String, (String, u32, u32)>;
 /// per page. Non-image XObjects (`/Form`, …) are skipped, so a page can pay the
 /// full scan and collect nothing.
 ///
-/// Returns the collected images together with the number of entries examined, so
-/// the caller can charge the scan. Both the work and the retained result scale
-/// with that count, and neither is covered by the content or operation budgets:
-/// a page that collects no image skips content decoding entirely.
+/// Charges `budget` as it goes, one per-object-touch price per entry, and stops
+/// when it runs out. Charging *after* the scan would let a single oversized
+/// dictionary do all of the work — dereferencing every entry and cloning every
+/// image name — before any accounting applied, which is what the budget exists to
+/// prevent. Neither the content nor the operation budget covers this work
+/// otherwise: a page collecting no image skips content decoding entirely.
+///
+/// Returns the collected images and whether the budget survived the scan; `false`
+/// means the caller should stop walking pages.
 fn collect_image_xobjects(
     doc: &lopdf::Document,
     resources: &lopdf::Dictionary,
-) -> (ImageXObjects, usize) {
+    budget: &mut usize,
+) -> (ImageXObjects, bool) {
     let mut image_xobjects = ImageXObjects::new();
-    let mut examined = 0usize;
     if let Ok(xo) = resources.get(b"XObject") {
         if let Ok((_, lopdf::Object::Dictionary(xobjects))) = doc.dereference(xo) {
             for (name, obj_ref) in xobjects.iter() {
-                examined += 1;
+                // Charged before the dereference and the name clone below, so an
+                // over-budget dictionary stops partway instead of completing.
+                *budget = budget.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+                if *budget == 0 {
+                    return (image_xobjects, false);
+                }
                 if let Ok((_, lopdf::Object::Stream(xobj))) = doc.dereference(obj_ref) {
                     let subtype = xobj
                         .dict
@@ -729,7 +739,7 @@ fn collect_image_xobjects(
             }
         }
     }
-    (image_xobjects, examined)
+    (image_xobjects, true)
 }
 
 fn transform_point(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
@@ -783,17 +793,15 @@ fn extract_image_items(
         let image_xobjects: Rc<ImageXObjects> = match xobject_cache.get(&origin) {
             Some(cached) => Rc::clone(cached),
             None => {
-                let (scanned, examined) = collect_image_xobjects(doc, resources);
-                // Charge the scan: one dereference per entry, priced like any
-                // other object touch. This is what bounds the cache as well as
-                // the work — every insertion is preceded by a charge
-                // proportional to the entries it retains, so the whole cache is
-                // bounded by the content budget rather than by the page count.
-                content_budget =
-                    content_budget.saturating_sub(examined * PDF_CONTENT_STREAM_COST_FLOOR_BYTES);
+                // The scan charges as it walks, so an over-budget dictionary stops
+                // partway rather than completing and then being billed. This is
+                // what bounds the cache as well as the work: every insertion is
+                // preceded by charges proportional to the entries it retains.
+                let (scanned, within_budget) =
+                    collect_image_xobjects(doc, resources, &mut content_budget);
                 let scanned = Rc::new(scanned);
                 xobject_cache.insert(origin, Rc::clone(&scanned));
-                if content_budget == 0 {
+                if !within_budget {
                     break;
                 }
                 scanned
@@ -3155,6 +3163,19 @@ mod tests {
         };
         let (_, images) = inspect_bytes_with_limits(&buf, &starved);
         assert!(images.is_empty());
+
+        // The scan itself must stop partway rather than complete and then be
+        // billed: with a budget for a quarter of the entries, at most that many
+        // are examined. Asserted directly on `collect_image_xobjects`, since a
+        // completed-then-charged scan is indistinguishable from this one by its
+        // effect on `images` alone.
+        let doc = lopdf::Document::load_mem(&buf).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let (_, resources) = resolve_page_resources(&doc, page).expect("resources");
+        let mut budget = ENTRIES / 4 * PDF_CONTENT_STREAM_COST_FLOOR_BYTES;
+        let (_, within_budget) = collect_image_xobjects(&doc, resources, &mut budget);
+        assert!(!within_budget, "an over-budget scan must report exhaustion");
+        assert_eq!(budget, 0);
 
         // With the default budget the same document is walked without trouble,
         // and the shared dictionary is scanned once rather than once per page.
