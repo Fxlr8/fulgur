@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::{
     MAX_PDF_CONTENT_BYTES, MAX_PDF_FONT_NAME_BYTES, MAX_PDF_GS_STACK_DEPTH,
     MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES, MAX_PDF_INSPECT_ITEMS, MAX_PDF_INSPECT_OPERATIONS,
-    MAX_PDF_INSPECT_TEXT_BYTES, MAX_PDF_PARENT_DEPTH,
+    MAX_PDF_INSPECT_TEXT_BYTES, MAX_PDF_PARENT_DEPTH, PDF_CONTENT_STREAM_COST_FLOOR_BYTES,
 };
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -56,14 +56,47 @@ pub struct ImageItem {
     pub height_px: u32,
 }
 
+/// The whole-document resource budgets one `inspect` call may spend.
+///
+/// Held in a struct rather than read from the constants directly so that tests
+/// can drive each bound with a small budget. Reaching a production budget means
+/// actually doing the work it allows — 20M operations takes ~70 s in a debug
+/// build — which would otherwise force a choice between an untested bound and a
+/// constant sized for its test rather than for real documents.
+///
+/// [`Default`] is the production configuration; nothing outside tests
+/// constructs it any other way.
+struct InspectLimits {
+    /// See [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`].
+    content_total_bytes: usize,
+    /// See [`MAX_PDF_INSPECT_OPERATIONS`].
+    operations: usize,
+    /// See [`MAX_PDF_INSPECT_TEXT_BYTES`].
+    text_bytes: usize,
+    /// See [`MAX_PDF_INSPECT_ITEMS`].
+    items: usize,
+}
+
+impl Default for InspectLimits {
+    fn default() -> Self {
+        Self {
+            content_total_bytes: MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES,
+            operations: MAX_PDF_INSPECT_OPERATIONS,
+            text_bytes: MAX_PDF_INSPECT_TEXT_BYTES,
+            items: MAX_PDF_INSPECT_ITEMS,
+        }
+    }
+}
+
 pub fn inspect(path: &Path) -> crate::Result<InspectResult> {
     let doc = lopdf::Document::load(path)
         .map_err(|e| crate::Error::Other(format!("Failed to load PDF: {e}")))?;
 
+    let limits = InspectLimits::default();
     let pages = doc.get_pages().len() as u32;
     let metadata = extract_metadata(&doc);
-    let text_items = extract_text_items(&doc)?;
-    let images = extract_image_items(&doc)?;
+    let text_items = extract_text_items(&doc, &limits)?;
+    let images = extract_image_items(&doc, &limits)?;
 
     Ok(InspectResult {
         pages,
@@ -156,11 +189,17 @@ fn gather_page_content(
             Ok(ref d) => d,
             Err(_) => &stream.content,
         };
-        *doc_budget = doc_budget.saturating_sub(bytes.len());
+        // Charge the bytes this stream adds to `content` — its decoded length
+        // plus the separator appended below — but never less than the fixed cost
+        // of having resolved and decoded it at all. Charging only `bytes.len()`
+        // let a stream that decodes to *nothing* be free, so a `/Contents` array
+        // of many zero-length streams, shared across pages by one reference,
+        // could run for free. See `PDF_CONTENT_STREAM_COST_FLOOR_BYTES`.
+        *doc_budget =
+            doc_budget.saturating_sub((bytes.len() + 1).max(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
         if *doc_budget == 0 {
             return PageContent::Exhausted;
         }
-        // +1 for the `\n` separator appended after every stream.
         if content.len() + bytes.len() + 1 > MAX_PDF_CONTENT_BYTES {
             return PageContent::Skip;
         }
@@ -199,21 +238,21 @@ fn extract_metadata(doc: &lopdf::Document) -> Metadata {
     meta
 }
 
-fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
+fn extract_text_items(
+    doc: &lopdf::Document,
+    limits: &InspectLimits,
+) -> crate::Result<Vec<TextItem>> {
     use lopdf::content::Operation;
     let mut items = Vec::new();
     // Whole-document budgets. Page count is bounded only by input size, so the
     // per-page content bound and the record *count* cap both leave a document
     // total unbounded — see the constants for the measured shapes.
-    let mut content_budget = MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES;
-    let mut op_budget = MAX_PDF_INSPECT_OPERATIONS;
+    let mut content_budget = limits.content_total_bytes;
+    let mut op_budget = limits.operations;
     let mut text_bytes: usize = 0;
 
     for (&page_num, &page_id) in &doc.get_pages() {
-        if items.len() >= MAX_PDF_INSPECT_ITEMS
-            || text_bytes >= MAX_PDF_INSPECT_TEXT_BYTES
-            || op_budget == 0
-        {
+        if items.len() >= limits.items || text_bytes >= limits.text_bytes || op_budget == 0 {
             break;
         }
         let content_bytes = match gather_page_content(doc, page_id, &mut content_budget) {
@@ -257,7 +296,7 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
         let mut text_leading: f32 = 0.0;
 
         for Operation { operator, operands } in &content.operations {
-            if items.len() >= MAX_PDF_INSPECT_ITEMS || text_bytes >= MAX_PDF_INSPECT_TEXT_BYTES {
+            if items.len() >= limits.items || text_bytes >= limits.text_bytes {
                 break;
             }
             // Inside a `q` frame dropped for exceeding MAX_PDF_GS_STACK_DEPTH.
@@ -422,24 +461,35 @@ fn extract_text_items(doc: &lopdf::Document) -> crate::Result<Vec<TextItem>> {
     Ok(items)
 }
 
+/// Find the `Resources` dictionary in effect for a page, following `/Parent`
+/// inheritance.
+///
+/// Returns the dictionary *by reference* along with its object id when it was
+/// reached through an indirect reference. Both matter for bounding work: a
+/// resources dictionary is routinely shared by every page in a document, so
+/// cloning it — as this used to — made a page's cost proportional to the
+/// dictionary's size, and the id is what lets the caller recognise the sharing
+/// and scan it only once. `None` for the id means the dictionary is written
+/// inline, in which case no sharing is possible and its cost is already bounded
+/// by the file size.
+///
+/// A fixed depth bound guarantees termination on malformed inputs with cyclic
+/// (`A -> B -> A`) or pathologically long `/Parent` references, without needing
+/// a heap-allocated visited set — real page trees are shallow enough that
+/// [`MAX_PDF_PARENT_DEPTH`] is orders of magnitude above any legitimate document.
 fn resolve_page_resources(
     doc: &lopdf::Document,
     page_id: lopdf::ObjectId,
-) -> Option<lopdf::Dictionary> {
-    // Walk the page's Parent chain to find an inherited Resources dictionary.
-    // A fixed depth bound guarantees termination on malformed inputs with cyclic
-    // (`A -> B -> A`) or pathologically long `/Parent` references, without needing
-    // a heap-allocated visited set — real page trees are shallow enough that
-    // `MAX_PDF_PARENT_DEPTH` is orders of magnitude above any legitimate document.
+) -> Option<(Option<lopdf::ObjectId>, &lopdf::Dictionary)> {
     let mut current_id = page_id;
     for _ in 0..MAX_PDF_PARENT_DEPTH {
         let dict = match doc.get_object(current_id) {
-            Ok(lopdf::Object::Dictionary(d)) => d.clone(),
+            Ok(lopdf::Object::Dictionary(d)) => d,
             _ => return None,
         };
         if let Ok(res) = dict.get(b"Resources") {
-            if let Ok((_, lopdf::Object::Dictionary(resources))) = doc.dereference(res) {
-                return Some(resources.clone());
+            if let Ok((id, lopdf::Object::Dictionary(resources))) = doc.dereference(res) {
+                return Some((id, resources));
             }
         }
         match dict.get(b"Parent").and_then(|p| p.as_reference()) {
@@ -450,60 +500,103 @@ fn resolve_page_resources(
     None
 }
 
-fn transform_point(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
-    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
-}
+/// Image XObjects declared by a page's resources: name -> (format, width_px,
+/// height_px).
+type ImageXObjects = std::collections::BTreeMap<String, (String, u32, u32)>;
 
-fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
-    let mut items = Vec::new();
-    // Each pass decodes content independently, so each carries its own
-    // whole-document budget. See `extract_text_items`.
-    let mut content_budget = MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES;
-    let mut op_budget = MAX_PDF_INSPECT_OPERATIONS;
-
-    for (&page_num, &page_id) in &doc.get_pages() {
-        if items.len() >= MAX_PDF_INSPECT_ITEMS || op_budget == 0 {
-            break;
-        }
-        // Step 1: XObject から画像情報を一時 map に収集
-        // Resources は親 /Pages ノードから継承される場合があるため、継承チェーンを辿る。
-        // key = XObject name, value = (format, width_px, height_px)
-        let mut image_xobjects: std::collections::BTreeMap<String, (String, u32, u32)> =
-            std::collections::BTreeMap::new();
-
-        if let Some(resources) = resolve_page_resources(doc, page_id) {
-            if let Ok(xo) = resources.get(b"XObject") {
-                if let Ok((_, lopdf::Object::Dictionary(xobjects))) = doc.dereference(xo) {
-                    for (name, obj_ref) in xobjects.iter() {
-                        if let Ok((_, lopdf::Object::Stream(xobj))) = doc.dereference(obj_ref) {
-                            let subtype = xobj
-                                .dict
-                                .get(b"Subtype")
-                                .ok()
-                                .and_then(|o| obj_as_name_str(o))
-                                .unwrap_or_default();
-                            if subtype == "Image" {
-                                let fmt = detect_image_format(&xobj.dict);
-                                let w_px = xobj
-                                    .dict
-                                    .get(b"Width")
-                                    .ok()
-                                    .and_then(|o| o.as_i64().ok())
-                                    .unwrap_or(0) as u32;
-                                let h_px = xobj
-                                    .dict
-                                    .get(b"Height")
-                                    .ok()
-                                    .and_then(|o| o.as_i64().ok())
-                                    .unwrap_or(0) as u32;
-                                let name_str = String::from_utf8_lossy(name).into_owned();
-                                image_xobjects.insert(name_str, (fmt, w_px, h_px));
-                            }
-                        }
+/// Collect the image XObjects a page's resources declare.
+///
+/// Dereferences every entry of the `/XObject` dictionary to check its
+/// `/Subtype`, so the cost is proportional to that dictionary's size — which is
+/// why [`extract_image_items`] memoises the result rather than repeating this
+/// per page. Non-image XObjects (`/Form`, …) are skipped, so a page can pay the
+/// full scan and collect nothing.
+fn collect_image_xobjects(doc: &lopdf::Document, resources: &lopdf::Dictionary) -> ImageXObjects {
+    let mut image_xobjects = ImageXObjects::new();
+    if let Ok(xo) = resources.get(b"XObject") {
+        if let Ok((_, lopdf::Object::Dictionary(xobjects))) = doc.dereference(xo) {
+            for (name, obj_ref) in xobjects.iter() {
+                if let Ok((_, lopdf::Object::Stream(xobj))) = doc.dereference(obj_ref) {
+                    let subtype = xobj
+                        .dict
+                        .get(b"Subtype")
+                        .ok()
+                        .and_then(|o| obj_as_name_str(o))
+                        .unwrap_or_default();
+                    if subtype == "Image" {
+                        let fmt = detect_image_format(&xobj.dict);
+                        let w_px = xobj
+                            .dict
+                            .get(b"Width")
+                            .ok()
+                            .and_then(|o| o.as_i64().ok())
+                            .unwrap_or(0) as u32;
+                        let h_px = xobj
+                            .dict
+                            .get(b"Height")
+                            .ok()
+                            .and_then(|o| o.as_i64().ok())
+                            .unwrap_or(0) as u32;
+                        let name_str = String::from_utf8_lossy(name).into_owned();
+                        image_xobjects.insert(name_str, (fmt, w_px, h_px));
                     }
                 }
             }
         }
+    }
+    image_xobjects
+}
+
+fn transform_point(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+fn extract_image_items(
+    doc: &lopdf::Document,
+    limits: &InspectLimits,
+) -> crate::Result<Vec<ImageItem>> {
+    let mut items = Vec::new();
+    // Each pass decodes content independently, so each carries its own
+    // whole-document budget. See `extract_text_items`.
+    let mut content_budget = limits.content_total_bytes;
+    let mut op_budget = limits.operations;
+    // Memoised `collect_image_xobjects` results, keyed by the object id of the
+    // resources dictionary they were scanned from.
+    //
+    // A resources dictionary is normally shared by every page in a document, and
+    // scanning it costs one dereference per `/XObject` entry. Without this, a
+    // page's cost is proportional to that dictionary's size even when the scan
+    // finds no image at all — and a page that collects nothing goes on to skip
+    // content decoding, so it charges neither the content nor the operation
+    // budget. Work was therefore proportional to `pages × XObjects` while the
+    // file stores each dimension once. Measured: 4,000 non-image XObjects shared
+    // by 2,400 pages is 0.55 MB on disk, and the cost grew with the page count.
+    let mut xobject_cache: std::collections::BTreeMap<lopdf::ObjectId, Rc<ImageXObjects>> =
+        std::collections::BTreeMap::new();
+
+    for (&page_num, &page_id) in &doc.get_pages() {
+        if items.len() >= limits.items || op_budget == 0 {
+            break;
+        }
+        // Step 1: XObject から画像情報を収集 (共有 resources なら memoise 済みを再利用)
+        // Resources は親 /Pages ノードから継承される場合があるため、継承チェーンを辿る。
+        let Some((resources_id, resources)) = resolve_page_resources(doc, page_id) else {
+            continue;
+        };
+        let image_xobjects: Rc<ImageXObjects> = match resources_id {
+            // Shared via an indirect reference: scan once, reuse per page.
+            Some(id) => match xobject_cache.get(&id) {
+                Some(cached) => Rc::clone(cached),
+                None => {
+                    let scanned = Rc::new(collect_image_xobjects(doc, resources));
+                    xobject_cache.insert(id, Rc::clone(&scanned));
+                    scanned
+                }
+            },
+            // Written inline in the page, so it cannot be shared and its size is
+            // already charged to the file.
+            None => Rc::new(collect_image_xobjects(doc, resources)),
+        };
 
         if image_xobjects.is_empty() {
             continue;
@@ -528,7 +621,7 @@ fn extract_image_items(doc: &lopdf::Document) -> crate::Result<Vec<ImageItem>> {
         // `Q` operators unwind them rather than popping a real entry.
         let mut dropped_pushes: usize = 0;
         for op in &content.operations {
-            if items.len() >= MAX_PDF_INSPECT_ITEMS {
+            if items.len() >= limits.items {
                 break;
             }
             // See `extract_text_items`: the contents of a `q` frame dropped for
@@ -1183,7 +1276,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(resolve_page_resources(&doc, (1, 0)), None);
+        assert!(resolve_page_resources(&doc, (1, 0)).is_none());
     }
 
     // --- Resource bounds on attacker-controlled content streams ---
@@ -1879,6 +1972,10 @@ mod tests {
     /// which the per-page bound cannot: every page re-pays it, and page count is
     /// bounded only by input size.
     ///
+    /// Runs at the production budget, which is affordable here because the filler
+    /// is whitespace. The `limits_*` tests below cover the same stop conditions
+    /// at small budgets; this one additionally pins the real constant.
+    ///
     /// Asserted through the page walk stopping early — later pages carry the
     /// same extractable record as earlier ones, so a document of `pages` pages
     /// yielding fewer than `pages` records can only have been truncated.
@@ -1897,54 +1994,6 @@ mod tests {
             !result.text_items.is_empty(),
             "pages within the budget must still be extracted"
         );
-        assert!(
-            result.text_items.len() < pages,
-            "expected truncation: got {} records from {} pages",
-            result.text_items.len(),
-            pages
-        );
-    }
-
-    /// [`MAX_PDF_INSPECT_OPERATIONS`] bounds operator work, which a byte budget
-    /// cannot do tightly: a `q` is 2 input bytes and ~570 bytes of operation
-    /// list, so operator-dense content buys ~285× the work per byte that
-    /// [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`] is calibrated against.
-    ///
-    /// The page carries a `Tj` so each page within budget yields a record, which
-    /// is what makes the truncation observable; the rest is bare `q` operators.
-    ///
-    /// `#[ignore]`d because tripping this bound means decoding tens of millions
-    /// of operations — ~70 s in a debug build — and there is no cheaper way in:
-    /// the per-page content bound caps a page at ~500k operations, so the budget
-    /// can only be reached by paying for it. Unlike the byte and text budgets,
-    /// this one cannot be exercised quickly, and the constant is chosen for
-    /// where realistic content sits (see [`MAX_PDF_INSPECT_OPERATIONS`]) rather
-    /// than for testability. Run with:
-    ///
-    /// ```text
-    /// cargo test -p fulgur --lib --release aggregate_operation_count -- --ignored
-    /// ```
-    #[test]
-    #[ignore = "decodes >20M operations to reach the bound; ~70s debug, run explicitly"]
-    fn aggregate_operation_count_is_capped_across_pages() {
-        const OPS_PER_PAGE: usize = 64 * 1024;
-        let payload = {
-            let mut p = b"BT /F1 12 Tf (P) Tj ET\n".to_vec();
-            p.extend_from_slice(&b"q\n".repeat(OPS_PER_PAGE));
-            p
-        };
-        assert!(payload.len() <= MAX_PDF_CONTENT_BYTES);
-        // Well under the byte budget at this page count, so only the operation
-        // budget can stop the walk — that is the point of the test.
-        let pages = (MAX_PDF_INSPECT_OPERATIONS / OPS_PER_PAGE) * 3 / 2;
-        assert!(
-            pages * (payload.len() + 1) < MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES,
-            "byte budget must not be the binding constraint here"
-        );
-
-        let result = inspect_bytes(&make_pdf_with_shared_content_stream(pages, payload, false));
-        assert_eq!(result.pages as usize, pages);
-        assert!(!result.text_items.is_empty());
         assert!(
             result.text_items.len() < pages,
             "expected truncation: got {} records from {} pages",
@@ -1973,6 +2022,154 @@ mod tests {
             result.images.len(),
             pages
         );
+    }
+
+    /// Run both extraction passes against explicit [`InspectLimits`].
+    ///
+    /// Small budgets reach a stop condition in milliseconds. The alternative is
+    /// paying for the production budget: 20M operations is ~70 s in a debug
+    /// build, and the per-page content bound caps a page at ~500k operations, so
+    /// there is no shortcut to it.
+    fn inspect_bytes_with_limits(
+        bytes: &[u8],
+        limits: &InspectLimits,
+    ) -> (Vec<TextItem>, Vec<ImageItem>) {
+        let doc = lopdf::Document::load_mem(bytes).expect("test PDF must load");
+        (
+            extract_text_items(&doc, limits).expect("text extraction must not error"),
+            extract_image_items(&doc, limits).expect("image extraction must not error"),
+        )
+    }
+
+    /// A document of `pages` identical pages, each carrying one extractable text
+    /// record and one image placement, plus `ops_per_page` bare `q` operators.
+    fn limits_fixture(pages: usize, ops_per_page: usize) -> Vec<u8> {
+        let mut payload = b"BT /F1 12 Tf (P) Tj ET\nq 50 0 0 50 0 0 cm /Im0 Do Q\n".to_vec();
+        payload.extend_from_slice(&b"q\n".repeat(ops_per_page));
+        make_pdf_with_shared_content_stream(pages, payload, true)
+    }
+
+    /// The operation budget stops the page walk in both passes.
+    ///
+    /// This is the bound a byte budget cannot cover tightly — a `q` is 2 input
+    /// bytes and ~570 bytes of operation list, ~285× the work per byte that
+    /// [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`] is calibrated against — so it
+    /// needs its own coverage. The other budgets are set high enough here that
+    /// only this one can bind.
+    #[test]
+    fn limits_operation_budget_stops_the_page_walk() {
+        const PAGES: usize = 40;
+        const OPS_PER_PAGE: usize = 100;
+        let pdf = limits_fixture(PAGES, OPS_PER_PAGE);
+
+        let limits = InspectLimits {
+            // Enough for a few pages, not for all of them.
+            operations: OPS_PER_PAGE * PAGES / 4,
+            ..InspectLimits::default()
+        };
+        let (text, images) = inspect_bytes_with_limits(&pdf, &limits);
+
+        assert!(
+            !text.is_empty() && text.len() < PAGES,
+            "text {}",
+            text.len()
+        );
+        assert!(
+            !images.is_empty() && images.len() < PAGES,
+            "images {}",
+            images.len()
+        );
+
+        // Same input, ample operation budget: nothing is truncated. This is what
+        // shows the truncation above came from the operation budget and not from
+        // some other property of the fixture.
+        let (text, images) = inspect_bytes_with_limits(&pdf, &InspectLimits::default());
+        assert_eq!(text.len(), PAGES);
+        assert_eq!(images.len(), PAGES);
+    }
+
+    /// The whole-document content budget stops the page walk in both passes.
+    #[test]
+    fn limits_content_budget_stops_the_page_walk() {
+        const PAGES: usize = 40;
+        let pdf = limits_fixture(PAGES, 0);
+
+        let limits = InspectLimits {
+            content_total_bytes: 512,
+            ..InspectLimits::default()
+        };
+        let (text, images) = inspect_bytes_with_limits(&pdf, &limits);
+        assert!(text.len() < PAGES, "text {}", text.len());
+        assert!(images.len() < PAGES, "images {}", images.len());
+    }
+
+    /// The text-byte budget stops extraction, and does so independently of the
+    /// record count — the item budget stays at its default here.
+    #[test]
+    fn limits_text_byte_budget_stops_extraction() {
+        const PAGES: usize = 40;
+        let pdf = limits_fixture(PAGES, 0);
+
+        let limits = InspectLimits {
+            text_bytes: 8,
+            ..InspectLimits::default()
+        };
+        let (text, _) = inspect_bytes_with_limits(&pdf, &limits);
+        assert!(!text.is_empty(), "the first record is always admitted");
+        assert!(text.len() < PAGES, "text {}", text.len());
+    }
+
+    /// A content stream is charged at least
+    /// [`PDF_CONTENT_STREAM_COST_FLOOR_BYTES`] even when it decodes to nothing,
+    /// so a `/Contents` array of many zero-length streams cannot be walked for
+    /// free.
+    ///
+    /// The real text stream sits *after* the empty ones, so it is only reached if
+    /// the empties did not exhaust the budget — which makes the charge
+    /// observable in the extracted output.
+    #[test]
+    fn limits_empty_content_streams_are_charged_a_cost_floor() {
+        const EMPTIES: usize = 200;
+        let mut streams = vec![Vec::new(); EMPTIES];
+        streams.push(b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (Reached) Tj ET".to_vec());
+        let pdf = make_pdf_with_multiple_content_streams(streams);
+
+        // The empty streams alone cost EMPTIES * floor, well over this budget.
+        let starved = InspectLimits {
+            content_total_bytes: EMPTIES * PDF_CONTENT_STREAM_COST_FLOOR_BYTES / 4,
+            ..InspectLimits::default()
+        };
+        let (text, _) = inspect_bytes_with_limits(&pdf, &starved);
+        assert!(
+            text.is_empty(),
+            "zero-length streams must draw down the budget, got {text:?}"
+        );
+
+        // With a budget that covers them, the same document reaches the text.
+        let ample = InspectLimits {
+            content_total_bytes: EMPTIES * PDF_CONTENT_STREAM_COST_FLOOR_BYTES * 4,
+            ..InspectLimits::default()
+        };
+        let (text, _) = inspect_bytes_with_limits(&pdf, &ample);
+        assert_eq!(
+            text.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
+            ["Reached"]
+        );
+    }
+
+    /// The item budget stops extraction in both passes.
+    #[test]
+    fn limits_item_budget_stops_extraction() {
+        const PAGES: usize = 40;
+        let pdf = limits_fixture(PAGES, 0);
+
+        let limits = InspectLimits {
+            items: 5,
+            ..InspectLimits::default()
+        };
+        let (text, images) = inspect_bytes_with_limits(&pdf, &limits);
+        assert_eq!(text.len(), 5);
+        assert_eq!(images.len(), 5);
     }
 
     /// The whole-document content budget is charged for pages that are *skipped*

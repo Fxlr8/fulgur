@@ -273,6 +273,23 @@ pub(crate) const MAX_PDF_CONTENT_BYTES: usize = 1024 * 1024;
 /// and this bound never binds first.
 pub(crate) const MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES: usize = 128 * 1024 * 1024;
 
+/// Minimum charge against [`MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES`] for touching
+/// one content stream, regardless of how few bytes it decodes to.
+///
+/// Charging a stream only for its decoded length undercounts it: resolving the
+/// object and calling `decompressed_content` costs the same whether the result
+/// is one byte or none. A `/Contents` array of many *zero-length* streams —
+/// itself shareable across pages by one indirect reference — would otherwise
+/// draw the budget down by ~1 byte per stream, so a 1.8 MB file could keep
+/// `inspect` busy for tens of seconds: measured, 300k such refs across 320 pages
+/// took 9.9 s and grew linearly with the page count.
+///
+/// 512 bytes puts the document-wide ceiling at ~262k streams, which real
+/// documents are nowhere near — a page carries one content stream, or a few
+/// dozen at worst — while keeping the pathological case in the tens of
+/// milliseconds.
+pub(crate) const PDF_CONTENT_STREAM_COST_FLOOR_BYTES: usize = 512;
+
 /// Whole-document budget on how many decoded content-stream *operations*
 /// [`inspect::inspect`] will walk, across all pages, in each of its two passes.
 ///
