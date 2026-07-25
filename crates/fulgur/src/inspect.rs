@@ -94,7 +94,10 @@ pub fn inspect(path: &Path) -> crate::Result<InspectResult> {
         .map_err(|e| crate::Error::Other(format!("Failed to load PDF: {e}")))?;
 
     let limits = InspectLimits::default();
-    let pages = doc.get_pages().len() as u32;
+    // `get_pages()` is `page_iter().enumerate().collect()`, so counting straight
+    // off the iterator is the same walk without materialising a `BTreeMap` whose
+    // size is bounded only by the document's object count.
+    let pages = doc.page_iter().count() as u32;
     let metadata = extract_metadata(&doc);
     let text_items = extract_text_items(&doc, &limits)?;
     let images = extract_image_items(&doc, &limits)?;
@@ -157,16 +160,38 @@ fn clamp_font_name(name: &str) -> &str {
 /// of precisely [`MAX_PDF_PARENT_DEPTH`] references resolves there and must
 /// resolve here too. Returning `None` one link early would silently skip a stream
 /// the previous extraction path read.
-fn canonical_object_id(doc: &lopdf::Document, mut id: lopdf::ObjectId) -> Option<lopdf::ObjectId> {
-    for _ in 0..=MAX_PDF_PARENT_DEPTH {
+fn canonical_object_id(doc: &lopdf::Document, id: lopdf::ObjectId) -> Option<lopdf::ObjectId> {
+    let mut hops = MAX_PDF_PARENT_DEPTH;
+    canonical_object_id_within(doc, id, &mut hops)
+}
+
+/// [`canonical_object_id`] against a caller-owned hop budget, for walks that
+/// canonicalise repeatedly and must bound the *total* rather than each chain.
+///
+/// Spends one hop per reference followed and decrements `hops` in place, so a
+/// caller threading one budget through many calls pays for every hop once.
+/// Probing the target costs nothing, which is what keeps a fresh
+/// `MAX_PDF_PARENT_DEPTH` budget exactly equivalent to lopdf's `DEREF_LIMIT`:
+/// 128 references resolve, 129 do not.
+fn canonical_object_id_within(
+    doc: &lopdf::Document,
+    mut id: lopdf::ObjectId,
+    hops: &mut usize,
+) -> Option<lopdf::ObjectId> {
+    loop {
         match doc.objects.get(&id) {
-            Some(lopdf::Object::Reference(next)) => id = *next,
+            Some(lopdf::Object::Reference(next)) => {
+                if *hops == 0 {
+                    return None;
+                }
+                *hops -= 1;
+                id = *next;
+            }
             // Not a reference (the target), or absent — either way this is the id
             // the chain names; a missing object is skipped downstream.
             _ => return Some(id),
         }
     }
-    None
 }
 
 /// Decoded content-stream bytes, keyed by *canonical* stream object id, so a
@@ -353,7 +378,13 @@ fn extract_text_items(
     let mut text_bytes: usize = 0;
     let mut decoded_cache = DecodedStreams::new();
 
-    for (&page_num, &page_id) in &doc.get_pages() {
+    // Iterated lazily rather than through `get_pages()`, which collects the whole
+    // page tree into a `BTreeMap` before the first budget check can break. Page
+    // entries are cheap to mass-produce, so that traversal and allocation ran in
+    // full even when page 1 exhausted a budget. `get_pages()` numbers pages
+    // `enumerate() + 1` off this same iterator, so the numbering is unchanged.
+    for (i, page_id) in doc.page_iter().enumerate() {
+        let page_num = (i + 1) as u32;
         if items.len() >= limits.items || text_bytes >= limits.text_bytes || op_budget == 0 {
             break;
         }
@@ -589,18 +620,30 @@ fn extract_text_items(
 /// (`A -> B -> A`) or pathologically long `/Parent` references, without needing
 /// a heap-allocated visited set — real page trees are shallow enough that
 /// [`MAX_PDF_PARENT_DEPTH`] is orders of magnitude above any legitimate document.
+///
+/// That bound is a single budget **shared** between the `/Parent` walk and the
+/// alias canonicalisation at each node, not one bound per axis. Nesting them
+/// would multiply: `/Parent` references may themselves be alias chains, so
+/// per-axis bounds let one page occurrence cost `MAX_PDF_PARENT_DEPTH` squared
+/// object lookups — 16k rather than 128 — while the caller charges only the
+/// per-page floor. A page repeated across `/Kids` then replays that cost per
+/// occurrence, and a 1.5 MB file spent 16.7 s here against a 128 MiB budget it
+/// never came close to using. Sharing the budget keeps the total probes per page
+/// a small constant and, since no legitimate document has aliased `/Parent`
+/// links at all, costs real inputs nothing.
 fn resolve_page_resources(
     doc: &lopdf::Document,
     page_id: lopdf::ObjectId,
 ) -> Option<(ResourcesOrigin, &lopdf::Dictionary)> {
     let mut current_id = page_id;
-    for _ in 0..MAX_PDF_PARENT_DEPTH {
+    let mut hops = MAX_PDF_PARENT_DEPTH;
+    loop {
         // Canonicalise before both the lookup and the identity: page-tree `Kids`
         // entries and `/Parent` back-references may be alias objects, and
         // `get_object` follows them silently. Keying `DirectIn` on the immediate
         // id would hand one shared page dictionary a distinct identity per alias,
         // so the cache would rescan and retain a separate map for each.
-        let owner_id = canonical_object_id(doc, current_id)?;
+        let owner_id = canonical_object_id_within(doc, current_id, &mut hops)?;
         let dict = match doc.get_object(owner_id) {
             Ok(lopdf::Object::Dictionary(d)) => d,
             _ => return None,
@@ -617,12 +660,19 @@ fn resolve_page_resources(
                 return Some((origin, resources));
             }
         }
+        // Following `/Parent` is a hop against the same budget, so a chain of
+        // ancestors and a chain of aliases cannot be spent independently.
         match dict.get(b"Parent").and_then(|p| p.as_reference()) {
-            Ok(parent_id) => current_id = parent_id,
+            Ok(parent_id) => {
+                if hops == 0 {
+                    return None;
+                }
+                hops -= 1;
+                current_id = parent_id;
+            }
             Err(_) => return None,
         }
     }
-    None
 }
 
 /// Identity of the resources dictionary in effect for a page — the cache key for
@@ -783,7 +833,9 @@ fn extract_image_items(
     let mut xobject_cache: std::collections::BTreeMap<XObjectsOrigin, Rc<ImageXObjects>> =
         std::collections::BTreeMap::new();
 
-    for (&page_num, &page_id) in &doc.get_pages() {
+    // Lazy for the same reason as the text pass — see there.
+    for (i, page_id) in doc.page_iter().enumerate() {
+        let page_num = (i + 1) as u32;
         if items.len() >= limits.items || op_budget == 0 {
             break;
         }
@@ -1520,6 +1572,76 @@ mod tests {
         );
 
         assert!(resolve_page_resources(&doc, (1, 0)).is_none());
+    }
+
+    /// The `/Parent` walk and the alias canonicalisation at each node draw on one
+    /// shared hop budget, so spending on one axis reduces the other.
+    ///
+    /// Bounding each axis separately multiplies them: `/Parent` references may
+    /// themselves be alias chains, so `MAX_PDF_PARENT_DEPTH` ancestors each
+    /// reached through `MAX_PDF_PARENT_DEPTH` aliases costs that bound *squared*
+    /// in object lookups for a single page, replayed per occurrence when the page
+    /// is repeated across `/Kids` — all for one per-page floor charge.
+    #[test]
+    fn parent_walk_and_alias_hops_share_one_budget() {
+        use lopdf::{Document, Object, dictionary};
+
+        /// Page -> `depth` ancestors, each `/Parent` reference reached through
+        /// `alias` reference objects, with `/Resources` on the last ancestor.
+        /// Reaching it costs `depth` parent hops plus `depth * alias` alias hops.
+        fn resolves(depth: usize, alias: usize) -> bool {
+            let mut doc = Document::new();
+            let resources = doc.add_object(dictionary! { "XObject" => Object::Null });
+            let page_id = doc.new_object_id();
+            let mut prev = page_id;
+            for step in 0..depth {
+                // The ancestor `prev` will point at, behind `alias` aliases.
+                let node = doc.new_object_id();
+                let mut target = node;
+                for _ in 0..alias {
+                    target = doc.add_object(Object::Reference(target));
+                }
+                let dict = if step + 1 == depth {
+                    dictionary! { "Type" => "Pages", "Resources" => resources }
+                } else {
+                    dictionary! { "Type" => "Pages" }
+                };
+                doc.objects.insert(node, Object::Dictionary(dict));
+                let parented = match doc.objects.remove(&prev) {
+                    Some(Object::Dictionary(mut d)) => {
+                        d.set("Parent", Object::Reference(target));
+                        d
+                    }
+                    _ => dictionary! {
+                        "Type" => if prev == page_id { "Page" } else { "Pages" },
+                        "Parent" => Object::Reference(target),
+                    },
+                };
+                doc.objects.insert(prev, Object::Dictionary(parented));
+                prev = node;
+            }
+            resolve_page_resources(&doc, page_id).is_some()
+        }
+
+        // Neither axis alone exceeds the budget.
+        assert!(resolves(4, 0), "4 ancestors, no aliases");
+        assert!(
+            resolves(MAX_PDF_PARENT_DEPTH, 0),
+            "ancestors up to the bound"
+        );
+        assert!(
+            !resolves(MAX_PDF_PARENT_DEPTH + 1, 0),
+            "one ancestor past the bound must be refused",
+        );
+
+        // Combined, they are charged against the same budget. 4 * (31 + 1) is
+        // exactly MAX_PDF_PARENT_DEPTH hops; one alias more is over.
+        assert!(resolves(4, 31), "4 * 32 == MAX_PDF_PARENT_DEPTH hops");
+        assert!(
+            !resolves(4, 32),
+            "4 * 33 hops must be refused — per-axis bounds would allow this, \
+             since 4 ancestors and 32 aliases are each far inside the bound",
+        );
     }
 
     // --- Resource bounds on attacker-controlled content streams ---
