@@ -830,4 +830,104 @@ mod tests {
             run.glyphs[0].id
         );
     }
+
+    // ── find_marker_font: whitespace-only string marker ───────────────────────
+
+    #[test]
+    fn find_marker_font_whitespace_only_string_matches_any_valid_font() {
+        // Marker::String("   ") → marker_to_string = "   " → check_chars = [] (all filtered).
+        // check_chars.iter().all(|&c| charmap.map(c).is_some()) is vacuously true
+        // for an empty iterator, so the first valid font face in the bundle is
+        // returned regardless of charmap coverage.
+        let font_data = load_noto_sans_ttf();
+        let mut bundle = AssetBundle::new();
+        bundle.fonts.push(Arc::clone(&font_data));
+        let drawables = Drawables::new();
+
+        let result = find_marker_font(
+            &Marker::String("   ".to_string()),
+            Some(&bundle),
+            &drawables,
+        );
+        assert!(
+            result.is_some(),
+            "whitespace-only marker: empty check_chars must vacuously match any font face"
+        );
+        let (_, idx) = result.unwrap();
+        assert_eq!(idx, 0, "must return the first sub-font (index 0)");
+    }
+
+    // ── smoke tests: resolve_list_marker SVG arm and Unknown arm ─────────────
+    //
+    // These exercises cover branches in `resolve_list_marker` and
+    // `resolve_inside_image_marker` that require a live Blitz document.
+    // They mirror the pattern used in list_item.rs smoke helpers.
+
+    const MINIMAL_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" \
+        width=\"10\" height=\"10\">\
+        <circle cx=\"5\" cy=\"5\" r=\"5\" fill=\"red\"/>\
+        </svg>";
+
+    fn render_with_bundle(bundle: crate::asset::AssetBundle, html: &str) -> Vec<u8> {
+        crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(html)
+            .expect("render failed")
+    }
+
+    // resolve_list_marker → AssetKind::Svg arm (lines 88-107):
+    // When list-style-image points to a valid SVG asset, resolve_list_marker
+    // parses the SVG tree, computes intrinsic dimensions, and returns
+    // ListItemMarker::Image { marker: ImageMarker::Svg(..), .. }.
+    #[test]
+    fn smoke_svg_list_style_image_outside_marker() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("marker.svg", MINIMAL_SVG.to_vec());
+        bundle.add_css(r#"ul { list-style-image: url("marker.svg"); }"#);
+        let pdf = render_with_bundle(
+            bundle,
+            r#"<!doctype html><html><body>
+            <ul><li>SVG outside marker</li></ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_inside_image_marker → AssetKind::Svg | AssetKind::Unknown => None
+    // arm (line 151): SVG inline markers are not yet supported; the function
+    // returns None and the caller falls back to the text marker.
+    #[test]
+    fn smoke_svg_list_style_image_inside_not_supported() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("marker.svg", MINIMAL_SVG.to_vec());
+        bundle
+            .add_css(r#"ul { list-style-position: inside; list-style-image: url("marker.svg"); }"#);
+        let pdf = render_with_bundle(
+            bundle,
+            r#"<!doctype html><html><body>
+            <ul><li>SVG inside marker (unsupported, falls back)</li></ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // resolve_list_marker → AssetKind::Unknown => None (line 108): when the
+    // image data is unrecognised (neither PNG/JPEG/GIF nor SVG), detect returns
+    // Unknown and resolve_list_marker returns None, allowing the caller to fall
+    // back to the text-based marker.
+    #[test]
+    fn smoke_unknown_format_list_style_image_falls_back_to_text() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        // Garbage bytes — AssetKind::detect returns Unknown.
+        bundle.add_image("marker.bin", vec![0u8; 64]);
+        bundle.add_css(r#"ul { list-style-image: url("marker.bin"); }"#);
+        let pdf = render_with_bundle(
+            bundle,
+            r#"<!doctype html><html><body>
+            <ul><li>Unknown format marker</li></ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
