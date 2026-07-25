@@ -480,12 +480,8 @@ fn extract_text_items(
 /// proportional to the dictionary's size, and the identity is what lets the
 /// caller scan it only once.
 ///
-/// The identity is [`ResourcesOrigin`], not simply the dereferenced object id,
-/// because a resources dictionary can be shared two different ways. An indirect
-/// `/Resources` reference is the obvious one. The other is a *direct* dictionary
-/// written inside a `/Pages` node, which has no object id of its own yet is
-/// inherited by every descendant page — so treating "no reference id" as
-/// "not shared" would rescan it once per page.
+/// The identity is [`ResourcesOrigin`] rather than the dereferenced object id,
+/// because an object id alone does not identify the dictionary — see that type.
 ///
 /// A fixed depth bound guarantees termination on malformed inputs with cyclic
 /// (`A -> B -> A`) or pathologically long `/Parent` references, without needing
@@ -504,13 +500,11 @@ fn resolve_page_resources(
         if let Ok(res) = dict.get(b"Resources") {
             if let Ok((id, lopdf::Object::Dictionary(resources))) = doc.dereference(res) {
                 let origin = match id {
-                    // Indirect: every page naming this reference shares it.
-                    Some(id) => ResourcesOrigin::Shared(id),
-                    // Direct, but written on an ancestor node, so inherited by
-                    // every page beneath it.
-                    None if current_id != page_id => ResourcesOrigin::Shared(current_id),
-                    // Direct on this page: nothing else can reach it.
-                    None => ResourcesOrigin::Unique,
+                    // `/Resources N 0 R`: the dictionary *is* object N.
+                    Some(id) => ResourcesOrigin::Object(id),
+                    // A direct dictionary nested inside the object being examined
+                    // — whether that is the page itself or an ancestor node.
+                    None => ResourcesOrigin::DirectIn(current_id),
                 };
                 return Some((origin, resources));
             }
@@ -523,16 +517,27 @@ fn resolve_page_resources(
     None
 }
 
-/// Whether a page's resources dictionary can be reached by other pages, and if
-/// so under what identity — the cache key for [`collect_image_xobjects`].
-#[derive(Debug, PartialEq, Eq)]
+/// Identity of the resources dictionary in effect for a page — the cache key for
+/// [`collect_image_xobjects`].
+///
+/// An object id alone is not an identity, which is why this is an enum. Object
+/// `N` can name *two different dictionaries* here: as `/Resources N 0 R` the
+/// dictionary is object `N` itself, while as a page-tree node it may hold a
+/// direct `/Resources` sub-dictionary, which is something else entirely. Keying
+/// both on `N` let whichever page was visited first decide the other's images.
+///
+/// Every variant is cacheable — there is no "cannot be shared" case. A direct
+/// dictionary on a page looks unique but is not: a page tree may list the same
+/// `/Page` object more than once, and each occurrence is walked separately, so
+/// leaving it uncached rescans it per occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ResourcesOrigin {
-    /// Reachable by other pages under this id: either an indirect `/Resources`
-    /// reference, or the page-tree node whose direct `/Resources` is inherited.
-    Shared(lopdf::ObjectId),
-    /// Written directly on the page itself, so no other page can reach it. Not
-    /// worth caching — and caching it would grow the cache once per page.
-    Unique,
+    /// Reached through `/Resources N 0 R` — the dictionary is object `N`.
+    Object(lopdf::ObjectId),
+    /// A direct `/Resources` dictionary written inside object `N`, reachable by
+    /// any page whose `/Parent` walk arrives at `N` — including `N` itself when
+    /// it is the page.
+    DirectIn(lopdf::ObjectId),
 }
 
 /// Image XObjects declared by a page's resources: name -> (format, width_px,
@@ -606,7 +611,7 @@ fn extract_image_items(
     // budget. Work was therefore proportional to `pages × XObjects` while the
     // file stores each dimension once. Measured: 4,000 non-image XObjects shared
     // by 2,400 pages is 0.55 MB on disk, and the cost grew with the page count.
-    let mut xobject_cache: std::collections::BTreeMap<lopdf::ObjectId, Rc<ImageXObjects>> =
+    let mut xobject_cache: std::collections::BTreeMap<ResourcesOrigin, Rc<ImageXObjects>> =
         std::collections::BTreeMap::new();
 
     for (&page_num, &page_id) in &doc.get_pages() {
@@ -618,20 +623,15 @@ fn extract_image_items(
         let Some((origin, resources)) = resolve_page_resources(doc, page_id) else {
             continue;
         };
-        let image_xobjects: Rc<ImageXObjects> = match origin {
-            // Reachable by other pages: scan once, reuse for every page that
-            // shares it.
-            ResourcesOrigin::Shared(id) => match xobject_cache.get(&id) {
-                Some(cached) => Rc::clone(cached),
-                None => {
-                    let scanned = Rc::new(collect_image_xobjects(doc, resources));
-                    xobject_cache.insert(id, Rc::clone(&scanned));
-                    scanned
-                }
-            },
-            // Written directly on this page, so no other page can reach it and
-            // its size is already charged to the file.
-            ResourcesOrigin::Unique => Rc::new(collect_image_xobjects(doc, resources)),
+        // Scan once per distinct dictionary, reused by every page that reaches
+        // it. Every origin is cacheable; see `ResourcesOrigin`.
+        let image_xobjects: Rc<ImageXObjects> = match xobject_cache.get(&origin) {
+            Some(cached) => Rc::clone(cached),
+            None => {
+                let scanned = Rc::new(collect_image_xobjects(doc, resources));
+                xobject_cache.insert(origin, Rc::clone(&scanned));
+                scanned
+            }
         };
 
         if image_xobjects.is_empty() {
@@ -2266,19 +2266,21 @@ mod tests {
         );
     }
 
-    /// A *direct* `/Resources` dictionary on a `/Pages` node has no object id of
-    /// its own, but is inherited by every descendant page — so it is shared, and
-    /// [`resolve_page_resources`] must report it as such or the image pass
-    /// rescans it once per page.
+    /// [`resolve_page_resources`] reports where a dictionary lives, which is what
+    /// makes it a usable cache key.
     ///
-    /// [`ResourcesOrigin::Unique`] is reserved for a dictionary written directly
-    /// on the page itself, which nothing else can reach.
+    /// A direct dictionary on an ancestor is [`ResourcesOrigin::DirectIn`] that
+    /// ancestor — it has no id of its own, yet every descendant inherits it, so
+    /// reporting it as unshared would rescan it per page. A direct dictionary on
+    /// the page itself is `DirectIn` the page, for the same reason: a page tree
+    /// may list the same `/Page` object more than once.
     #[test]
-    fn resources_inherited_from_a_parent_node_are_reported_as_shared() {
+    fn resources_origin_records_where_the_dictionary_lives() {
         use lopdf::{Document, Object, dictionary};
 
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
+        let shared_resources = doc.add_object(dictionary! { "ProcSet" => vec!["PDF".into()] });
         let inheriting = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
@@ -2289,26 +2291,115 @@ mod tests {
             // Direct dictionary on the page itself.
             "Resources" => dictionary! { "ProcSet" => vec!["PDF".into()] },
         });
+        let by_reference = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => Object::Reference(shared_resources),
+        });
         doc.objects.insert(
             pages_id,
             Object::Dictionary(dictionary! {
                 "Type" => "Pages",
-                "Kids" => vec![Object::Reference(inheriting), Object::Reference(own_resources)],
-                "Count" => Object::Integer(2),
+                "Kids" => vec![
+                    Object::Reference(inheriting),
+                    Object::Reference(own_resources),
+                    Object::Reference(by_reference),
+                ],
+                "Count" => Object::Integer(3),
                 // Direct dictionary on the shared parent: no id, yet inherited.
                 "Resources" => dictionary! { "ProcSet" => vec!["Text".into()] },
             }),
         );
 
         let (origin, _) = resolve_page_resources(&doc, inheriting).expect("inherited resources");
-        assert_eq!(
-            origin,
-            ResourcesOrigin::Shared(pages_id),
-            "a direct dictionary on an ancestor is shared by every descendant"
-        );
+        assert_eq!(origin, ResourcesOrigin::DirectIn(pages_id));
 
         let (origin, _) = resolve_page_resources(&doc, own_resources).expect("own resources");
-        assert_eq!(origin, ResourcesOrigin::Unique);
+        assert_eq!(origin, ResourcesOrigin::DirectIn(own_resources));
+
+        let (origin, _) = resolve_page_resources(&doc, by_reference).expect("referenced resources");
+        assert_eq!(origin, ResourcesOrigin::Object(shared_resources));
+    }
+
+    /// One object id can name two *different* resources dictionaries, and the
+    /// cache must not conflate them.
+    ///
+    /// Here object `pages_id` is a `/Pages` node holding a direct `/Resources`
+    /// that declares an image, and one page also points `/Resources` straight at
+    /// `pages_id` — for which the resources dictionary is the `/Pages` node
+    /// itself, declaring no image. Keying both on the bare object id let the
+    /// first page visited decide the other's images: with the offending page
+    /// first, the inheriting page silently lost its image.
+    #[test]
+    fn resources_cache_distinguishes_an_object_from_its_nested_dictionary() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => Object::Integer(4), "Height" => Object::Integer(4),
+                "ColorSpace" => "DeviceGray", "BitsPerComponent" => Object::Integer(8),
+            },
+            vec![0u8; 16],
+        ));
+        let content = b"q 50 0 0 50 0 0 cm /Im0 Do Q\n".to_vec();
+        let content_a = doc.add_object(Stream::new(dictionary! {}, content.clone()));
+        let content_b = doc.add_object(Stream::new(dictionary! {}, content));
+
+        // Visited first: its resources dictionary *is* the /Pages node, which
+        // declares no /XObject, so it must contribute no image.
+        let points_at_pages_node = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => Object::Reference(pages_id),
+            "Contents" => content_a,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        // Visited second: inherits the /Pages node's *nested* dictionary, which
+        // does declare the image.
+        let inheriting = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_b,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![
+                    Object::Reference(points_at_pages_node),
+                    Object::Reference(inheriting),
+                ],
+                "Count" => Object::Integer(2),
+                "Resources" => dictionary! {
+                    "XObject" => dictionary! { "Im0" => Object::Reference(image_id) },
+                },
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        // Page 2 inherits the nested dictionary and must still find its image,
+        // uninfluenced by page 1 having scanned a different dictionary.
+        let pages_with_images: Vec<u32> = result.images.iter().map(|i| i.page).collect();
+        assert_eq!(
+            pages_with_images,
+            [2],
+            "expected exactly page 2 to report an image, got {:?}",
+            result.images
+        );
     }
 
     /// The item budget stops extraction in both passes.
