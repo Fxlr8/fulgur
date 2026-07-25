@@ -5,7 +5,8 @@ use std::rc::Rc;
 use crate::{
     MAX_PDF_CONTENT_BYTES, MAX_PDF_FONT_NAME_BYTES, MAX_PDF_GS_STACK_DEPTH,
     MAX_PDF_INSPECT_CONTENT_TOTAL_BYTES, MAX_PDF_INSPECT_ITEMS, MAX_PDF_INSPECT_OPERATIONS,
-    MAX_PDF_INSPECT_TEXT_BYTES, MAX_PDF_PARENT_DEPTH, PDF_CONTENT_STREAM_COST_FLOOR_BYTES,
+    MAX_PDF_INSPECT_TEXT_BYTES, MAX_PDF_METADATA_FIELD_BYTES, MAX_PDF_PARENT_DEPTH,
+    PDF_CONTENT_STREAM_COST_FLOOR_BYTES,
 };
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -110,25 +111,28 @@ fn obj_as_name_str(obj: &lopdf::Object) -> Option<&str> {
     obj.as_name().ok().and_then(|b| std::str::from_utf8(b).ok())
 }
 
+/// Truncate `s` to at most `max_bytes`, rounding *down* to a UTF-8 character
+/// boundary so a clamp point inside a multi-byte character cuts before that
+/// character rather than panicking on a sliced code point.
+fn clamp_str_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Clamp a `/Tf` font resource name to [`MAX_PDF_FONT_NAME_BYTES`].
 ///
 /// Every [`TextItem`] retains a copy of the font name in effect, so an
 /// unclamped name multiplies into the result once per record — see
 /// [`MAX_PDF_FONT_NAME_BYTES`] for why the per-page content bound does not
 /// cover that product.
-///
-/// Truncation rounds *down* to a UTF-8 character boundary, so a name whose
-/// clamp point falls inside a multi-byte character is cut before that
-/// character rather than panicking on a sliced code point.
 fn clamp_font_name(name: &str) -> &str {
-    if name.len() <= MAX_PDF_FONT_NAME_BYTES {
-        return name;
-    }
-    let mut end = MAX_PDF_FONT_NAME_BYTES;
-    while end > 0 && !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    &name[..end]
+    clamp_str_bytes(name, MAX_PDF_FONT_NAME_BYTES)
 }
 
 /// Outcome of gathering one page's content, which distinguishes "skip this
@@ -198,13 +202,21 @@ fn gather_page_content(
             Ok(ref d) => d,
             Err(_) => &stream.content,
         };
-        // Charge whatever this stream adds to `content` — its decoded length plus
-        // the separator appended below — beyond the floor already paid above. The
-        // total per stream is therefore `max(bytes + 1, floor)`: a stream that
-        // decodes to *nothing* still costs the floor, so many zero-length streams
-        // cannot be walked for free. See `PDF_CONTENT_STREAM_COST_FLOOR_BYTES`.
-        *doc_budget = doc_budget
-            .saturating_sub((bytes.len() + 1).saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
+        // Charge this stream beyond the floor already paid above, taking the
+        // larger of what it *produced* and what it *consumed*:
+        //
+        // - decoded length plus the separator, the bytes added to `content`;
+        // - encoded length, because a filter reads every one of those bytes even
+        //   when it yields nothing. `/ASCII85Decode` over a megabyte of
+        //   whitespace decodes to zero bytes after scanning all of it, and a
+        //   Flate stream can do the same, so charging only the decoded length
+        //   would let a large encoded stream be re-decoded per page for the
+        //   floor alone.
+        //
+        // The total per stream is therefore `max(decoded + 1, encoded, floor)`.
+        let charge = (bytes.len() + 1).max(stream.content.len());
+        *doc_budget =
+            doc_budget.saturating_sub(charge.saturating_sub(PDF_CONTENT_STREAM_COST_FLOOR_BYTES));
         if *doc_budget == 0 {
             return PageContent::Exhausted;
         }
@@ -231,11 +243,18 @@ fn extract_metadata(doc: &lopdf::Document) -> Metadata {
         _ => return meta,
     };
 
+    // Clamped: an `/Info` dictionary can live inside a Flate-compressed object
+    // stream, so a small file can carry an arbitrarily large `/Title`. This pass
+    // has no per-page or per-record structure for the text and item budgets to
+    // bound, so without a clamp a metadata-only document produces output
+    // proportional to the decompressed payload. See
+    // `MAX_PDF_METADATA_FIELD_BYTES`.
     let get_str = |dict: &lopdf::Dictionary, key: &[u8]| -> Option<String> {
         dict.get(key)
             .ok()
             .and_then(|o| o.as_str().ok())
             .map(decode_pdf_string)
+            .map(|s| clamp_str_bytes(&s, MAX_PDF_METADATA_FIELD_BYTES).to_owned())
     };
 
     meta.title = get_str(info, b"Title");
@@ -540,6 +559,33 @@ enum ResourcesOrigin {
     DirectIn(lopdf::ObjectId),
 }
 
+/// Identity of the `/XObject` dictionary a page's images are scanned from — the
+/// cache key for [`collect_image_xobjects`].
+///
+/// Keyed on the `/XObject` dictionary rather than on the enclosing resources
+/// dictionary, because that is what the scan result actually depends on. The two
+/// differ whenever pages carry *distinct* resources dictionaries that all point
+/// `/XObject` at one shared indirect dictionary: keying on the resources
+/// dictionary would rescan the shared one once per page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum XObjectsOrigin {
+    /// `/XObject N 0 R` — the dictionary is object `N`, shareable by any number
+    /// of otherwise-unrelated resources dictionaries.
+    Object(lopdf::ObjectId),
+    /// A direct `/XObject` dictionary written inside the resources dictionary
+    /// with this origin — or no `/XObject` entry at all, whose empty result is
+    /// equally a property of that resources dictionary.
+    DirectIn(ResourcesOrigin),
+}
+
+/// The identity of the `/XObject` dictionary reachable from `resources`.
+fn xobjects_origin(resources: &lopdf::Dictionary, origin: ResourcesOrigin) -> XObjectsOrigin {
+    match resources.get(b"XObject").and_then(|o| o.as_reference()) {
+        Ok(id) => XObjectsOrigin::Object(id),
+        Err(_) => XObjectsOrigin::DirectIn(origin),
+    }
+}
+
 /// Image XObjects declared by a page's resources: name -> (format, width_px,
 /// height_px).
 type ImageXObjects = std::collections::BTreeMap<String, (String, u32, u32)>;
@@ -611,7 +657,7 @@ fn extract_image_items(
     // budget. Work was therefore proportional to `pages × XObjects` while the
     // file stores each dimension once. Measured: 4,000 non-image XObjects shared
     // by 2,400 pages is 0.55 MB on disk, and the cost grew with the page count.
-    let mut xobject_cache: std::collections::BTreeMap<ResourcesOrigin, Rc<ImageXObjects>> =
+    let mut xobject_cache: std::collections::BTreeMap<XObjectsOrigin, Rc<ImageXObjects>> =
         std::collections::BTreeMap::new();
 
     for (&page_num, &page_id) in &doc.get_pages() {
@@ -620,11 +666,12 @@ fn extract_image_items(
         }
         // Step 1: XObject から画像情報を収集 (共有 resources なら memoise 済みを再利用)
         // Resources は親 /Pages ノードから継承される場合があるため、継承チェーンを辿る。
-        let Some((origin, resources)) = resolve_page_resources(doc, page_id) else {
+        let Some((res_origin, resources)) = resolve_page_resources(doc, page_id) else {
             continue;
         };
-        // Scan once per distinct dictionary, reused by every page that reaches
-        // it. Every origin is cacheable; see `ResourcesOrigin`.
+        // Scan once per distinct `/XObject` dictionary, reused by every page that
+        // reaches it. Every origin is cacheable; see `XObjectsOrigin`.
+        let origin = xobjects_origin(resources, res_origin);
         let image_xobjects: Rc<ImageXObjects> = match xobject_cache.get(&origin) {
             Some(cached) => Rc::clone(cached),
             None => {
@@ -2125,18 +2172,40 @@ mod tests {
     }
 
     /// The whole-document content budget stops the page walk in both passes.
+    ///
+    /// The budget is a multiple of [`PDF_CONTENT_STREAM_COST_FLOOR_BYTES`], which
+    /// is what each of these small pages costs, so it pays for several pages and
+    /// then runs out — the assertions can require that extraction both *happened*
+    /// and stopped early. At exactly the floor the budget would be spent on the
+    /// first page's first stream, and "0 records" would satisfy a bare
+    /// `len() < PAGES` however broken the mechanism was.
     #[test]
     fn limits_content_budget_stops_the_page_walk() {
         const PAGES: usize = 40;
+        const AFFORDABLE: usize = 10;
         let pdf = limits_fixture(PAGES, 0);
 
         let limits = InspectLimits {
-            content_total_bytes: 512,
+            content_total_bytes: PDF_CONTENT_STREAM_COST_FLOOR_BYTES * AFFORDABLE,
             ..InspectLimits::default()
         };
         let (text, images) = inspect_bytes_with_limits(&pdf, &limits);
-        assert!(text.len() < PAGES, "text {}", text.len());
-        assert!(images.len() < PAGES, "images {}", images.len());
+        assert!(
+            !text.is_empty() && text.len() < PAGES,
+            "expected 1..{PAGES} text records, got {}",
+            text.len()
+        );
+        assert!(
+            !images.is_empty() && images.len() < PAGES,
+            "expected 1..{PAGES} images, got {}",
+            images.len()
+        );
+
+        // Same input, ample budget: nothing is truncated, so the truncation above
+        // is attributable to the content budget and not to the fixture.
+        let (text, images) = inspect_bytes_with_limits(&pdf, &InspectLimits::default());
+        assert_eq!(text.len(), PAGES);
+        assert_eq!(images.len(), PAGES);
     }
 
     /// The text-byte budget stops extraction, and does so independently of the
@@ -2399,6 +2468,185 @@ mod tests {
             [2],
             "expected exactly page 2 to report an image, got {:?}",
             result.images
+        );
+    }
+
+    /// A content stream is charged for the bytes its filter *consumed*, not only
+    /// for what it produced.
+    ///
+    /// `/ASCII85Decode` ignores whitespace, so a stream of nothing but whitespace
+    /// and the `~>` terminator is fully scanned and decodes to zero bytes. Charging
+    /// the decoded length alone would price a megabyte of that at the floor.
+    #[test]
+    fn limits_encoded_bytes_are_charged_even_when_decoding_yields_nothing() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        const ENCODED: usize = 64 * 1024;
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+        // Whitespace plus the end-of-data marker: scanned in full, decodes empty.
+        let mut a85 = vec![b' '; ENCODED];
+        a85.extend_from_slice(b"~>");
+        let mut a85_stream = Stream::new(dictionary! {}, a85);
+        a85_stream.dict.set("Filter", "ASCII85Decode");
+        assert_eq!(
+            a85_stream.decompressed_content().ok().map(|d| d.len()),
+            Some(0),
+            "test relies on this stream decoding to nothing"
+        );
+        let contents = vec![
+            Object::Reference(doc.add_object(a85_stream)),
+            Object::Reference(doc.add_object(Stream::new(
+                dictionary! {},
+                b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (Reached) Tj ET".to_vec(),
+            ))),
+        ];
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => contents,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        // A budget that the *encoded* length alone exhausts, but which the decoded
+        // length (zero, so just the floor) would leave nearly untouched.
+        let starved = InspectLimits {
+            content_total_bytes: ENCODED / 4,
+            ..InspectLimits::default()
+        };
+        let (text, _) = inspect_bytes_with_limits(&buf, &starved);
+        assert!(
+            text.is_empty(),
+            "encoded bytes must draw down the budget, got {text:?}"
+        );
+
+        let ample = InspectLimits {
+            content_total_bytes: ENCODED * 4,
+            ..InspectLimits::default()
+        };
+        let (text, _) = inspect_bytes_with_limits(&buf, &ample);
+        assert_eq!(
+            text.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
+            ["Reached"]
+        );
+    }
+
+    /// One shared indirect `/XObject` dictionary is scanned once even when the
+    /// resources dictionaries pointing at it are all distinct.
+    ///
+    /// The cache is keyed on the `/XObject` dictionary, so distinct per-page
+    /// resources wrappers around one shared dictionary collapse to a single
+    /// origin — the identity that the scan result actually depends on.
+    #[test]
+    fn xobjects_origin_follows_the_shared_dictionary_not_the_wrapper() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => Object::Integer(4), "Height" => Object::Integer(4),
+                "ColorSpace" => "DeviceGray", "BitsPerComponent" => Object::Integer(8),
+            },
+            vec![0u8; 16],
+        ));
+        // One indirect XObject dictionary, wrapped by two *distinct* direct
+        // resources dictionaries.
+        let shared_xobjects = doc.add_object(dictionary! { "Im0" => Object::Reference(image_id) });
+        let mut origins = Vec::new();
+        let mut kids = Vec::new();
+        for _ in 0..2 {
+            let page = doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Resources" => dictionary! { "XObject" => Object::Reference(shared_xobjects) },
+            });
+            kids.push(Object::Reference(page));
+        }
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids.clone(),
+                "Count" => Object::Integer(2),
+            }),
+        );
+        for kid in &kids {
+            let page_id = kid.as_reference().unwrap();
+            let (res_origin, resources) = resolve_page_resources(&doc, page_id).expect("resources");
+            // Each page's *resources* dictionary is its own.
+            assert_eq!(res_origin, ResourcesOrigin::DirectIn(page_id));
+            origins.push(xobjects_origin(resources, res_origin));
+        }
+        // But both resolve to the same XObject dictionary, so one cache entry.
+        assert_eq!(origins[0], XObjectsOrigin::Object(shared_xobjects));
+        assert_eq!(origins[0], origins[1]);
+    }
+
+    /// `/Info` metadata strings are clamped: the metadata pass has no per-page or
+    /// per-record structure, so the text and item budgets do not reach it.
+    #[test]
+    fn metadata_fields_are_clamped() {
+        use lopdf::{Document, Object, dictionary};
+
+        let long = "T".repeat(MAX_PDF_METADATA_FIELD_BYTES * 4);
+        let multibyte = "あ".repeat(MAX_PDF_METADATA_FIELD_BYTES);
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => Object::Integer(0),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        let info_id = doc.add_object(dictionary! {
+            "Title" => Object::string_literal(long.as_str()),
+            "Author" => Object::string_literal(multibyte.as_str()),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.trailer.set("Info", Object::Reference(info_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        let title = result.metadata.title.expect("title");
+        assert_eq!(title.len(), MAX_PDF_METADATA_FIELD_BYTES);
+        let author = result.metadata.author.expect("author");
+        assert!(
+            author.len() <= MAX_PDF_METADATA_FIELD_BYTES,
+            "author {} bytes",
+            author.len()
+        );
+        // Latin-1 fallback widens each byte to a 2-byte code point, so the clamp
+        // has to land on a character boundary rather than mid-sequence.
+        assert!(
+            author.chars().all(|c| c != '\u{FFFD}'),
+            "clamped mid-character"
         );
     }
 

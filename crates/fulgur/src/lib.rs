@@ -331,6 +331,23 @@ pub(crate) const MAX_PDF_INSPECT_OPERATIONS: usize = 20_000_000;
 /// [`MAX_PDF_INSPECT_ITEMS`] targets carries single-digit MB of text.
 pub(crate) const MAX_PDF_INSPECT_TEXT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Upper bound on the length of each `/Info` metadata string
+/// ([`inspect::Metadata::title`] and its siblings) that [`inspect::inspect`]
+/// will retain and report.
+///
+/// The metadata pass has no per-page or per-record structure, so neither
+/// [`MAX_PDF_INSPECT_TEXT_BYTES`] nor [`MAX_PDF_INSPECT_ITEMS`] constrains it —
+/// they bound the text and image passes only. An `/Info` dictionary can live
+/// inside a Flate-compressed object stream, so a small file can carry a `/Title`
+/// of arbitrary size, and a metadata-only document would then produce output
+/// proportional to the decompressed payload.
+///
+/// 8 KiB per field is far above anything a producer writes into a title, author
+/// or date — the fields are a line of text each — and bounds all five at 40 KiB.
+/// Longer values are truncated on a UTF-8 character boundary rather than
+/// dropped, so the field stays usable.
+pub(crate) const MAX_PDF_METADATA_FIELD_BYTES: usize = 8 * 1024;
+
 /// Upper bound on the length of a `/Tf` font resource name that
 /// [`inspect::inspect`] will retain and report.
 ///
