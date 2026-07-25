@@ -148,10 +148,17 @@ fn clamp_font_name(name: &str) -> &str {
 /// budget from whatever id it is handed, so stopping mid-chain and letting it
 /// finish the walk would compose two limits: aliases converging past this bound
 /// would each yield a different key while still resolving to one stream, and
-/// every one would re-run its filter chain. Rejecting is also the stricter
-/// direction — no producer emits a `/Contents` chain that deep.
+/// every one would re-run its filter chain.
+///
+/// The bound is the *link* budget, so the loop runs one iteration more than that:
+/// the extra pass performs no hop, it only probes the object the last permitted
+/// hop landed on. This matches lopdf exactly — `Document::dereference` increments
+/// after following a reference and fails on `nb_deref > DEREF_LIMIT`, so a chain
+/// of precisely [`MAX_PDF_PARENT_DEPTH`] references resolves there and must
+/// resolve here too. Returning `None` one link early would silently skip a stream
+/// the previous extraction path read.
 fn canonical_object_id(doc: &lopdf::Document, mut id: lopdf::ObjectId) -> Option<lopdf::ObjectId> {
-    for _ in 0..MAX_PDF_PARENT_DEPTH {
+    for _ in 0..=MAX_PDF_PARENT_DEPTH {
         match doc.objects.get(&id) {
             Some(lopdf::Object::Reference(next)) => id = *next,
             // Not a reference (the target), or absent — either way this is the id
@@ -588,7 +595,13 @@ fn resolve_page_resources(
 ) -> Option<(ResourcesOrigin, &lopdf::Dictionary)> {
     let mut current_id = page_id;
     for _ in 0..MAX_PDF_PARENT_DEPTH {
-        let dict = match doc.get_object(current_id) {
+        // Canonicalise before both the lookup and the identity: page-tree `Kids`
+        // entries and `/Parent` back-references may be alias objects, and
+        // `get_object` follows them silently. Keying `DirectIn` on the immediate
+        // id would hand one shared page dictionary a distinct identity per alias,
+        // so the cache would rescan and retain a separate map for each.
+        let owner_id = canonical_object_id(doc, current_id)?;
+        let dict = match doc.get_object(owner_id) {
             Ok(lopdf::Object::Dictionary(d)) => d,
             _ => return None,
         };
@@ -599,7 +612,7 @@ fn resolve_page_resources(
                     Some(id) => ResourcesOrigin::Object(id),
                     // A direct dictionary nested inside the object being examined
                     // — whether that is the page itself or an ancestor node.
-                    None => ResourcesOrigin::DirectIn(current_id),
+                    None => ResourcesOrigin::DirectIn(owner_id),
                 };
                 return Some((origin, resources));
             }
@@ -2963,31 +2976,58 @@ mod tests {
         assert_eq!(images.len(), 1);
     }
 
-    /// An alias chain too deep to canonicalise is rejected rather than decoded
-    /// under a non-canonical key.
+    /// Canonicalisation accepts a chain exactly when lopdf's own `get_object`
+    /// does, and rejects deeper ones rather than decoding under a mid-chain key.
     ///
-    /// `get_object` would begin a fresh `DEREF_LIMIT` from wherever the walk
-    /// stopped, so a mid-chain id would still resolve — giving each such alias its
-    /// own cache key for one shared stream.
+    /// Asserting the *equivalence* rather than a hardcoded link count is the
+    /// point: two independent limits are in play — this loop's and lopdf's
+    /// `DEREF_LIMIT` — and either being one link stricter than the other is a
+    /// silent bug in a different direction. Stricter here skips a stream
+    /// `get_object` would have read; looser hands each alias converging past
+    /// lopdf's bound its own cache key for one shared stream. A sweep over
+    /// lengths straddling the bound pins both edges and cannot drift.
     #[test]
-    fn overlong_alias_chains_are_rejected() {
+    fn canonicalisation_matches_lopdf_dereference_limit() {
         use lopdf::{Document, Object, Stream, dictionary};
 
         let mut doc = Document::with_version("1.5");
         let real = doc.add_object(Stream::new(dictionary! {}, b"BT ET".to_vec()));
-        // A chain of exactly MAX_PDF_PARENT_DEPTH links resolves.
-        let mut id = real;
-        for _ in 0..MAX_PDF_PARENT_DEPTH - 1 {
-            id = doc.add_object(Object::Reference(id));
+        // `chain[k]` is the id whose alias chain reaches `real` in `k` links, so
+        // `chain[0]` is the stream itself — its own canonical form.
+        let mut chain = vec![real];
+        for _ in 0..MAX_PDF_PARENT_DEPTH + 2 {
+            let next = doc.add_object(Object::Reference(*chain.last().unwrap()));
+            chain.push(next);
         }
-        assert_eq!(canonical_object_id(&doc, id), Some(real));
 
-        // One link further and it is rejected instead of half-resolved.
-        let too_deep = doc.add_object(Object::Reference(id));
-        assert_eq!(canonical_object_id(&doc, too_deep), None);
-
-        // A plain, non-reference id is its own canonical form.
-        assert_eq!(canonical_object_id(&doc, real), Some(real));
+        let mut accepted = 0usize;
+        for (links, &id) in chain.iter().enumerate() {
+            let canonical = canonical_object_id(&doc, id);
+            let lopdf_reads_it = doc.get_object(id).is_ok();
+            assert_eq!(
+                canonical.is_some(),
+                lopdf_reads_it,
+                "{links}-link chain: canonicalised to {canonical:?} but get_object \
+                 {}; the two limits have drifted apart",
+                if lopdf_reads_it {
+                    "succeeded"
+                } else {
+                    "failed"
+                },
+            );
+            if canonical.is_some() {
+                assert_eq!(canonical, Some(real), "{links}-link chain resolved short");
+                accepted += 1;
+            }
+        }
+        // Guard the sweep itself: it must straddle the bound, not sit entirely on
+        // one side of it and pass vacuously.
+        assert_eq!(
+            accepted,
+            MAX_PDF_PARENT_DEPTH + 1,
+            "expected chains of 0..={MAX_PDF_PARENT_DEPTH} links to resolve and \
+             longer ones to be rejected",
+        );
     }
 
     /// An `/XObject` reached through an alias object resolves to the same origin
@@ -3016,6 +3056,47 @@ mod tests {
         assert_eq!(origins[0], XObjectsOrigin::Object(real));
         assert_eq!(origins[0], origins[1]);
         assert_eq!(origins[0], origins[2]);
+    }
+
+    /// A page reached through an alias id yields the same origin as the page
+    /// itself, so a shared `/Page` with *direct* `/Resources` is scanned once.
+    ///
+    /// `Kids` entries and `/Parent` back-references may be alias objects, and
+    /// `get_object` follows them silently — so the dictionary is the same one
+    /// every time, but keying on the immediate id would name it differently per
+    /// alias and make the cache rescan and retain a map for each.
+    #[test]
+    fn direct_resources_origin_canonicalises_page_aliases() {
+        use lopdf::{Document, Object, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        // One page, whose /Resources and /XObject are both direct dictionaries.
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => Object::Null } },
+        });
+        // Two Kids ids that are alias objects for that one page.
+        let alias_a = doc.add_object(Object::Reference(page_id));
+        let alias_b = doc.add_object(Object::Reference(page_id));
+
+        let mut origins = Vec::new();
+        for id in [alias_a, alias_b, page_id] {
+            let (res_origin, resources) = resolve_page_resources(&doc, id).expect("resources");
+            origins.push((res_origin, xobjects_origin(&doc, resources, res_origin)));
+        }
+        assert_eq!(
+            origins[0].0,
+            ResourcesOrigin::DirectIn(page_id),
+            "origin must name the page the alias resolves to, not the alias",
+        );
+        assert_eq!(origins[0], origins[1]);
+        assert_eq!(origins[0], origins[2]);
+        assert_eq!(
+            origins[0].1,
+            XObjectsOrigin::DirectIn(ResourcesOrigin::DirectIn(page_id)),
+        );
     }
 
     /// A `/Contents` entry that is an *alias* — a reference object pointing at
