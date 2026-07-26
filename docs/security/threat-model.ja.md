@@ -84,6 +84,14 @@ URL が含まれ、fulgur が JS ランタイムを獲得した場合や、生�
 - **[既存]** MiniJinja 自動エスケープ (`AutoEscape::Html`) が
   `{{ variable }}` 出力の `<`, `>`, `&`, `"` をエスケープ
   (`crates/fulgur/src/template.rs:90`)
+- **[既存]** GCPM running element は HTML に再シリアライズしてマージンボックス
+  で再パースされるため、この往復で上記のエスケープが保存される必要がある。
+  `gcpm::running::serialize_node` がテキストノードを再エンコードする
+  (`crates/fulgur/src/gcpm/running.rs`)。これが無いと、
+  `position: running()` + `content: element()` でヘッダ / フッタに渡った
+  エスケープ済みデータが生のマークアップとして復元される。
+  `<style>` / `<script>` の子は
+  パーサが実体参照を復号しないため対象外。
 
 ### V2 — サーバーサイドリクエストフォージェリ (SSRF)
 

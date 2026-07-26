@@ -84,11 +84,17 @@ impl RunningElementStore {
 /// handles styling in the re-layout pass.
 pub fn serialize_node(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
     let mut output = String::new();
-    write_node(doc, node_id, &mut output, 0);
+    write_node(doc, node_id, &mut output, 0, false);
     output
 }
 
-fn write_node(doc: &blitz_dom::BaseDocument, node_id: usize, writer: &mut String, depth: usize) {
+fn write_node(
+    doc: &blitz_dom::BaseDocument,
+    node_id: usize,
+    writer: &mut String,
+    depth: usize,
+    in_raw_text: bool,
+) {
     use crate::MAX_DOM_DEPTH;
     use blitz_dom::NodeData;
 
@@ -101,7 +107,11 @@ fn write_node(doc: &blitz_dom::BaseDocument, node_id: usize, writer: &mut String
 
     match &node.data {
         NodeData::Text(text_data) => {
-            writer.push_str(&text_data.content);
+            if in_raw_text {
+                writer.push_str(&text_data.content);
+            } else {
+                escape_text_content(&text_data.content, writer);
+            }
         }
         NodeData::Element(elem) => {
             let tag = elem.name.local.as_ref();
@@ -122,8 +132,9 @@ fn write_node(doc: &blitz_dom::BaseDocument, node_id: usize, writer: &mut String
                 writer.push_str(" />");
             } else {
                 writer.push('>');
+                let children_are_raw_text = is_raw_text_element(elem);
                 for &child_id in &node.children {
-                    write_node(doc, child_id, writer, depth + 1);
+                    write_node(doc, child_id, writer, depth + 1, children_are_raw_text);
                 }
                 writer.push_str("</");
                 writer.push_str(tag);
@@ -132,6 +143,47 @@ fn write_node(doc: &blitz_dom::BaseDocument, node_id: usize, writer: &mut String
         }
         _ => {
             // Document, Comment, AnonymousBlock — skip
+        }
+    }
+}
+
+/// HTML "raw text elements" (HTML §13.2.5.1): `<style>` and `<script>` in the
+/// HTML namespace. The tokenizer does **not** decode character references
+/// inside them, so for their children a verbatim write-back already is the
+/// parser's inverse — escaping would corrupt the CSS/JS rather than preserve
+/// it (`.a > b` would come back as `.a &gt; b`, which the reparse hands to
+/// Stylo verbatim).
+///
+/// The namespace check matters: `<style>` in the SVG namespace is *not* raw
+/// text — foreign content decodes references normally — so it takes the
+/// escaping path like any other element.
+///
+/// `<textarea>` and `<title>` are deliberately absent: they are *escapable*
+/// raw text, where the tokenizer does decode references, so they need the
+/// same escaping as ordinary text.
+fn is_raw_text_element(elem: &blitz_dom::node::ElementData) -> bool {
+    elem.name.ns == blitz_dom::ns!(html) && matches!(elem.name.local.as_ref(), "style" | "script")
+}
+
+/// Escape a text node's content for safe HTML embedding.
+///
+/// The HTML parser decodes character references on the way in, so writing a
+/// text node back verbatim is **not** its inverse: content that reached the
+/// DOM as the escaped string `&lt;a href="…"&gt;` would be handed to the
+/// margin-box reparse as a live anchor. That turns an escaped-by-construction
+/// value — e.g. a `{{ variable }}` run through the forced
+/// `AutoEscape::Html` of [`crate::template`] — back into markup, defeating
+/// the escaping. Re-encoding here restores the round trip.
+///
+/// `>` is not strictly required in a text context, but is escaped anyway to
+/// match [`escape_attribute_value`] and to neutralise `]]>` sequences.
+fn escape_text_content(value: &str, writer: &mut String) {
+    for ch in value.chars() {
+        match ch {
+            '&' => writer.push_str("&amp;"),
+            '<' => writer.push_str("&lt;"),
+            '>' => writer.push_str("&gt;"),
+            _ => writer.push(ch),
         }
     }
 }
@@ -196,6 +248,109 @@ mod tests {
         assert_eq!(store.instance_count(), 1);
         store.register(2, "header".to_string(), "<h1>B</h1>".to_string());
         assert_eq!(store.instance_count(), 2);
+    }
+
+    // --- serialize_node round trip ---
+
+    /// Parse `body_html` and serialize the first `<div>` in it, i.e. the same
+    /// shape `RunningElementPass` hands to `serialize_node`.
+    fn serialize_first_div(body_html: &str) -> String {
+        let html = format!("<html><body>{body_html}</body></html>");
+        let doc = crate::blitz_adapter::parse(&html, 600.0, &[]);
+        let root_id = doc.root_element().id;
+        let div_id = find_first_tag(&doc, root_id, "div", 0).expect("no <div> in fixture");
+        serialize_node(&doc, div_id)
+    }
+
+    fn find_first_tag(
+        doc: &blitz_dom::BaseDocument,
+        node_id: usize,
+        tag: &str,
+        depth: usize,
+    ) -> Option<usize> {
+        if depth >= crate::MAX_DOM_DEPTH {
+            return None;
+        }
+        let node = doc.get_node(node_id)?;
+        if let Some(elem) = node.element_data() {
+            if elem.name.local.as_ref() == tag {
+                return Some(node_id);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|&child| find_first_tag(doc, child, tag, depth + 1))
+    }
+
+    /// Text that reached the DOM as escaped markup — the shape produced by
+    /// `template::render_template`'s forced `AutoEscape::Html` — must be
+    /// handed back as text, not as live markup for the margin-box reparse.
+    #[test]
+    fn serialize_node_re_escapes_markup_in_text_nodes() {
+        let out = serialize_first_div(
+            r#"<div>Report for &lt;a href=&quot;javascript:alert(1)&quot;&gt;x&lt;/a&gt;</div>"#,
+        );
+        assert!(
+            !out.contains("<a "),
+            "escaped anchor was resurrected as markup: {out}"
+        );
+        assert!(
+            out.contains("&lt;a href=") && out.contains("&gt;x&lt;/a&gt;"),
+            "anchor text was not re-escaped: {out}"
+        );
+    }
+
+    #[test]
+    fn serialize_node_escapes_bare_ampersand_in_text() {
+        let out = serialize_first_div("<div>Tom &amp; Jerry</div>");
+        assert!(out.contains("Tom &amp; Jerry"), "{out}");
+    }
+
+    /// Authored elements are DOM elements, not text — escaping text nodes
+    /// must leave them alone, or legitimate running-element markup breaks.
+    #[test]
+    fn serialize_node_keeps_authored_elements_intact() {
+        let out =
+            serialize_first_div(r#"<div><b>bold</b> <a href="https://ok.test">link</a></div>"#);
+        assert!(out.contains("<b>bold</b>"), "{out}");
+        assert!(
+            out.contains(r#"<a href="https://ok.test">link</a>"#),
+            "{out}"
+        );
+    }
+
+    /// Over-escaping tripwire: `<style>` is a raw text element, so the parser
+    /// never decoded references inside it and re-encoding would corrupt the
+    /// selector (`.a > b` → `.a &gt; b`).
+    #[test]
+    fn serialize_node_keeps_raw_text_of_style_element_verbatim() {
+        let out = serialize_first_div("<div><style>.a > b { color: red }</style><b>x</b></div>");
+        assert!(
+            out.contains(".a > b { color: red }"),
+            "style CSS was corrupted by escaping: {out}"
+        );
+    }
+
+    // --- escape_text_content ---
+
+    fn escape_text(s: &str) -> String {
+        let mut out = String::new();
+        escape_text_content(s, &mut out);
+        out
+    }
+
+    #[test]
+    fn escape_text_content_escapes_markup_specials() {
+        assert_eq!(escape_text("a<b>c"), "a&lt;b&gt;c");
+        assert_eq!(escape_text("a&b"), "a&amp;b");
+        assert_eq!(escape_text("&<>"), "&amp;&lt;&gt;");
+    }
+
+    #[test]
+    fn escape_text_content_leaves_quotes_and_plain_text_alone() {
+        // Text context — quotes need no escaping there.
+        assert_eq!(escape_text(r#"say "hi" 123"#), r#"say "hi" 123"#);
+        assert_eq!(escape_text(""), "");
     }
 
     // --- escape_attribute_value ---
