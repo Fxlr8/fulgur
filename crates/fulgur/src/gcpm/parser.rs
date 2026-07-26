@@ -3409,4 +3409,172 @@ mod tests {
         let ctx = parse_gcpm(css);
         assert!(ctx.content_counter_mappings.is_empty());
     }
+
+    // ── css_escape_string: branch coverage ──────────────────────────────────
+
+    #[test]
+    fn css_escape_string_passthrough_normal_chars() {
+        assert_eq!(css_escape_string("hello world"), "hello world");
+        assert_eq!(css_escape_string(""), "");
+        assert_eq!(
+            css_escape_string("ABC 123 !@#$%^&*()"),
+            "ABC 123 !@#$%^&*()"
+        );
+    }
+
+    #[test]
+    fn css_escape_string_escapes_double_quote() {
+        // `"` → `\"` so the resulting string can be safely embedded in a
+        // CSS quoted-string value without breaking the surrounding quotes.
+        assert_eq!(css_escape_string(r#"say "hi""#), r#"say \"hi\""#);
+        assert_eq!(css_escape_string("\""), "\\\"");
+    }
+
+    #[test]
+    fn css_escape_string_escapes_backslash() {
+        // `\` → `\\` (doubled).
+        assert_eq!(css_escape_string("C:\\path"), "C:\\\\path");
+        assert_eq!(css_escape_string("\\"), "\\\\");
+    }
+
+    #[test]
+    fn css_escape_string_escapes_newline() {
+        // `\n` (U+000A) → `\a ` (CSS hex escape with trailing space).
+        assert_eq!(css_escape_string("line1\nline2"), "line1\\a line2");
+        assert_eq!(css_escape_string("\n"), "\\a ");
+    }
+
+    #[test]
+    fn css_escape_string_escapes_carriage_return() {
+        // `\r` (U+000D) → `\d `.
+        assert_eq!(css_escape_string("text\rend"), "text\\d end");
+        assert_eq!(css_escape_string("\r"), "\\d ");
+    }
+
+    #[test]
+    fn css_escape_string_escapes_null_byte() {
+        // `\0` (U+0000) → `\0 `.
+        assert_eq!(css_escape_string("null\0byte"), "null\\0 byte");
+        assert_eq!(css_escape_string("\0"), "\\0 ");
+    }
+
+    #[test]
+    fn css_escape_string_escapes_other_control_chars() {
+        // Any control character not handled by the named arms above gets a
+        // generic `\<hex> ` escape. `\t` = U+0009, `\x01` = U+0001.
+        assert_eq!(css_escape_string("\t"), "\\9 ");
+        assert_eq!(css_escape_string("\x01"), "\\1 ");
+        assert_eq!(css_escape_string("\x1b"), "\\1b ");
+    }
+
+    #[test]
+    fn css_escape_string_mixed_content() {
+        // All special-character categories in a single string.
+        let input = "a\"b\\c\nd\re\0f\tg";
+        let expected = "a\\\"b\\\\c\\a d\\d e\\0 f\\9 g";
+        assert_eq!(css_escape_string(input), expected);
+    }
+
+    // ── target-text(): kind variants ─────────────────────────────────────────
+
+    #[test]
+    fn parse_target_text_before_kind() {
+        // `target-text(url, before)` must store `TargetTextKind::Before`.
+        let css = r#"a::after { content: target-text(attr(href), before); }"#;
+        let g = parse_gcpm(css);
+        assert_eq!(
+            g.content_counter_mappings[0].content,
+            vec![ContentItem::TargetText {
+                url: TargetUrl::Attr("href".into()),
+                kind: TargetTextKind::Before,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_target_text_after_kind() {
+        // `target-text(url, after)` must store `TargetTextKind::After`.
+        let css = r#"a::after { content: target-text(attr(href), after); }"#;
+        let g = parse_gcpm(css);
+        assert_eq!(
+            g.content_counter_mappings[0].content,
+            vec![ContentItem::TargetText {
+                url: TargetUrl::Attr("href".into()),
+                kind: TargetTextKind::After,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_target_text_first_letter_kind() {
+        // `target-text(url, first-letter)` must store `TargetTextKind::FirstLetter`.
+        let css = r#"a::after { content: target-text(attr(href), first-letter); }"#;
+        let g = parse_gcpm(css);
+        assert_eq!(
+            g.content_counter_mappings[0].content,
+            vec![ContentItem::TargetText {
+                url: TargetUrl::Attr("href".into()),
+                kind: TargetTextKind::FirstLetter,
+            }]
+        );
+    }
+
+    // ── content(before) / content(after) in parse_content_value ─────────────
+
+    #[test]
+    fn test_bookmark_label_content_before() {
+        // `content(before)` inside `bookmark-label:` must produce
+        // `ContentItem::ContentBefore` via `parse_content_value`.
+        let css = "h1 { bookmark-label: content(before); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let label = ctx.bookmark_mappings[0]
+            .label
+            .as_ref()
+            .expect("label present");
+        assert_eq!(label, &vec![ContentItem::ContentBefore]);
+    }
+
+    #[test]
+    fn test_bookmark_label_content_after() {
+        // `content(after)` must produce `ContentItem::ContentAfter`.
+        let css = "h1 { bookmark-label: content(after); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let label = ctx.bookmark_mappings[0]
+            .label
+            .as_ref()
+            .expect("label present");
+        assert_eq!(label, &vec![ContentItem::ContentAfter]);
+    }
+
+    #[test]
+    fn test_bookmark_label_content_before_and_after_together() {
+        // Multiple `content()` variants may appear in the same `bookmark-label`.
+        let css = "h1 { bookmark-label: content(before) content(text) content(after); }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.bookmark_mappings.len(), 1);
+        let label = ctx.bookmark_mappings[0]
+            .label
+            .as_ref()
+            .expect("label present");
+        assert_eq!(
+            label,
+            &vec![
+                ContentItem::ContentBefore,
+                ContentItem::ContentText,
+                ContentItem::ContentAfter,
+            ]
+        );
+    }
+
+    // ── parse_page_size_value: zero/non-positive dimension rejection ─────────
+
+    #[test]
+    fn test_page_size_zero_dimension_not_stored() {
+        // A zero `size:` dimension is filtered out by `.filter(|v| *v > 0.0)`,
+        // making the whole declaration invalid (returns None → ignored).
+        assert_no_page_settings("@page { size: 0pt; }");
+        assert_no_page_settings("@page { size: 0mm 200pt; }");
+    }
 }
