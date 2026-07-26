@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.39.0] - 2026-07-26
+
+<!-- release-notes:auto:begin -->
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Security
+* harden(link): clip body-collected link annotations to content area by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/661
+* fix(inspect): bound content, nesting and output in the PDF inspect path by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/663
+* harden(gcpm): re-escape text nodes when serializing running elements by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/666
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.38.0...v0.39.0
+<!-- release-notes:auto:end -->
+
 ## [0.38.0] - 2026-07-22
 
 <!-- release-notes:auto:begin -->
