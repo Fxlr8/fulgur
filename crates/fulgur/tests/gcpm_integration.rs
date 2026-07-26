@@ -418,3 +418,96 @@ fn counter_pass_survives_element_names_with_css_metacharacters() {
         .expect("render must succeed even with crafted tag names");
     assert!(pdf.starts_with(b"%PDF-"), "output should be a PDF");
 }
+
+/// Running elements are serialized back to HTML and reparsed for the margin
+/// box, so the serializer has to be the parser's inverse. It used not to be
+/// for text nodes: the parser decodes character references on the way in and
+/// nothing re-encoded them on the way out, so text that arrived escaped came
+/// back as live markup in the header/footer.
+///
+/// That defeats `template::render_template`'s forced `AutoEscape::Html`,
+/// which `docs/security/threat-model.md` V1 lists as an existing mitigation
+/// for the trusted-template / untrusted-data shape.
+fn render_with_running_header(header_body: &str) -> Vec<u8> {
+    let mut assets = AssetBundle::new();
+    assets.add_css(
+        r#"
+        .header { position: running(pageHeader); }
+        @page { margin: 2cm; @top-center { content: element(pageHeader); } }
+    "#,
+    );
+    let engine = Engine::builder().assets(assets).build();
+    engine
+        .render(&format!(
+            r#"<!DOCTYPE html><html><body>
+  <div class="header">{header_body}</div>
+  <p>body</p>
+</body></html>"#
+        ))
+        .expect("render must succeed")
+}
+
+#[test]
+fn running_element_escaped_text_does_not_become_a_margin_box_link() {
+    // `&lt;a href=…&gt;` is what MiniJinja's HTML autoescape emits for a
+    // `{{ variable }}` holding an anchor — it must stay text.
+    let pdf = render_with_running_header(
+        "Report for &lt;a href=&quot;javascript:alert(1)&quot;&gt;click&lt;/a&gt;",
+    );
+    let bytes = String::from_utf8_lossy(&pdf);
+    assert!(
+        !bytes.contains("javascript:alert(1)"),
+        "escaped anchor became a live PDF URI action"
+    );
+    assert!(
+        !bytes.contains("/URI"),
+        "escaped anchor produced a link annotation"
+    );
+}
+
+#[test]
+fn running_element_escaped_text_does_not_become_margin_box_markup() {
+    // Beyond links: escaped text must not render as the markup it spells.
+    // Comparing against the same markup *authored* as elements is the check
+    // — before the fix both serialized to the same string, so the two PDFs
+    // were byte-identical.
+    //
+    // Asserting on the drawn text directly would be sharper, but `inspect`
+    // cannot recover it: lopdf 0.40 does not read krilla's `ToUnicode` CMap
+    // (no `/CMapVersion` / `/WMode` support), so extracted text comes back as
+    // raw glyph ids. Byte comparison against a known-good control is the
+    // available signal until that lands.
+    let injected = render_with_running_header("Status: &lt;b&gt;APPROVED&lt;/b&gt;");
+    let authored = render_with_running_header("Status: <b>APPROVED</b>");
+    assert_ne!(
+        injected, authored,
+        "escaped markup still rendered as authored markup in the margin box"
+    );
+}
+
+/// `<style />` reparses as an *open* `<style>`, so an empty `<style>` in a
+/// running element used to turn the rest of its margin box into CSS text —
+/// the header simply vanished. Same round-trip requirement as the escaping
+/// above: the serializer has to be the parser's inverse.
+#[test]
+fn running_element_empty_style_does_not_erase_the_margin_box() {
+    let with_empty_style = render_with_running_header("<style></style><b>X</b>");
+    let without = render_with_running_header("<b>X</b>");
+    assert_eq!(
+        with_empty_style, without,
+        "an empty <style> swallowed the rest of the margin box"
+    );
+}
+
+/// Over-escaping tripwire at the render level: `<style>` is a raw text
+/// element, so its CSS must survive serialization unescaped.
+#[test]
+fn running_element_style_child_survives_serialization() {
+    let with_style =
+        render_with_running_header("<style>.hl { color: red }</style><span class=\"hl\">X</span>");
+    let without_style = render_with_running_header("<span class=\"hl\">X</span>");
+    assert_ne!(
+        with_style, without_style,
+        "<style> inside a running element stopped applying — CSS was corrupted by escaping"
+    );
+}

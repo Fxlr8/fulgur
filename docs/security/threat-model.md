@@ -88,6 +88,13 @@ warranted because:
 - **[Existing]** MiniJinja auto-escaping (`AutoEscape::Html`) escapes
   `<`, `>`, `&`, `"` in all `{{ variable }}` output
   (`crates/fulgur/src/template.rs:90`)
+- **[Existing]** GCPM running elements are serialized back to HTML and
+  reparsed for their margin box, so that round trip must preserve the
+  escaping above. `gcpm::running::serialize_node` re-encodes text nodes
+  (`crates/fulgur/src/gcpm/running.rs`); without it, escaped data reaching
+  a header/footer via `position: running()` + `content: element()` would
+  come back as live markup. `<style>` / `<script>` children are exempt
+  because the parser never decoded references inside them
 
 ### V2 — Server-Side Request Forgery (SSRF)
 
