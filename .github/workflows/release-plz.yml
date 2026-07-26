@@ -140,6 +140,15 @@ jobs:
           ruby-version: '3.3'
           bundler-cache: false
 
+      # Explicit node pin (same SHA as release.yml) so the aux-file-sync step's
+      # `node -e` calls don't depend on the ambient runner image version.
+      # Without this, a runner image change that drops node would fail the
+      # Release PR generation, not just the safety-net publish path.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        if: fromJSON(steps.release-plz.outputs.pr).number
+        with:
+          node-version: '24'
+
       - name: Sync auxiliary version files onto the release PR branch
         if: fromJSON(steps.release-plz.outputs.pr).number
         env:
@@ -176,6 +185,46 @@ jobs:
           sed -i "s/VERSION = \".*\"/VERSION = \"$VERSION\"/" crates/fulgur-ruby/lib/fulgur/version.rb
           grep -Eq "^[[:space:]]*VERSION = \"$VERSION\"$" crates/fulgur-ruby/lib/fulgur/version.rb || {
             echo "::error::Failed to sync version in crates/fulgur-ruby/lib/fulgur/version.rb"
+            exit 1
+          }
+
+          # packages/npm/meta/package.json holds the meta package's own version
+          # plus one optionalDependencies entry per platform sub-package — all
+          # published in lockstep with the workspace crates. release.yml's
+          # `Publish meta package` step already overwrites these at publish time
+          # (so publish is correct regardless of repo state), but if the repo
+          # values stay stale, Dependabot chases them with churn PRs (fulgur-yzky).
+          # Sync here so the Release PR carries the correct values and the repo
+          # state matches what npm sees.
+          node -e "
+            const fs = require('fs');
+            const version = process.env.VERSION;
+            const path = 'packages/npm/meta/package.json';
+            const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+            pkg.version = version;
+            for (const k of Object.keys(pkg.optionalDependencies)) {
+              pkg.optionalDependencies[k] = version;
+            }
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+          " || {
+            echo "::error::Failed to rewrite packages/npm/meta/package.json"
+            exit 1
+          }
+          node -e "
+            const pkg = require('./packages/npm/meta/package.json');
+            const v = process.env.VERSION;
+            if (pkg.version !== v) {
+              console.error('meta package.json version', pkg.version, '!=', v);
+              process.exit(1);
+            }
+            for (const [k, val] of Object.entries(pkg.optionalDependencies)) {
+              if (val !== v) {
+                console.error('meta package.json optionalDependencies[' + k + ']', val, '!=', v);
+                process.exit(1);
+              }
+            }
+          " || {
+            echo "::error::Failed to verify packages/npm/meta/package.json"
             exit 1
           }
 
