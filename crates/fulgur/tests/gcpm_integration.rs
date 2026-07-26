@@ -471,11 +471,31 @@ fn running_element_escaped_text_does_not_become_margin_box_markup() {
     // Comparing against the same markup *authored* as elements is the check
     // — before the fix both serialized to the same string, so the two PDFs
     // were byte-identical.
+    //
+    // Asserting on the drawn text directly would be sharper, but `inspect`
+    // cannot recover it: lopdf 0.40 does not read krilla's `ToUnicode` CMap
+    // (no `/CMapVersion` / `/WMode` support), so extracted text comes back as
+    // raw glyph ids. Byte comparison against a known-good control is the
+    // available signal until that lands.
     let injected = render_with_running_header("Status: &lt;b&gt;APPROVED&lt;/b&gt;");
     let authored = render_with_running_header("Status: <b>APPROVED</b>");
     assert_ne!(
         injected, authored,
         "escaped markup still rendered as authored markup in the margin box"
+    );
+}
+
+/// `<style />` reparses as an *open* `<style>`, so an empty `<style>` in a
+/// running element used to turn the rest of its margin box into CSS text —
+/// the header simply vanished. Same round-trip requirement as the escaping
+/// above: the serializer has to be the parser's inverse.
+#[test]
+fn running_element_empty_style_does_not_erase_the_margin_box() {
+    let with_empty_style = render_with_running_header("<style></style><b>X</b>");
+    let without = render_with_running_header("<b>X</b>");
+    assert_eq!(
+        with_empty_style, without,
+        "an empty <style> swallowed the rest of the margin box"
     );
 }
 

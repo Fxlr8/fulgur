@@ -128,7 +128,7 @@ fn write_node(
                 writer.push('"');
             }
 
-            if !has_children {
+            if !has_children && accepts_self_closing(elem) {
                 writer.push_str(" />");
             } else {
                 writer.push('>');
@@ -163,6 +163,40 @@ fn write_node(
 /// same escaping as ordinary text.
 fn is_raw_text_element(elem: &blitz_dom::node::ElementData) -> bool {
     elem.name.ns == blitz_dom::ns!(html) && matches!(elem.name.local.as_ref(), "style" | "script")
+}
+
+/// Whether a childless element may be written as `<tag />`.
+///
+/// Only HTML void elements and foreign content (SVG / MathML) may. The HTML
+/// tokenizer ignores the trailing solidus on any other HTML start tag, so
+/// `<div />` reparses as an *open* `<div>` that swallows every following
+/// sibling as a child. For a raw text element the damage is worse:
+/// `<style />` reparses as an open `<style>` and the rest of the margin box
+/// becomes CSS text — an empty `<style>` in a running element used to erase
+/// the header it sat in.
+///
+/// Foreign content is the exception the spec grants: the solidus *is*
+/// honoured there, so `<path />` round-trips.
+fn accepts_self_closing(elem: &blitz_dom::node::ElementData) -> bool {
+    if elem.name.ns != blitz_dom::ns!(html) {
+        return true;
+    }
+    matches!(
+        elem.name.local.as_ref(),
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "source"
+            | "track"
+            | "wbr"
+    )
 }
 
 /// Escape a text node's content for safe HTML embedding.
@@ -317,6 +351,32 @@ mod tests {
             out.contains(r#"<a href="https://ok.test">link</a>"#),
             "{out}"
         );
+    }
+
+    /// `<tag />` only reparses as an empty element for void elements. Any
+    /// other childless HTML element must get an explicit end tag or the
+    /// reparse treats it as open and nests its following siblings inside it.
+    #[test]
+    fn serialize_node_closes_childless_non_void_elements() {
+        let out = serialize_first_div("<div><span></span><b>X</b></div>");
+        assert!(out.contains("<span></span>"), "{out}");
+        assert!(out.contains("<b>X</b>"), "{out}");
+        assert!(!out.contains("<span />"), "{out}");
+    }
+
+    /// The raw text variant of the above: `<style />` would make the reparse
+    /// swallow everything after it as CSS text.
+    #[test]
+    fn serialize_node_closes_empty_style_element() {
+        let out = serialize_first_div("<div><style></style><b>X</b></div>");
+        assert!(out.contains("<style></style>"), "{out}");
+        assert!(!out.contains("<style />"), "{out}");
+    }
+
+    #[test]
+    fn serialize_node_keeps_void_elements_self_closing() {
+        let out = serialize_first_div("<div>a<br>b</div>");
+        assert!(out.contains("<br />"), "{out}");
     }
 
     /// Over-escaping tripwire: `<style>` is a raw text element, so the parser
