@@ -147,22 +147,38 @@ fn write_node(
     }
 }
 
-/// HTML "raw text elements" (HTML §13.2.5.1): `<style>` and `<script>` in the
-/// HTML namespace. The tokenizer does **not** decode character references
-/// inside them, so for their children a verbatim write-back already is the
-/// parser's inverse — escaping would corrupt the CSS/JS rather than preserve
-/// it (`.a > b` would come back as `.a &gt; b`, which the reparse hands to
-/// Stylo verbatim).
+/// Elements whose children the HTML tokenizer reads **without** decoding
+/// character references — `<style>` / `<script>` (raw text, HTML §13.2.5.1),
+/// the elements the tree builder routes through generic raw text parsing
+/// (`<xmp>`, `<iframe>`, `<noembed>`, `<noframes>`), and `<plaintext>`, which
+/// switches the tokenizer to PLAINTEXT for the rest of the input.
+///
+/// For their children a verbatim write-back already is the parser's inverse.
+/// Escaping would corrupt them instead of preserving them: `.a > b` inside a
+/// `<style>` would come back as `.a &gt; b` and be handed to Stylo that way,
+/// and `A &amp; B` inside an `<xmp>` — which never got decoded — would be
+/// re-encoded to `A &amp;amp; B` and rendered with the extra entity visible.
 ///
 /// The namespace check matters: `<style>` in the SVG namespace is *not* raw
 /// text — foreign content decodes references normally — so it takes the
 /// escaping path like any other element.
 ///
-/// `<textarea>` and `<title>` are deliberately absent: they are *escapable*
-/// raw text, where the tokenizer does decode references, so they need the
+/// Deliberately absent, all verified against blitz's parser rather than
+/// assumed: `<textarea>` and `<title>` are *escapable* raw text, where the
+/// tokenizer does decode references; `<noscript>` only becomes raw text when
+/// scripting is enabled, and blitz parses with it disabled. All three need the
 /// same escaping as ordinary text.
+///
+/// `<plaintext>` cannot round-trip at all — it consumes everything to EOF, so
+/// the end tag written after it reparses as more text — but it belongs here
+/// regardless: not double-encoding its contents is strictly closer to the
+/// input than escaping them.
 fn is_raw_text_element(elem: &blitz_dom::node::ElementData) -> bool {
-    elem.name.ns == blitz_dom::ns!(html) && matches!(elem.name.local.as_ref(), "style" | "script")
+    elem.name.ns == blitz_dom::ns!(html)
+        && matches!(
+            elem.name.local.as_ref(),
+            "style" | "script" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext"
+        )
 }
 
 /// Whether a childless element may be written as `<tag />`.
@@ -377,6 +393,35 @@ mod tests {
     fn serialize_node_keeps_void_elements_self_closing() {
         let out = serialize_first_div("<div>a<br>b</div>");
         assert!(out.contains("<br />"), "{out}");
+    }
+
+    /// The tree builder routes several more elements through raw text
+    /// parsing, so their contents were never decoded either and must not be
+    /// re-encoded. Escaping `<xmp>A &amp; B</xmp>` would render the entity
+    /// itself in the header.
+    #[test]
+    fn serialize_node_keeps_every_raw_text_mode_verbatim() {
+        for tag in ["style", "script", "xmp", "iframe", "noembed", "noframes"] {
+            let out = serialize_first_div(&format!("<div><{tag}>A &amp; B</{tag}></div>"));
+            assert!(
+                out.contains(&format!("<{tag}>A &amp; B</{tag}>")),
+                "{tag} content was re-encoded: {out}"
+            );
+        }
+    }
+
+    /// The counterpart: *escapable* raw text and, with scripting disabled,
+    /// `<noscript>` all get decoded on the way in, so they take the escaping
+    /// path like ordinary text.
+    #[test]
+    fn serialize_node_escapes_escapable_raw_text_elements() {
+        for tag in ["textarea", "title", "noscript"] {
+            let out = serialize_first_div(&format!("<div><{tag}>A &amp; B</{tag}></div>"));
+            assert!(
+                out.contains(&format!("<{tag}>A &amp; B</{tag}>")),
+                "{tag} content lost its escaping: {out}"
+            );
+        }
     }
 
     /// Over-escaping tripwire: `<style>` is a raw text element, so the parser
