@@ -158,7 +158,14 @@ jobs:
           PR_NUMBER=${{ fromJSON(steps.release-plz.outputs.pr).number }}
           gh pr checkout "$PR_NUMBER"
 
-          VERSION=$(grep '^version = ' crates/fulgur/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # Export so child processes see it — the `node -e` calls below read
+          # it via `process.env.VERSION`. A plain `VERSION=…` assignment stays
+          # a shell variable and doesn't cross the process boundary, which
+          # would silently produce a broken manifest (JSON.stringify strips
+          # the undefined fields) that the verify pass then accepts (undefined
+          # !== undefined). Everything else in this step reads VERSION through
+          # bash interpolation, which is unaffected either way.
+          export VERSION=$(grep '^version = ' crates/fulgur/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' || {
             echo "::error::Failed to extract a valid version from crates/fulgur/Cargo.toml"
             exit 1
