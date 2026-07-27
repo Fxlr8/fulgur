@@ -1324,4 +1324,56 @@ mod tests {
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // build_list_item_body (outside marker, inline-root): empty <li> with a
+    // ::before pseudo whose `content` is an image URL, but NO assets are
+    // provided so `build_inline_pseudo_image` returns None. The <li> is still
+    // an inline root (the inline pseudo-element creates an IFC), but both
+    // `paragraph_opt` and `before_inline` are None — exercising the final
+    // `else` branch at lines 429-436 (fall-through to non-inline-root walk).
+    #[test]
+    fn smoke_outside_marker_inline_before_unresolved_url_no_assets() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><head>
+            <style>li::before { content: url("dot.png"); width: 8px; height: 8px; }</style>
+            </head><body>
+            <ul><li></li></ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_list_item_body (outside marker, inline-root): same as above but via
+    // ::after. Verifies that the else-branch at lines 429-436 is also reached
+    // when `after_inline` (not `before_inline`) is the unresolved pseudo.
+    #[test]
+    fn smoke_outside_marker_inline_after_unresolved_url_no_assets() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><head>
+            <style>li::after { content: url("dot.png"); width: 8px; height: 8px; }</style>
+            </head><body>
+            <ul><li></li></ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_list_item_body (outside marker, inline-root): empty <li> with both
+    // ::before AND ::after inline-image pseudos whose URLs are unresolved.
+    // `before_inline` and `after_inline` are both None, exercising the
+    // lines 429-436 path with two simultaneous unresolved pseudo-images.
+    #[test]
+    fn smoke_outside_marker_both_pseudos_unresolved_url_no_assets() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><head>
+            <style>
+            li::before { content: url("before.png"); width: 6px; height: 6px; }
+            li::after  { content: url("after.png");  width: 6px; height: 6px; }
+            </style>
+            </head><body>
+            <ul><li></li></ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
