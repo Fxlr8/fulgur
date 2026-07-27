@@ -1944,6 +1944,17 @@ fn draw_under_clip(
             if transform_skip.contains(&desc_id)
                 || nested_clip_skip.contains(&desc_id)
                 || nested_opacity_skip.contains(&desc_id)
+                // Mirrors the top-level dispatch loop's
+                // `inline_box_subtree_skip` guard: inline-box content is
+                // painted exclusively by `paragraph::draw_shaped_lines`'s
+                // `LineItem::InlineBox` arm. This block's own paragraph is
+                // drawn above, inside the same clip group, and that draw
+                // already dispatched these nodes. Re-dispatching here
+                // paints them twice — and because the second dispatch
+                // re-enters `draw_under_clip` for a nested clipped
+                // inline-block, the duplication compounds exponentially
+                // with nesting depth rather than linearly.
+                || drawables.inline_box_subtree_skip.contains(&desc_id)
             {
                 continue;
             }
@@ -2287,6 +2298,11 @@ fn draw_under_opacity(
             if transform_skip.contains(&desc_id)
                 || nested_clip_skip.contains(&desc_id)
                 || nested_opacity_skip.contains(&desc_id)
+                // Same `inline_box_subtree_skip` guard as `draw_under_clip`
+                // and the top-level dispatch loop — this block's paragraph,
+                // drawn above inside the `draw_with_opacity` group, already
+                // dispatched its inline-box content.
+                || drawables.inline_box_subtree_skip.contains(&desc_id)
             {
                 continue;
             }

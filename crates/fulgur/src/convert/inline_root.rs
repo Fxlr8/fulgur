@@ -30,12 +30,20 @@ pub(super) fn try_convert(
 
     // Snapshot must be taken BEFORE `extract_paragraph` because the latter
     // recurses into inline-box children (registering their drawable
-    // entries into `out`); placing the snapshot after would miss those
-    // exact nodes in the `clip_descendants`/`opacity_descendants` diff.
+    // entries into `out`); placing the snapshot after would miss the
+    // non-inline-box nodes (abs-positioned / pseudo children registered by
+    // `register_pseudo_content`) that belong in the
+    // `clip_descendants`/`opacity_descendants` diff.
+    //
     // The `id != node_id` filter drops the inline-root's own id from the
-    // descendant list; nested inline-box subtree members are intentionally
-    // NOT filtered against `inline_box_subtree_skip` so the render path's
-    // `draw_under_clip` re-dispatches them inside the clip group.
+    // descendant list. The diff still *contains* inline-box subtree
+    // members, because this is a plain before/after set difference — but
+    // those must NOT be painted from the descendant list: they are owned
+    // by paragraph-time `LineItem::InlineBox` dispatch. `render.rs`
+    // filters them out against `inline_box_subtree_skip` in all three
+    // descendant walks (the top-level dispatch loop, `draw_under_clip`,
+    // and `draw_under_opacity`). Dropping that filter double-paints the
+    // subtree, and the duplicate compounds exponentially with nesting.
     let style = extract_block_style(node, ctx.assets);
     let (opacity, visible) = extract_opacity_visible(node);
     let needs_block_pre = style.needs_block_wrapper()

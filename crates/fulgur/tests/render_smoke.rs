@@ -1613,6 +1613,84 @@ fn render_v2_smoke_inline_block_opacity_descendant_branch() {
     assert!(pdf.starts_with(b"%PDF"));
 }
 
+/// Build `depth` nested `inline-block` spans wrapping a coloured leaf.
+/// `scope` is the extra declaration applied to every wrapper — the
+/// `overflow:hidden` / `opacity` variants are the ones that used to
+/// re-dispatch their inline-box subtree.
+fn nested_inline_blocks(depth: usize, scope: &str) -> String {
+    let mut s = String::from("<!DOCTYPE html><html><body>");
+    for _ in 0..depth {
+        s.push_str(&format!(
+            r#"<span style="display:inline-block;width:60px;height:40px;{scope}">"#
+        ));
+    }
+    s.push_str(
+        r#"<span style="display:inline-block;width:20px;height:20px;background:#ff0000"></span>"#,
+    );
+    for _ in 0..depth {
+        s.push_str("</span>");
+    }
+    s.push_str("</body></html>");
+    s
+}
+
+/// Regression: an inline root that needs an `overflow` clip or an opacity
+/// wrapper must not paint its inline-box subtree twice.
+///
+/// `paragraph::draw_shaped_lines` dispatches `LineItem::InlineBox` content
+/// itself, so `render::draw_under_clip` / `draw_under_opacity` must filter
+/// `inline_box_subtree_skip` out of their descendant walks — exactly like
+/// the top-level dispatch loop does. Without that filter the subtree paints
+/// once per scope, and because the duplicate re-enters `draw_under_clip`
+/// for the *next* nested clipped inline-block, the cost doubles per level:
+/// depth 22 produced a 10.7 MB PDF in ~4.8 s from a ~1 KB input.
+///
+/// The assertion compares growth *rate* across two equal-width depth
+/// windows rather than absolute size, because some nesting genuinely costs
+/// more per level (each nested opacity scope needs its own transparency
+/// group — a measured, and legitimate, ~432 bytes/level). Linear growth
+/// keeps the two windows comparable; doubling-per-level makes the upper
+/// window ~2^8 times the lower one.
+///
+/// Only the clip scope compounds today: `draw_under_clip` recurses into
+/// itself for a nested clipped block, whereas the opacity duplicate stays
+/// a constant factor (measured linear both before and after the fix). The
+/// opacity scope is still asserted here so that if `draw_under_opacity`
+/// ever grows an equivalent recursive arm, it cannot silently inherit the
+/// same blowup.
+#[test]
+fn nested_clipped_inline_blocks_do_not_amplify_output() {
+    let render_at = |depth: usize, scope: &str| {
+        Engine::builder()
+            .build()
+            .render(&nested_inline_blocks(depth, scope))
+            .unwrap_or_else(|e| panic!("render at depth {depth} failed: {e}"))
+            .len()
+    };
+
+    for scope in ["overflow:hidden;", "opacity:0.5;"] {
+        let (d8, d12, d16, d20) = (
+            render_at(8, scope),
+            render_at(12, scope),
+            render_at(16, scope),
+            render_at(20, scope),
+        );
+        let lower = d12.saturating_sub(d8);
+        let upper = d20.saturating_sub(d16);
+        // Slack term keeps tiny absolute deltas (the clip case grows by a
+        // couple of bytes per window) from tripping a pure ratio test.
+        let bound = 4 * lower + 1024;
+        assert!(
+            upper <= bound,
+            "nested `{scope}` inline-blocks amplified output super-linearly: \
+             sizes 8/12/16/20 = {d8}/{d12}/{d16}/{d20} bytes; growth over \
+             depths 16→20 was {upper} bytes vs {lower} bytes over 8→12 \
+             (allowed <= {bound}). The inline-box subtree is being dispatched \
+             both by the paragraph draw and by the clip/opacity descendant walk.",
+        );
+    }
+}
+
 #[test]
 fn render_v2_smoke_inline_block_image_child_via_dispatch_fragment() {
     // Exercises dispatch_fragment image branch when called from the inline-box
