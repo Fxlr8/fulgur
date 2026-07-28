@@ -1634,16 +1634,16 @@ fn nested_inline_blocks(depth: usize, scope: &str) -> String {
     s
 }
 
-/// Regression: an inline root that needs an `overflow` clip or an opacity
-/// wrapper must not paint its inline-box subtree twice.
+/// Regression: an inline root that needs an `overflow` clip, an opacity
+/// wrapper, or a `transform` must not paint its inline-box subtree twice.
 ///
 /// `paragraph::draw_shaped_lines` dispatches `LineItem::InlineBox` content
-/// itself, so `render::draw_under_clip` / `draw_under_opacity` must filter
-/// `inline_box_subtree_skip` out of their descendant walks — exactly like
-/// the top-level dispatch loop does. Without that filter the subtree paints
-/// once per scope, and because the duplicate re-enters `draw_under_clip`
-/// for the *next* nested clipped inline-block, the cost doubles per level:
-/// depth 22 produced a 10.7 MB PDF in ~4.8 s from a ~1 KB input.
+/// itself, so every descendant walk in `render` must filter
+/// `inline_box_subtree_skip` — exactly like the top-level dispatch loop
+/// does. Without that filter the subtree paints once per scope, and where
+/// the duplicate re-enters the *same* helper for the next nested wrapper,
+/// the cost doubles per level: depth 22 produced a 10.7 MB PDF in ~4.8 s
+/// (clip) and a 28.6 MB PDF in ~4.4 s (transform) from a ~2 KB input.
 ///
 /// The assertion compares growth *rate* across two equal-width depth
 /// windows rather than absolute size, because some nesting genuinely costs
@@ -1652,12 +1652,12 @@ fn nested_inline_blocks(depth: usize, scope: &str) -> String {
 /// keeps the two windows comparable; doubling-per-level makes the upper
 /// window ~2^8 times the lower one.
 ///
-/// Only the clip scope compounds today: `draw_under_clip` recurses into
-/// itself for a nested clipped block, whereas the opacity duplicate stays
-/// a constant factor (measured linear both before and after the fix). The
-/// opacity scope is still asserted here so that if `draw_under_opacity`
-/// ever grows an equivalent recursive arm, it cannot silently inherit the
-/// same blowup.
+/// The clip and transform scopes are the ones that compound, because
+/// `draw_under_clip` / `draw_under_transform` recurse into themselves for
+/// a nested clipped / transformed block. The opacity duplicate stays a
+/// constant factor (measured linear both before and after the fix); it is
+/// asserted here anyway so that if `draw_under_opacity` ever grows an
+/// equivalent recursive arm, it cannot silently inherit the same blowup.
 #[test]
 fn nested_clipped_inline_blocks_do_not_amplify_output() {
     let render_at = |depth: usize, scope: &str| {
@@ -1668,7 +1668,11 @@ fn nested_clipped_inline_blocks_do_not_amplify_output() {
             .len()
     };
 
-    for scope in ["overflow:hidden;", "opacity:0.5;"] {
+    for scope in [
+        "overflow:hidden;",
+        "opacity:0.5;",
+        "transform:rotate(1deg);",
+    ] {
         let (d8, d12, d16, d20) = (
             render_at(8, scope),
             render_at(12, scope),
@@ -1687,6 +1691,211 @@ fn nested_clipped_inline_blocks_do_not_amplify_output() {
              depths 16→20 was {upper} bytes vs {lower} bytes over 8→12 \
              (allowed <= {bound}). The inline-box subtree is being dispatched \
              both by the paragraph draw and by the clip/opacity descendant walk.",
+        );
+    }
+}
+
+/// Count the `rg` (non-stroking RGB) operators selecting pure red in one
+/// decoded content stream.
+fn count_red_in_content(bytes: &[u8]) -> usize {
+    let Ok(content) = lopdf::content::Content::decode(bytes) else {
+        return 0;
+    };
+    content
+        .operations
+        .iter()
+        .filter(|op| op.operator == "rg" && op.operands.len() == 3)
+        .filter(|op| {
+            let channels: Vec<f32> = op
+                .operands
+                .iter()
+                .filter_map(|o| match o {
+                    lopdf::Object::Integer(i) => Some(*i as f32),
+                    lopdf::Object::Real(f) => Some(*f),
+                    _ => None,
+                })
+                .collect();
+            channels.len() == 3 && channels[0] > 0.9 && channels[1] < 0.1 && channels[2] < 0.1
+        })
+        .count()
+}
+
+/// Count pure-red fills across page content streams *and* form XObjects.
+///
+/// The XObject sweep is required for the opacity scope: `draw_with_opacity`
+/// paints into a transparency group, which krilla emits as a separate
+/// `/Subtype /Form` stream rather than inline in the page content.
+fn count_red_fill_ops(pdf: &[u8]) -> usize {
+    let doc = lopdf::Document::load_mem(pdf).expect("PDF must parse");
+    let mut count = 0;
+    for (_, page_id) in doc.get_pages() {
+        let bytes = doc
+            .get_page_content(page_id)
+            .expect("page content stream readable");
+        count += count_red_in_content(&bytes);
+    }
+    for obj in doc.objects.values() {
+        let lopdf::Object::Stream(stream) = obj else {
+            continue;
+        };
+        let is_form = matches!(
+            stream.dict.get(b"Subtype").and_then(lopdf::Object::as_name),
+            Ok(b"Form")
+        );
+        if !is_form {
+            continue;
+        }
+        if let Ok(bytes) = stream.decompressed_content() {
+            count += count_red_in_content(&bytes);
+        }
+    }
+    count
+}
+
+/// Regression: the inline-box subtree paints exactly once under *every*
+/// wrapping scope, not just the ones that amplify.
+///
+/// `nested_clipped_inline_blocks_do_not_amplify_output` catches the
+/// self-recursive helpers (clip, transform) by their growth rate, but a
+/// duplicate that stays a constant factor — the opacity wrapper, and a
+/// `<table>` with `overflow:hidden` around a cell's inline-block — is
+/// invisible to a rate test. Counting the red fill operator pins the
+/// invariant directly: one leaf, one `1 0 0 rg`.
+///
+/// Before the fix the `overflow:hidden` table emitted the leaf twice
+/// (once from the cell's paragraph draw, once from
+/// `draw_under_clip_table`'s `clip_descendants` walk).
+#[test]
+fn inline_box_subtree_paints_once_under_every_scope() {
+    for scope in [
+        "",
+        "overflow:hidden;",
+        "opacity:0.5;",
+        "transform:rotate(1deg);",
+    ] {
+        let pdf = Engine::builder()
+            .build()
+            .render(&nested_inline_blocks(1, scope))
+            .expect("render");
+        let reds = count_red_fill_ops(&pdf);
+        assert_eq!(
+            reds, 1,
+            "inline-block leaf under `{scope}` painted {reds} times, expected 1 \
+             — the inline-box subtree is dispatched both by the paragraph draw \
+             and by a descendant walk",
+        );
+    }
+}
+
+/// The other shape the skip has to get right: the scope sits on a *block*
+/// wrapper, and the inline box is inside that block's paragraph.
+///
+/// Here the descendant walk dispatches the `<p>`, and the paragraph draw is
+/// what paints the inline box — so skipping the subtree in the walk must
+/// still leave exactly one paint. This variant guards the opposite failure
+/// mode from the amplification test: an over-eager skip makes the leaf paint
+/// *zero* times, and neither a growth-rate assertion nor a byte-identical
+/// VRT golden would notice content that simply vanished.
+#[test]
+fn inline_box_under_block_scope_paints_exactly_once() {
+    for scope in [
+        "",
+        "overflow:hidden;",
+        "opacity:0.5;",
+        "transform:rotate(1deg);",
+    ] {
+        let html = format!(
+            "<!DOCTYPE html><html><body>\
+             <div style=\"width:300px;height:200px;{scope}\">\
+             <p>text {} tail</p></div></body></html>",
+            r#"<span style="display:inline-block;width:20px;height:20px;background:#ff0000"></span>"#,
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        let reds = count_red_fill_ops(&pdf);
+        assert_eq!(
+            reds, 1,
+            "inline box inside a paragraph under block scope `{scope}` painted \
+             {reds} times, expected 1 (0 = the descendant-walk skip swallowed \
+             content the paragraph draw was supposed to paint; 2 = it is \
+             painted by both)",
+        );
+    }
+}
+
+/// Regression: a scoped inline-block whose child is a *block* must still
+/// paint that child.
+///
+/// This is the shape that makes `Drawables::inline_box_subtree_skip` the
+/// wrong predicate for a scope walk. The global set contains every drawable
+/// under every inline box, so it contains this red child — but only because
+/// the wrapper is an inline box in the *body's* paragraph. The wrapper has
+/// no paragraph carrying the child, so nothing else paints it, and the
+/// scope walk skipping it drops the content outright.
+///
+/// PR #677 shipped exactly that regression on the clip and opacity paths
+/// (verified against `c36efebf`: the red child was emitted 0 times under
+/// `overflow:hidden` and `opacity`, and 1 time before #677). The fix is
+/// `paragraph_owned_inline_boxes`, which skips only what a paragraph drawn
+/// inside the scope actually paints.
+#[test]
+fn block_child_of_scoped_inline_block_still_paints() {
+    for scope in [
+        "",
+        "overflow:hidden;",
+        "opacity:0.5;",
+        "transform:rotate(1deg);",
+    ] {
+        for wrapper_content in ["", "text"] {
+            let html = format!(
+                "<!DOCTYPE html><html><body>\
+                 <div style=\"display:inline-block;width:100px;height:100px;{scope}\">\
+                 {wrapper_content}\
+                 <div style=\"background:#ff0000;width:50px;height:50px\"></div>\
+                 </div></body></html>"
+            );
+            let pdf = Engine::builder().build().render(&html).expect("render");
+            let reds = count_red_fill_ops(&pdf);
+            assert_eq!(
+                reds, 1,
+                "block child of an inline-block under scope `{scope}` \
+                 (wrapper text: {wrapper_content:?}) painted {reds} times, \
+                 expected 1 — 0 means the scope walk's skip predicate \
+                 swallowed a child no paragraph paints",
+            );
+        }
+    }
+}
+
+/// Regression: `draw_under_clip_table`'s `clip_descendants` walk must not
+/// re-paint a cell's inline box, like the three block-level walks.
+///
+/// `convert::table` fills `TableEntry::clip_descendants` from the same
+/// `drawn_since` diff the block paths use, so a cell's inline-box subtree
+/// lands in it. Before the fix the leaf painted twice: once from the cell's
+/// paragraph draw, once from the table's descendant walk. Unlike the clip
+/// and transform paths this duplicate does not compound with nesting, so
+/// the growth-rate assertion above cannot see it.
+#[test]
+fn inline_box_in_clipped_table_cell_paints_once() {
+    // Both cell shapes: a bare inline-block (the cell's inline root is the
+    // box itself) and text around it (the box is one item in a real
+    // paragraph, so the walk dispatches the paragraph instead).
+    for cell in [
+        r#"<span style="display:inline-block;width:20px;height:20px;background:#ff0000"></span>"#,
+        r#"cell text <span style="display:inline-block;width:20px;height:20px;background:#ff0000"></span> tail"#,
+    ] {
+        let html = format!(
+            "<!DOCTYPE html><html><body>\
+             <table style=\"overflow:hidden;width:300px;height:200px\"><tr><td>{cell}</td></tr></table>\
+             </body></html>",
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        let reds = count_red_fill_ops(&pdf);
+        assert_eq!(
+            reds, 1,
+            "inline-block leaf inside an `overflow:hidden` table painted {reds} times, \
+             expected 1 — `draw_under_clip_table` must skip the inline boxes the \
+             cell paragraphs already paint (cell markup: {cell})",
         );
     }
 }
