@@ -4585,6 +4585,100 @@ mod tests {
         assert!(!para_has_link_runs(&para));
     }
 
+    /// Build a paragraph carrying one inline box with the given node id.
+    fn para_with_inline_box(node_id: Option<usize>) -> crate::drawables::ParagraphEntry {
+        let item = crate::paragraph::InlineBoxItem {
+            node_id,
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
+            link: None,
+            opacity: 1.0,
+            visible: true,
+        };
+        make_para(vec![make_shaped_line(vec![
+            crate::paragraph::LineItem::InlineBox(item),
+        ])])
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_expands_the_scope_owner_paragraph() {
+        let mut d = Drawables::new();
+        // Scope owner 1 owns a paragraph carrying inline box 2, whose
+        // subtree is {3, 4}.
+        d.paragraphs.insert(1, para_with_inline_box(Some(2)));
+        d.inline_box_subtree_descendants.insert(2, vec![3, 4]);
+
+        let skip = paragraph_owned_inline_boxes([1, 3, 4], &d);
+        assert_eq!(
+            skip,
+            [2, 3, 4]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "the box and its recorded subtree are painted by the paragraph",
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_expands_descendant_paragraphs() {
+        let mut d = Drawables::new();
+        // The scope owner (1) has no paragraph; a descendant (5) does. A
+        // table is exactly this shape — the duplicate originates in a cell.
+        d.paragraphs.insert(5, para_with_inline_box(Some(6)));
+        d.inline_box_subtree_descendants.insert(6, vec![7]);
+
+        let skip = paragraph_owned_inline_boxes([1, 5, 6, 7], &d);
+        assert_eq!(
+            skip,
+            [6, 7]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_ignores_ids_without_a_paragraph() {
+        let mut d = Drawables::new();
+        // 9 is a plain block drawable, not a paragraph — nothing to skip.
+        // This is the block-child case: the id is in the scope's descendant
+        // list but no paragraph paints it, so the walk must still dispatch
+        // it. Skipping it here is what PR #677 got wrong (fulgur-49xw).
+        d.inline_box_subtree_descendants.insert(8, vec![9]);
+
+        let skip = paragraph_owned_inline_boxes([8, 9], &d);
+        assert!(
+            skip.is_empty(),
+            "no paragraph in scope means nothing is paragraph-owned, got {skip:?}",
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_skips_boxes_without_a_node_id() {
+        let mut d = Drawables::new();
+        d.paragraphs.insert(1, para_with_inline_box(None));
+
+        let skip = paragraph_owned_inline_boxes([1], &d);
+        assert!(
+            skip.is_empty(),
+            "an inline box with no node id has nothing to skip"
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_handles_a_box_with_no_recorded_subtree() {
+        let mut d = Drawables::new();
+        // `inline_box_subtree_descendants` has no entry for 2 — a leaf
+        // inline box. The box itself is still paragraph-owned.
+        d.paragraphs.insert(1, para_with_inline_box(Some(2)));
+
+        let skip = paragraph_owned_inline_boxes([1], &d);
+        assert_eq!(
+            skip,
+            [2].into_iter().collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
     #[test]
     fn para_has_link_runs_image_with_link_returns_true() {
         let span = std::sync::Arc::new(crate::paragraph::LinkSpan {
