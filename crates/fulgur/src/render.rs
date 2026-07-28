@@ -1401,6 +1401,58 @@ fn paint_multicol_paragraph_slices(
     }
 }
 
+/// Collect the inline-box subtrees that paragraphs drawn *inside a scope*
+/// already paint, so the scope's own descendant walk does not paint them a
+/// second time.
+///
+/// `scope_ids` must yield the scope owner plus every id in the walk's
+/// descendant list: any paragraph in that subtree is drawn inside the
+/// scope, so whatever inline boxes it carries are its to paint.
+///
+/// This is deliberately narrower than `Drawables::inline_box_subtree_skip`.
+/// That set is global, which is right for the top-level dispatch loop —
+/// every member is painted by *some* paragraph — but wrong inside a scope.
+/// A scoped inline-block's own subtree lands in the global set only because
+/// the inline-block is an inline box in its *parent's* paragraph; when the
+/// inline-block has no paragraph of its own, as in
+///
+/// ```html
+/// <div style="display:inline-block;overflow:hidden">
+///   <div style="background:red"></div>
+/// </div>
+/// ```
+///
+/// the scope walk is the only thing that would paint that child. Skipping
+/// it there drops the content outright — the regression PR #677 shipped by
+/// reaching for the global set here (fulgur-49xw).
+fn paragraph_owned_inline_boxes(
+    scope_ids: impl IntoIterator<Item = usize>,
+    drawables: &Drawables,
+) -> std::collections::BTreeSet<usize> {
+    let mut skip = std::collections::BTreeSet::new();
+    for id in scope_ids {
+        let Some(para) = drawables.paragraphs.get(&id) else {
+            continue;
+        };
+        for item in para.lines.iter().flat_map(|line| line.items.iter()) {
+            let crate::paragraph::LineItem::InlineBox(ib) = item else {
+                continue;
+            };
+            let Some(ib_id) = ib.node_id else {
+                continue;
+            };
+            // `paragraph::draw_shaped_lines` hands the box to
+            // `dispatch_inline_box_content`, which paints the box itself
+            // and walks `inline_box_subtree_descendants[ib_id]`.
+            skip.insert(ib_id);
+            if let Some(descs) = drawables.inline_box_subtree_descendants.get(&ib_id) {
+                skip.extend(descs.iter().copied());
+            }
+        }
+    }
+    skip
+}
+
 /// Push the transform onto the surface + link collector, dispatch the
 /// wrapper node's own payload and every descendant fragment that lands
 /// on `page_index`, then pop:
@@ -1524,10 +1576,20 @@ fn draw_under_transform(
         .filter_map(|id| drawables.block_styles.get(id))
         .flat_map(|b| b.opacity_descendants.iter().copied())
         .collect();
+    // Inline boxes carried by paragraphs inside this transform are painted
+    // by those paragraphs' `LineItem::InlineBox` arms. Re-dispatching them
+    // here paints them twice — and because the duplicate re-enters
+    // `draw_under_transform` for a nested transformed inline-block, the
+    // cost doubles per nesting level rather than staying constant.
+    let paragraph_ib_skip = paragraph_owned_inline_boxes(
+        std::iter::once(node_id).chain(tx.descendants.iter().copied()),
+        drawables,
+    );
     for &desc_id in &tx.descendants {
         if nested_skip.contains(&desc_id)
             || clip_skip.contains(&desc_id)
             || opacity_skip.contains(&desc_id)
+            || paragraph_ib_skip.contains(&desc_id)
         {
             continue;
         }
@@ -1940,21 +2002,20 @@ fn draw_under_clip(
             .filter_map(|id| drawables.block_styles.get(id))
             .flat_map(|b| b.opacity_descendants.iter().copied())
             .collect();
+        // Inline boxes carried by paragraphs inside this clip are painted
+        // by those paragraphs' `LineItem::InlineBox` arms. Re-dispatching
+        // them here paints them twice — and because the duplicate re-enters
+        // `draw_under_clip` for a nested clipped inline-block, the cost
+        // doubles per nesting level rather than staying constant.
+        let paragraph_ib_skip = paragraph_owned_inline_boxes(
+            std::iter::once(node_id).chain(block.clip_descendants.iter().copied()),
+            drawables,
+        );
         for &desc_id in &block.clip_descendants {
             if transform_skip.contains(&desc_id)
                 || nested_clip_skip.contains(&desc_id)
                 || nested_opacity_skip.contains(&desc_id)
-                // Mirrors the top-level dispatch loop's
-                // `inline_box_subtree_skip` guard: inline-box content is
-                // painted exclusively by `paragraph::draw_shaped_lines`'s
-                // `LineItem::InlineBox` arm. This block's own paragraph is
-                // drawn above, inside the same clip group, and that draw
-                // already dispatched these nodes. Re-dispatching here
-                // paints them twice — and because the second dispatch
-                // re-enters `draw_under_clip` for a nested clipped
-                // inline-block, the duplication compounds exponentially
-                // with nesting depth rather than linearly.
-                || drawables.inline_box_subtree_skip.contains(&desc_id)
+                || paragraph_ib_skip.contains(&desc_id)
             {
                 continue;
             }
@@ -2294,15 +2355,20 @@ fn draw_under_opacity(
             .filter_map(|id| drawables.block_styles.get(id))
             .flat_map(|b| b.opacity_descendants.iter().copied())
             .collect();
+        // Same narrowing as `draw_under_clip`: paragraphs inside this
+        // opacity group paint their own inline boxes, so the walk must not
+        // paint them again. Unlike the clip and transform paths this
+        // duplicate does not compound — `draw_under_opacity` has no
+        // self-recursive arm — but it is still a double paint.
+        let paragraph_ib_skip = paragraph_owned_inline_boxes(
+            std::iter::once(node_id).chain(block.opacity_descendants.iter().copied()),
+            drawables,
+        );
         for &desc_id in &block.opacity_descendants {
             if transform_skip.contains(&desc_id)
                 || nested_clip_skip.contains(&desc_id)
                 || nested_opacity_skip.contains(&desc_id)
-                // Same `inline_box_subtree_skip` guard as `draw_under_clip`
-                // and the top-level dispatch loop — this block's paragraph,
-                // drawn above inside the `draw_with_opacity` group, already
-                // dispatched its inline-box content.
-                || drawables.inline_box_subtree_skip.contains(&desc_id)
+                || paragraph_ib_skip.contains(&desc_id)
             {
                 continue;
             }
@@ -2921,10 +2987,16 @@ fn draw_under_clip_table(
             .flat_map(|b| b.opacity_descendants.iter().copied())
             .collect();
 
+        // A table has no paragraph of its own, so the skip set comes purely
+        // from the cell paragraphs inside `clip_descendants` — that is
+        // where the duplicate paint of a cell's inline box originates.
+        let paragraph_ib_skip =
+            paragraph_owned_inline_boxes(table.clip_descendants.iter().copied(), drawables);
         for &desc_id in &table.clip_descendants {
             if transform_skip.contains(&desc_id)
                 || nested_clip_skip.contains(&desc_id)
                 || nested_opacity_skip.contains(&desc_id)
+                || paragraph_ib_skip.contains(&desc_id)
             {
                 continue;
             }
@@ -4511,6 +4583,100 @@ mod tests {
         let line = make_shaped_line(vec![crate::paragraph::LineItem::InlineBox(item)]);
         let para = make_para(vec![line]);
         assert!(!para_has_link_runs(&para));
+    }
+
+    /// Build a paragraph carrying one inline box with the given node id.
+    fn para_with_inline_box(node_id: Option<usize>) -> crate::drawables::ParagraphEntry {
+        let item = crate::paragraph::InlineBoxItem {
+            node_id,
+            width: 10.0_f32.as_pt(),
+            height: 10.0_f32.as_pt(),
+            x_offset: crate::units::Pt::ZERO,
+            computed_y: crate::units::Pt::ZERO,
+            link: None,
+            opacity: 1.0,
+            visible: true,
+        };
+        make_para(vec![make_shaped_line(vec![
+            crate::paragraph::LineItem::InlineBox(item),
+        ])])
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_expands_the_scope_owner_paragraph() {
+        let mut d = Drawables::new();
+        // Scope owner 1 owns a paragraph carrying inline box 2, whose
+        // subtree is {3, 4}.
+        d.paragraphs.insert(1, para_with_inline_box(Some(2)));
+        d.inline_box_subtree_descendants.insert(2, vec![3, 4]);
+
+        let skip = paragraph_owned_inline_boxes([1, 3, 4], &d);
+        assert_eq!(
+            skip,
+            [2, 3, 4]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "the box and its recorded subtree are painted by the paragraph",
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_expands_descendant_paragraphs() {
+        let mut d = Drawables::new();
+        // The scope owner (1) has no paragraph; a descendant (5) does. A
+        // table is exactly this shape — the duplicate originates in a cell.
+        d.paragraphs.insert(5, para_with_inline_box(Some(6)));
+        d.inline_box_subtree_descendants.insert(6, vec![7]);
+
+        let skip = paragraph_owned_inline_boxes([1, 5, 6, 7], &d);
+        assert_eq!(
+            skip,
+            [6, 7]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_ignores_ids_without_a_paragraph() {
+        let mut d = Drawables::new();
+        // 9 is a plain block drawable, not a paragraph — nothing to skip.
+        // This is the block-child case: the id is in the scope's descendant
+        // list but no paragraph paints it, so the walk must still dispatch
+        // it. Skipping it here is what PR #677 got wrong (fulgur-49xw).
+        d.inline_box_subtree_descendants.insert(8, vec![9]);
+
+        let skip = paragraph_owned_inline_boxes([8, 9], &d);
+        assert!(
+            skip.is_empty(),
+            "no paragraph in scope means nothing is paragraph-owned, got {skip:?}",
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_skips_boxes_without_a_node_id() {
+        let mut d = Drawables::new();
+        d.paragraphs.insert(1, para_with_inline_box(None));
+
+        let skip = paragraph_owned_inline_boxes([1], &d);
+        assert!(
+            skip.is_empty(),
+            "an inline box with no node id has nothing to skip"
+        );
+    }
+
+    #[test]
+    fn paragraph_owned_inline_boxes_handles_a_box_with_no_recorded_subtree() {
+        let mut d = Drawables::new();
+        // `inline_box_subtree_descendants` has no entry for 2 — a leaf
+        // inline box. The box itself is still paragraph-owned.
+        d.paragraphs.insert(1, para_with_inline_box(Some(2)));
+
+        let skip = paragraph_owned_inline_boxes([1], &d);
+        assert_eq!(
+            skip,
+            [2].into_iter().collect::<std::collections::BTreeSet<_>>(),
+        );
     }
 
     #[test]
