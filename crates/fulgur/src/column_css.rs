@@ -2093,4 +2093,173 @@ mod tests {
         a.merge(b);
         assert_eq!(a.page, Some(PageName::Named("b".into())));
     }
+
+    // -------- parse_length: zero without a dimension unit --------
+
+    #[test]
+    fn parse_length_zero_without_unit() {
+        // CSS allows `0` as a valid `<length>` with no unit. The `parse_length`
+        // function matches `Token::Number { value: 0.0, .. }` for this case.
+        let props = parse_declaration_block("column-rule-width: 0;");
+        let rule = props.rule.expect("rule");
+        assert_eq!(
+            rule.width.to_f32(),
+            0.0,
+            "zero length must round-trip as 0.0pt"
+        );
+    }
+
+    // -------- parse_color: transparent keyword --------
+
+    #[test]
+    fn parse_color_transparent_keyword() {
+        // `transparent` resolves to [0, 0, 0, 0] — the `Token::Ident` arm in
+        // `parse_color` handles this before falling through to `parse_named_color`.
+        let props = parse_declaration_block("column-rule-color: transparent;");
+        let color = props.rule.expect("rule").color;
+        assert_eq!(
+            color,
+            [0, 0, 0, 0],
+            "transparent must be fully-transparent black"
+        );
+    }
+
+    // -------- parse_rgb_channel: percentage variant --------
+
+    #[test]
+    fn parse_rgb_channel_as_percentage() {
+        // `rgb(r%, g%, b%)` exercises `Token::Percentage` in `parse_rgb_channel`.
+        // 50% × 255 ≈ 128, 25% × 255 ≈ 64, 75% × 255 ≈ 191.
+        let props = parse_declaration_block("column-rule-color: rgb(50%, 25%, 75%);");
+        let color = props.rule.expect("rule").color;
+        assert!((color[0] as i32 - 128).abs() <= 1, "R: {}", color[0]);
+        assert!((color[1] as i32 - 64).abs() <= 1, "G: {}", color[1]);
+        assert!((color[2] as i32 - 191).abs() <= 1, "B: {}", color[2]);
+        assert_eq!(color[3], 255, "alpha must be fully opaque");
+    }
+
+    // -------- parse_alpha_value: percentage variant --------
+
+    #[test]
+    fn parse_alpha_as_percentage() {
+        // `rgba(r, g, b, p%)` exercises `Token::Percentage` in `parse_alpha_value`.
+        // 50% × 255 ≈ 128.
+        let props = parse_declaration_block("column-rule-color: rgba(0, 0, 0, 50%);");
+        let color = props.rule.expect("rule").color;
+        assert_eq!(&color[..3], &[0, 0, 0]);
+        assert!((color[3] as i32 - 128).abs() <= 1, "alpha: {}", color[3]);
+    }
+
+    // -------- hsl_to_rgb: achromatic path (s == 0) --------
+
+    #[test]
+    fn hsl_to_rgb_achromatic_returns_gray() {
+        // When saturation is 0 the achromatic branch `(l, l, l)` is taken.
+        // hsl(0, 0%, 50%) → neutral gray ≈ [128, 128, 128].
+        let props = parse_declaration_block("column-rule-color: hsl(0, 0%, 50%);");
+        let color = props.rule.expect("rule").color;
+        assert!((color[0] as i32 - 128).abs() <= 1, "R: {}", color[0]);
+        assert!((color[1] as i32 - 128).abs() <= 1, "G: {}", color[1]);
+        assert!((color[2] as i32 - 128).abs() <= 1, "B: {}", color[2]);
+        assert_eq!(color[3], 255);
+    }
+
+    // -------- hsl_to_rgb: l < 0.5 branch --------
+
+    #[test]
+    fn hsl_to_rgb_dark_l_below_half() {
+        // l < 0.5 selects `q = l * (1 + s)` instead of `l + s - l*s`.
+        // hsl(120, 100%, 25%) → dark green ≈ [0, 128, 0].
+        let props = parse_declaration_block("column-rule-color: hsl(120, 100%, 25%);");
+        let color = props.rule.expect("rule").color;
+        assert!((color[0] as i32).abs() <= 2, "R: {}", color[0]);
+        assert!((color[1] as i32 - 128).abs() <= 2, "G: {}", color[1]);
+        assert!((color[2] as i32).abs() <= 2, "B: {}", color[2]);
+        assert_eq!(color[3], 255);
+    }
+
+    // -------- hsl_to_rgb: t > 1.0 wrap in hue_to_rgb closure --------
+
+    #[test]
+    fn hsl_to_rgb_hue_wrap_above_one() {
+        // For hsl(300, 100%, 50%) the red channel's intermediate t = h + 1/3 = 7/6 > 1.0
+        // and must wrap down by 1 before the piecewise interpolation. Result is magenta.
+        let props = parse_declaration_block("column-rule-color: hsl(300, 100%, 50%);");
+        let color = props.rule.expect("rule").color;
+        // Magenta: R=255, G=0, B=255.
+        assert!((color[0] as i32 - 255).abs() <= 2, "R: {}", color[0]);
+        assert!((color[1] as i32).abs() <= 2, "G: {}", color[1]);
+        assert!((color[2] as i32 - 255).abs() <= 2, "B: {}", color[2]);
+        assert_eq!(color[3], 255);
+    }
+
+    // -------- parse_hsl_args: alpha branch --------
+
+    #[test]
+    fn parse_hsla_with_number_alpha() {
+        // `hsla(h, s%, l%, a)` exercises the alpha branch in `parse_hsl_args`.
+        // hsl(120, 100%, 50%) = pure green; alpha 0.5 ≈ 128.
+        let props = parse_declaration_block("column-rule-color: hsla(120, 100%, 50%, 0.5);");
+        let color = props.rule.expect("rule").color;
+        assert!((color[0] as i32).abs() <= 2, "R: {}", color[0]);
+        assert!((color[1] as i32 - 255).abs() <= 2, "G: {}", color[1]);
+        assert!((color[2] as i32).abs() <= 2, "B: {}", color[2]);
+        assert!((color[3] as i32 - 128).abs() <= 1, "alpha: {}", color[3]);
+    }
+
+    #[test]
+    fn parse_hsla_with_percentage_alpha() {
+        // `hsla(h, s%, l%, p%)` — `parse_alpha_value` receives a percentage token.
+        // 50% × 255 ≈ 128.
+        let props = parse_declaration_block("column-rule-color: hsla(120, 100%, 50%, 50%);");
+        let color = props.rule.expect("rule").color;
+        assert!((color[0] as i32).abs() <= 2, "R: {}", color[0]);
+        assert!((color[1] as i32 - 255).abs() <= 2, "G: {}", color[1]);
+        assert!((color[2] as i32).abs() <= 2, "B: {}", color[2]);
+        assert!((color[3] as i32 - 128).abs() <= 1, "alpha: {}", color[3]);
+    }
+
+    // -------- selector parser edge cases --------
+
+    #[test]
+    fn selector_leading_comma_drops_list() {
+        // A leading comma means `current.parts` is empty when the first comma
+        // is encountered — the whole list is immediately invalid.
+        assert!(parse_selector_list(",div").is_empty());
+    }
+
+    #[test]
+    fn selector_dot_followed_by_non_ident_drops_list() {
+        // `..foo`: the outer `.` triggers the Delim('.') arm; the inner
+        // `next_including_whitespace()` yields another `.` (not an ident),
+        // so the `_ => return Vec::new()` arm fires.
+        assert!(parse_selector_list("..foo").is_empty());
+    }
+
+    #[test]
+    fn selector_star_after_whitespace_drops_list() {
+        // `div *` is a descendant-star combinator — unsupported. The `*` token
+        // arrives while `just_saw_whitespace` is true, triggering the early return.
+        assert!(parse_selector_list("div *").is_empty());
+    }
+
+    #[test]
+    fn selector_hash_after_whitespace_drops_list() {
+        // `div #id` is a descendant combinator with an id — unsupported.
+        // The IDHash token arrives while `just_saw_whitespace` is true.
+        assert!(parse_selector_list("div #id").is_empty());
+    }
+
+    #[test]
+    fn selector_dot_after_whitespace_drops_list() {
+        // `div .foo` is a descendant combinator with a class — unsupported.
+        // The Delim('.') token arrives while `just_saw_whitespace` is true.
+        assert!(parse_selector_list("div .foo").is_empty());
+    }
+
+    #[test]
+    fn selector_leading_plus_drops_list() {
+        // A `+` with no preceding compound (current.parts empty) is invalid.
+        assert!(parse_selector_list("+div").is_empty());
+    }
 }
