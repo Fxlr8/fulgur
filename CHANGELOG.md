@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.40.0] - 2026-07-28
+
+<!-- release-notes:auto:begin -->
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(render): skip inline-box subtrees in clip/opacity descendant walks by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/677
+* fix(render): narrow the scope-walk inline-box skip to paragraph-owned boxes by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/679
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.39.0...v0.40.0
+<!-- release-notes:auto:end -->
+
 ## [0.39.0] - 2026-07-26
 
 <!-- release-notes:auto:begin -->
