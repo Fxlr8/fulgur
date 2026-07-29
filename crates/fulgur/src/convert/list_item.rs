@@ -1376,4 +1376,101 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // build_list_item_body (outside marker, inline-root): the <li> has an
+    // <a href="..."> ancestor so `attach_link_to_inline_image` (pseudo.rs)
+    // finds the enclosing anchor and sets `img.link = Some(...)`.
+    // Covers the `if let Some((_, span)) = resolve_enclosing_anchor(...)` body
+    // in pseudo::attach_link_to_inline_image.
+    #[test]
+    fn smoke_outside_marker_before_image_with_anchor_ancestor() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"li::before { content: url("dot.png"); width: 8px; height: 8px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <a href="https://example.com"><ul><li>Linked item with before image</li></ul></a>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Same as above but with a ::after inline image.  Both `before_inline`
+    // and `after_inline` go through `attach_link_to_inline_image` on the
+    // (outside marker, inline-root) path; verifying the after slot also
+    // correctly picks up the anchor ancestor.
+    #[test]
+    fn smoke_outside_marker_after_image_with_anchor_ancestor() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"li::after { content: url("dot.png"); width: 8px; height: 8px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <a href="https://example.com"><ul><li>Linked item with after image</li></ul></a>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_list_item_body (outside marker, inline-root): ::before image with
+    // an internal fragment anchor (`#target`).  The same
+    // `attach_link_to_inline_image` → `resolve_enclosing_anchor` path runs,
+    // this time producing a `LinkTarget::Internal` span.
+    #[test]
+    fn smoke_outside_marker_before_image_with_internal_anchor_ancestor() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"li::before { content: url("dot.png"); width: 8px; height: 8px; }"#);
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r##"<!doctype html><html><body>
+                <a href="#section"><ul><li>Internal link item</li></ul></a>
+                <h2 id="section">Section</h2>
+                </body></html>"##,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 3 (inside marker, non-inline-root): apply
+    // `list-style-position: inside` directly on the <li> element rather than
+    // inheriting it from the <ul>.  Exercises the same code paths as the
+    // inherited variants but gives the style resolution a direct target.
+    #[test]
+    fn smoke_inside_marker_style_on_li_directly_with_block_child() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><body>
+            <ul><li style="list-style-position: inside">
+                <p>Block child makes li non-inline-root</p>
+            </li></ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // try_convert branch 3 (inside marker, non-inline-root): `list-style-type:
+    // none` suppresses the marker entirely, so `marker_item = None` and the
+    // block_styles.insert at the end of the non-empty-children path is reached
+    // without the marker injection branch being taken.
+    #[test]
+    fn smoke_inside_marker_list_style_none_with_block_child() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><body>
+            <ul style="list-style-position: inside; list-style-type: none">
+                <li><p>Block child, no marker</p></li>
+            </ul>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
