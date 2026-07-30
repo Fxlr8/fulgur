@@ -369,4 +369,193 @@ mod tests {
             TagKind::Link(_)
         ));
     }
+
+    // --- SemanticEntry construction and derived-trait coverage ---
+
+    #[test]
+    fn semantic_entry_fields_accessible_with_none_parent_and_alt() {
+        let entry = SemanticEntry {
+            tag: PdfTag::P,
+            parent: None,
+            alt_text: None,
+        };
+        assert!(matches!(entry.tag, PdfTag::P));
+        assert!(entry.parent.is_none());
+        assert!(entry.alt_text.is_none());
+    }
+
+    #[test]
+    fn semantic_entry_fields_accessible_with_some_parent_and_alt() {
+        let entry = SemanticEntry {
+            tag: PdfTag::H { level: 2 },
+            parent: Some(42),
+            alt_text: Some("chapter heading".to_owned()),
+        };
+        assert_eq!(entry.parent, Some(42));
+        assert_eq!(entry.alt_text.as_deref(), Some("chapter heading"));
+    }
+
+    #[test]
+    fn semantic_entry_clone_preserves_all_fields() {
+        let entry = SemanticEntry {
+            tag: PdfTag::Figure,
+            parent: Some(7),
+            alt_text: Some("company logo".to_owned()),
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.tag, entry.tag);
+        assert_eq!(cloned.parent, entry.parent);
+        assert_eq!(cloned.alt_text, entry.alt_text);
+    }
+
+    #[test]
+    fn semantic_entry_clone_with_none_fields() {
+        let entry = SemanticEntry {
+            tag: PdfTag::Div,
+            parent: None,
+            alt_text: None,
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.tag, entry.tag);
+        assert!(cloned.parent.is_none());
+        assert!(cloned.alt_text.is_none());
+    }
+
+    #[test]
+    fn semantic_entry_debug_contains_struct_name_and_tag() {
+        let entry = SemanticEntry {
+            tag: PdfTag::Table,
+            parent: Some(3),
+            alt_text: None,
+        };
+        let s = format!("{entry:?}");
+        assert!(s.contains("SemanticEntry"));
+        assert!(s.contains("Table"));
+    }
+
+    // --- PdfTag Clone coverage for field-carrying variants ---
+
+    #[test]
+    fn pdf_tag_clone_heading_variant() {
+        let original = PdfTag::H { level: 3 };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn pdf_tag_clone_list_variant() {
+        let original = PdfTag::L {
+            numbering: krilla::tagging::ListNumbering::Decimal,
+        };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn pdf_tag_clone_th_variant() {
+        let original = PdfTag::Th {
+            scope: krilla::tagging::TableHeaderScope::Row,
+        };
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn pdf_tag_clone_unit_variants() {
+        for tag in [
+            PdfTag::P,
+            PdfTag::Div,
+            PdfTag::Span,
+            PdfTag::Figure,
+            PdfTag::Lbl,
+            PdfTag::LBody,
+            PdfTag::Li,
+            PdfTag::Table,
+            PdfTag::THead,
+            PdfTag::TBody,
+            PdfTag::TFoot,
+            PdfTag::Tr,
+            PdfTag::Td,
+            PdfTag::Link,
+        ] {
+            assert_eq!(tag.clone(), tag);
+        }
+    }
+
+    // --- PdfTag Debug formatting ---
+
+    #[test]
+    fn pdf_tag_debug_unit_variants() {
+        assert!(format!("{:?}", PdfTag::P).contains("P"));
+        assert!(format!("{:?}", PdfTag::Div).contains("Div"));
+        assert!(format!("{:?}", PdfTag::Span).contains("Span"));
+        assert!(format!("{:?}", PdfTag::Figure).contains("Figure"));
+        assert!(format!("{:?}", PdfTag::Lbl).contains("Lbl"));
+        assert!(format!("{:?}", PdfTag::LBody).contains("LBody"));
+        assert!(format!("{:?}", PdfTag::Li).contains("Li"));
+        assert!(format!("{:?}", PdfTag::Table).contains("Table"));
+        assert!(format!("{:?}", PdfTag::THead).contains("THead"));
+        assert!(format!("{:?}", PdfTag::TBody).contains("TBody"));
+        assert!(format!("{:?}", PdfTag::TFoot).contains("TFoot"));
+        assert!(format!("{:?}", PdfTag::Tr).contains("Tr"));
+        assert!(format!("{:?}", PdfTag::Td).contains("Td"));
+        assert!(format!("{:?}", PdfTag::Link).contains("Link"));
+    }
+
+    #[test]
+    fn pdf_tag_debug_field_variants() {
+        assert!(format!("{:?}", PdfTag::H { level: 4 }).contains("4"));
+        assert!(
+            format!(
+                "{:?}",
+                PdfTag::L {
+                    numbering: krilla::tagging::ListNumbering::Disc
+                }
+            )
+            .contains("L")
+        );
+        assert!(
+            format!(
+                "{:?}",
+                PdfTag::Th {
+                    scope: krilla::tagging::TableHeaderScope::Column
+                }
+            )
+            .contains("Th")
+        );
+    }
+
+    // --- pdf_tag_to_krilla_tag heading-level clamping ---
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_heading_level_zero_clamped_to_one() {
+        // level=0 is invalid; clamp(1,6) → 1 so NonZeroU16::new(1).unwrap() is safe.
+        let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 0 }, None, None);
+        assert!(matches!(k, krilla::tagging::TagKind::Hn(_)));
+    }
+
+    #[test]
+    fn pdf_tag_to_krilla_tag_heading_level_above_max_clamped_to_six() {
+        // level=7 and level=255 are above the PDF maximum H6; both clamp to 6.
+        let k7 = pdf_tag_to_krilla_tag(&PdfTag::H { level: 7 }, None, None);
+        let k255 = pdf_tag_to_krilla_tag(&PdfTag::H { level: 255 }, None, None);
+        assert!(matches!(k7, krilla::tagging::TagKind::Hn(_)));
+        assert!(matches!(k255, krilla::tagging::TagKind::Hn(_)));
+    }
+
+    // --- classify_element edge cases ---
+
+    #[test]
+    fn classify_element_figure_html_element_returns_none() {
+        // HTML <figure> has no mapping; only <img> maps to PdfTag::Figure.
+        assert_eq!(classify_element("figure"), None);
+    }
+
+    #[test]
+    fn classify_element_anchor_and_link_return_none() {
+        // <a> and <link> have no mapping in classify_element;
+        // PdfTag::Link is set by the convert pass directly.
+        assert_eq!(classify_element("a"), None);
+        assert_eq!(classify_element("link"), None);
+    }
 }
