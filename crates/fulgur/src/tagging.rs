@@ -431,6 +431,33 @@ mod tests {
         let s = format!("{entry:?}");
         assert!(s.contains("SemanticEntry"));
         assert!(s.contains("Table"));
+        // Verify payload values appear in the debug output.
+        assert!(
+            s.contains("Some(3)"),
+            "parent should appear as Some(3), got: {s}"
+        );
+        assert!(s.contains("None"), "alt_text: None should appear, got: {s}");
+        // PdfTag::L and PdfTag::Th field values must also be visible in their debug output.
+        assert!(
+            format!(
+                "{:?}",
+                PdfTag::L {
+                    numbering: krilla::tagging::ListNumbering::Disc
+                }
+            )
+            .contains("Disc"),
+            "PdfTag::L debug must include numbering variant name"
+        );
+        assert!(
+            format!(
+                "{:?}",
+                PdfTag::Th {
+                    scope: krilla::tagging::TableHeaderScope::Column
+                }
+            )
+            .contains("Column"),
+            "PdfTag::Th debug must include scope variant name"
+        );
     }
 
     // --- PdfTag Clone coverage for field-carrying variants ---
@@ -529,18 +556,25 @@ mod tests {
 
     #[test]
     fn pdf_tag_to_krilla_tag_heading_level_zero_clamped_to_one() {
-        // level=0 is invalid; clamp(1,6) → 1 so NonZeroU16::new(1).unwrap() is safe.
+        // level=0 is invalid; clamp(1,6) → 1.  Verify the stored level, not just the variant.
         let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: 0 }, None, None);
-        assert!(matches!(k, krilla::tagging::TagKind::Hn(_)));
+        let krilla::tagging::TagKind::Hn(tag) = k else {
+            panic!("expected TagKind::Hn for level=0");
+        };
+        assert_eq!(tag.level().get(), 1, "level=0 should clamp to H1");
     }
 
     #[test]
     fn pdf_tag_to_krilla_tag_heading_level_above_max_clamped_to_six() {
         // level=7 and level=255 are above the PDF maximum H6; both clamp to 6.
-        let k7 = pdf_tag_to_krilla_tag(&PdfTag::H { level: 7 }, None, None);
-        let k255 = pdf_tag_to_krilla_tag(&PdfTag::H { level: 255 }, None, None);
-        assert!(matches!(k7, krilla::tagging::TagKind::Hn(_)));
-        assert!(matches!(k255, krilla::tagging::TagKind::Hn(_)));
+        // Verify the stored level, not just the variant, to catch a regressed clamp.
+        for input in [7u8, 255u8] {
+            let k = pdf_tag_to_krilla_tag(&PdfTag::H { level: input }, None, None);
+            let krilla::tagging::TagKind::Hn(tag) = k else {
+                panic!("expected TagKind::Hn for level={input}");
+            };
+            assert_eq!(tag.level().get(), 6, "level={input} should clamp to H6");
+        }
     }
 
     // --- classify_element edge cases ---
