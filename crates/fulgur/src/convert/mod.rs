@@ -2030,20 +2030,24 @@ mod edge_case_tests {
             "element at depth > MAX_DOM_DEPTH must be absent from block_styles and paragraphs"
         );
         // Verify that walk_semantics also respects the depth cap.
-        // walk_semantics starts from <body> at depth 0, so it processes at
-        // most MAX_DOM_DEPTH - 1 = 511 nested <div> elements before the
-        // guard fires. If the guard is removed, all 560 divs would be
-        // recorded, exceeding MAX_DOM_DEPTH. (Note: convert_node starts from
-        // <html> at depth 0, so it truncates 2 levels earlier — the off-by-2
-        // is intentional and NOT a bug in walk_semantics.)
+        // walk_semantics starts from <body> at depth 0, so it processes
+        // exactly MAX_DOM_DEPTH - 1 = 511 nested <div> elements before the
+        // guard fires (div[0] at depth 1 … div[510] at depth 511; div[511]
+        // at depth 512 >= MAX_DOM_DEPTH is skipped). Use strict `<` to
+        // detect an off-by-one regression where the guard is relaxed from
+        // `>= MAX_DOM_DEPTH` to `> MAX_DOM_DEPTH` — that would let div[511]
+        // through, producing MAX_DOM_DEPTH entries and silently passing a
+        // `<=` comparison. (Note: convert_node starts from <html> at depth 0,
+        // so it truncates 2 levels earlier — the off-by-2 is intentional and
+        // NOT a bug in walk_semantics.)
         let div_sem_count = d
             .semantics
             .values()
             .filter(|e| e.tag == PdfTag::Div)
             .count();
         assert!(
-            div_sem_count <= crate::MAX_DOM_DEPTH,
-            "walk_semantics depth guard failed: {} Div entries in semantics, expected ≤ {}",
+            div_sem_count < crate::MAX_DOM_DEPTH,
+            "walk_semantics depth guard failed: {} Div entries in semantics, expected < {}",
             div_sem_count,
             crate::MAX_DOM_DEPTH
         );
