@@ -1930,6 +1930,7 @@ mod edge_case_tests {
 
     use std::ops::DerefMut;
 
+    use crate::tagging::PdfTag;
     use crate::units::F32Units;
 
     fn build_drawables(html: &str) -> crate::drawables::Drawables {
@@ -2014,7 +2015,25 @@ mod edge_case_tests {
             .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("beyond-depth-limit"));
         assert!(
             !deep_in_blocks && !deep_in_paras,
-            "element at depth > MAX_DOM_DEPTH must be absent from drawables"
+            "element at depth > MAX_DOM_DEPTH must be absent from block_styles and paragraphs"
+        );
+        // Verify that walk_semantics also respects the depth cap.
+        // walk_semantics starts from <body> at depth 0, so it processes at
+        // most MAX_DOM_DEPTH - 1 = 511 nested <div> elements before the
+        // guard fires. If the guard is removed, all 560 divs would be
+        // recorded, exceeding MAX_DOM_DEPTH. (Note: convert_node starts from
+        // <html> at depth 0, so it truncates 2 levels earlier — the off-by-2
+        // is intentional and NOT a bug in walk_semantics.)
+        let div_sem_count = d
+            .semantics
+            .values()
+            .filter(|e| e.tag == PdfTag::Div)
+            .count();
+        assert!(
+            div_sem_count <= crate::MAX_DOM_DEPTH,
+            "walk_semantics depth guard failed: {} Div entries in semantics, expected ≤ {}",
+            div_sem_count,
+            crate::MAX_DOM_DEPTH
         );
     }
 
