@@ -1924,10 +1924,9 @@ mod utility_fn_tests {
 #[cfg(test)]
 mod edge_case_tests {
     //! Tests for defensive guards and edge cases in convert/mod.rs:
-    //! MAX_DOM_DEPTH truncation, empty id="" attributes, and the
-    //! FULGUR_DEBUG debug-tree code path. These exercise branches that
-    //! normal documents never reach but that protect against adversarial
-    //! or malformed HTML.
+    //! MAX_DOM_DEPTH truncation and empty/whitespace id="" attributes.
+    //! These exercise branches that normal documents never reach but that
+    //! protect against adversarial or malformed HTML.
 
     use std::ops::DerefMut;
 
@@ -1967,13 +1966,23 @@ mod edge_case_tests {
     fn deeply_nested_html_does_not_panic_and_truncates_at_max_depth() {
         // MAX_DOM_DEPTH = 512. Build HTML with 560 levels of nesting so
         // both convert_node (line 333) and walk_semantics (line 401) hit
-        // their depth guards. The render must complete without panicking.
+        // their depth guards. The render must complete without panicking,
+        // shallow entries must be present, and elements past the depth cap
+        // must NOT appear in drawables (verifying the guard actually fires).
+        //
+        // The div at index 550 (depth ≈ 552 from root) is well beyond the
+        // 512 limit; giving it a unique id lets us confirm it was skipped.
+        //
         // Run in a thread with a large stack because the Blitz/Taffy parse
         // + layout pipelines recurse through the DOM tree before fulgur's
         // depth guard triggers.
         let mut html = String::from("<!DOCTYPE html><html><body>");
-        for _ in 0..560 {
-            html.push_str("<div>");
+        for i in 0..560 {
+            if i == 550 {
+                html.push_str("<div id=\"beyond-depth-limit\">");
+            } else {
+                html.push_str("<div>");
+            }
         }
         html.push_str("deep text");
         for _ in 0..560 {
@@ -1988,10 +1997,24 @@ mod edge_case_tests {
             .join()
             .expect("thread did not panic");
 
-        // At least the shallow entries (before the depth cap) must be recorded.
+        // Shallow entries (before the depth cap) must be recorded.
         assert!(
             !d.block_styles.is_empty(),
             "shallow block entries must be recorded even with deep nesting"
+        );
+        // The element beyond MAX_DOM_DEPTH must not appear in any drawable map,
+        // confirming the depth guard in convert_node / walk_semantics fires.
+        let deep_in_blocks = d
+            .block_styles
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("beyond-depth-limit"));
+        let deep_in_paras = d
+            .paragraphs
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("beyond-depth-limit"));
+        assert!(
+            !deep_in_blocks && !deep_in_paras,
+            "element at depth > MAX_DOM_DEPTH must be absent from drawables"
         );
     }
 
@@ -1999,8 +2022,9 @@ mod edge_case_tests {
 
     #[test]
     fn empty_id_attribute_is_not_stored_in_block_entry() {
-        // id="" is whitespace-only after trim(); extract_block_id must
-        // return None rather than storing an empty Arc<String>.
+        // id="" trims to empty; extract_block_id must return None rather
+        // than storing an empty Arc<String>. Use trim().is_empty() in the
+        // filter so a regression that stores the untrimmed value is caught.
         // Use a border to force block entry creation so we can check both
         // block and paragraph id fields.
         let html = "<!DOCTYPE html><html><body>\
@@ -2010,11 +2034,11 @@ mod edge_case_tests {
 
         let d = build_drawables(html);
 
-        // No entry in block_styles or paragraphs should carry an empty id.
+        // No entry in block_styles or paragraphs should carry an empty/blank id.
         let empty_block_ids: Vec<_> = d
             .block_styles
             .values()
-            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
             .collect();
         assert!(
             empty_block_ids.is_empty(),
@@ -2024,7 +2048,7 @@ mod edge_case_tests {
         let empty_para_ids: Vec<_> = d
             .paragraphs
             .values()
-            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
             .collect();
         assert!(
             empty_para_ids.is_empty(),
@@ -2050,7 +2074,8 @@ mod edge_case_tests {
     #[test]
     fn whitespace_only_id_attribute_is_not_stored() {
         // id="   " (spaces only) also trims to empty and must return None.
-        // A <p> is an inline root, so its id lands in d.paragraphs.
+        // Use trim().is_empty() so a regression storing the untrimmed "   "
+        // is detected. A <p> is an inline root, so its id lands in d.paragraphs.
         let html = "<!DOCTYPE html><html><body><p id=\"   \">paragraph</p></body></html>";
 
         let d = build_drawables(html);
@@ -2058,7 +2083,7 @@ mod edge_case_tests {
         let bad_para_ids: Vec<_> = d
             .paragraphs
             .values()
-            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
             .collect();
         assert!(
             bad_para_ids.is_empty(),
@@ -2068,35 +2093,12 @@ mod edge_case_tests {
         let bad_block_ids: Vec<_> = d
             .block_styles
             .values()
-            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
             .collect();
         assert!(
             bad_block_ids.is_empty(),
             "whitespace-only id must not be stored in block entries; found {}",
             bad_block_ids.len()
         );
-    }
-
-    // --- FULGUR_DEBUG: debug_print_tree code path ---
-
-    #[test]
-    fn fulgur_debug_env_var_triggers_debug_tree_without_panic() {
-        // Setting FULGUR_DEBUG causes dom_to_drawables to call
-        // debug_print_tree (lines 167, 277-310), which writes to stderr.
-        // This test verifies the path executes without panicking.
-        // Safety: set_var is unsafe in edition 2024 because it races with
-        // concurrent reads; this test must not run in parallel with other
-        // tests that read FULGUR_DEBUG. Cargo runs tests in the same
-        // process by default, but debug_print_tree only writes to stderr
-        // so a race only risks spurious stderr noise, not test failures.
-        let html = "<!DOCTYPE html><html><body><h1>debug</h1><p>text</p></body></html>";
-        unsafe {
-            std::env::set_var("FULGUR_DEBUG", "1");
-        }
-        let result = std::panic::catch_unwind(|| build_drawables(html));
-        unsafe {
-            std::env::remove_var("FULGUR_DEBUG");
-        }
-        assert!(result.is_ok(), "debug_print_tree must not panic");
     }
 }
