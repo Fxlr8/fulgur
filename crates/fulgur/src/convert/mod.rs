@@ -1920,3 +1920,220 @@ mod utility_fn_tests {
         assert_eq!(cb.height, crate::units::Px::ZERO);
     }
 }
+
+#[cfg(test)]
+mod edge_case_tests {
+    //! Tests for defensive guards and edge cases in convert/mod.rs:
+    //! MAX_DOM_DEPTH truncation and empty/whitespace id="" attributes.
+    //! These exercise branches that normal documents never reach but that
+    //! protect against adversarial or malformed HTML.
+
+    use std::ops::DerefMut;
+
+    use crate::tagging::PdfTag;
+    use crate::units::F32Units;
+
+    fn build_drawables(html: &str) -> crate::drawables::Drawables {
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass(doc.deref_mut(), 842.0);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = super::ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: Default::default(),
+            string_set_by_node: Default::default(),
+            counter_ops_by_node: Default::default(),
+            bookmark_by_node: Default::default(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((595.0, 842.0)),
+        };
+        super::dom_to_drawables(&doc, &mut ctx)
+    }
+
+    // --- MAX_DOM_DEPTH guard in convert_node and walk_semantics ---
+
+    #[test]
+    fn deeply_nested_html_does_not_panic_and_truncates_at_max_depth() {
+        // MAX_DOM_DEPTH = 512. Build HTML with 560 levels of nesting so
+        // both convert_node (line 333) and walk_semantics (line 401) hit
+        // their depth guards. The render must complete without panicking,
+        // shallow entries must be present, and elements past the depth cap
+        // must NOT appear in drawables (verifying the guard actually fires).
+        //
+        // Sentinel placement: div at index 510.
+        //   Depth from <html>: html=0, body=1, div[0]=2, …, div[510]=512.
+        //   convert_node's guard fires at depth >= MAX_DOM_DEPTH (512), so
+        //   div[510] is the *first* element NOT processed by convert_node.
+        //   Removing convert_node's guard makes div[510] appear in
+        //   block_styles, failing the assertion below.
+        //
+        //   Note: positioned::walk_children_into_drawables has its own
+        //   independent guard at the same threshold (positioned.rs:25-27).
+        //   That guard fires on the *parent's* depth, so when convert_node's
+        //   guard is absent, div[510] is still processed (walk_children was
+        //   called with depth=511) but div[511]+ are blocked by walk_children.
+        //   The sentinel at div[510] therefore targets convert_node's guard
+        //   specifically, not walk_children's backup guard.
+        //
+        // Run in a thread with a large stack because the Blitz/Taffy parse
+        // + layout pipelines recurse through the DOM tree before fulgur's
+        // depth guard triggers.
+        let mut html = String::from("<!DOCTYPE html><html><body>");
+        for i in 0..560 {
+            if i == 510 {
+                html.push_str("<div id=\"beyond-depth-limit\">");
+            } else {
+                html.push_str("<div>");
+            }
+        }
+        html.push_str("deep text");
+        for _ in 0..560 {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+
+        let d = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024) // 64 MiB: blitz/taffy recurse before fulgur's guard fires
+            .spawn(move || build_drawables(&html))
+            .expect("thread spawn")
+            .join()
+            .expect("thread did not panic");
+
+        // Shallow entries (before the depth cap) must be recorded.
+        assert!(
+            !d.block_styles.is_empty(),
+            "shallow block entries must be recorded even with deep nesting"
+        );
+        // The element beyond MAX_DOM_DEPTH must not appear in any drawable map,
+        // confirming the depth guard in convert_node / walk_semantics fires.
+        let deep_in_blocks = d
+            .block_styles
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("beyond-depth-limit"));
+        let deep_in_paras = d
+            .paragraphs
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("beyond-depth-limit"));
+        assert!(
+            !deep_in_blocks && !deep_in_paras,
+            "element at depth > MAX_DOM_DEPTH must be absent from block_styles and paragraphs"
+        );
+        // Verify that walk_semantics also respects the depth cap.
+        // walk_semantics starts from <body> at depth 0, so it processes
+        // exactly MAX_DOM_DEPTH - 1 = 511 nested <div> elements before the
+        // guard fires (div[0] at depth 1 … div[510] at depth 511; div[511]
+        // at depth 512 >= MAX_DOM_DEPTH is skipped). Use strict `<` to
+        // detect an off-by-one regression where the guard is relaxed from
+        // `>= MAX_DOM_DEPTH` to `> MAX_DOM_DEPTH` — that would let div[511]
+        // through, producing MAX_DOM_DEPTH entries and silently passing a
+        // `<=` comparison. (Note: convert_node starts from <html> at depth 0,
+        // so it truncates 2 levels earlier — the off-by-2 is intentional and
+        // NOT a bug in walk_semantics.)
+        let div_sem_count = d
+            .semantics
+            .values()
+            .filter(|e| e.tag == PdfTag::Div)
+            .count();
+        assert!(
+            div_sem_count < crate::MAX_DOM_DEPTH,
+            "walk_semantics depth guard failed: {} Div entries in semantics, expected < {}",
+            div_sem_count,
+            crate::MAX_DOM_DEPTH
+        );
+    }
+
+    // --- extract_block_id: empty id="" attribute ---
+
+    #[test]
+    fn empty_id_attribute_is_not_stored_in_block_entry() {
+        // id="" trims to empty; extract_block_id must return None rather
+        // than storing an empty Arc<String>. Use trim().is_empty() in the
+        // filter so a regression that stores the untrimmed value is caught.
+        // Use a border to force block entry creation so we can check both
+        // block and paragraph id fields.
+        let html = "<!DOCTYPE html><html><body>\
+            <div id=\"\" style=\"border:1px solid black\">content with empty id</div>\
+            <div id=\"valid-id\" style=\"border:1px solid red\">content with valid id</div>\
+            </body></html>";
+
+        let d = build_drawables(html);
+
+        // No entry in block_styles or paragraphs should carry an empty/blank id.
+        let empty_block_ids: Vec<_> = d
+            .block_styles
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
+            .collect();
+        assert!(
+            empty_block_ids.is_empty(),
+            "extract_block_id must not store empty id strings in block entries; found {}",
+            empty_block_ids.len()
+        );
+        let empty_para_ids: Vec<_> = d
+            .paragraphs
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
+            .collect();
+        assert!(
+            empty_para_ids.is_empty(),
+            "extract_block_id must not store empty id strings in paragraph entries; found {}",
+            empty_para_ids.len()
+        );
+
+        // The valid id must appear in at least one block or paragraph entry.
+        let valid_block = d
+            .block_styles
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("valid-id"));
+        let valid_para = d
+            .paragraphs
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("valid-id"));
+        assert!(
+            valid_block || valid_para,
+            "valid-id should be stored in at least one block or paragraph entry"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_id_attribute_is_not_stored() {
+        // id="   " (spaces only) also trims to empty and must return None.
+        // Use trim().is_empty() so a regression storing the untrimmed "   "
+        // is detected. A <p> is an inline root, so its id lands in d.paragraphs.
+        let html = "<!DOCTYPE html><html><body><p id=\"   \">paragraph</p></body></html>";
+
+        let d = build_drawables(html);
+
+        let bad_para_ids: Vec<_> = d
+            .paragraphs
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
+            .collect();
+        assert!(
+            bad_para_ids.is_empty(),
+            "whitespace-only id must not be stored in paragraph entries; found {}",
+            bad_para_ids.len()
+        );
+        let bad_block_ids: Vec<_> = d
+            .block_styles
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.trim().is_empty()) == Some(true))
+            .collect();
+        assert!(
+            bad_block_ids.is_empty(),
+            "whitespace-only id must not be stored in block entries; found {}",
+            bad_block_ids.len()
+        );
+    }
+}
