@@ -869,6 +869,12 @@ fn corner_to_angle_rad(
 /// 入力: monotonically non-decreasing position の `(pos, rgba)` ベクタ。
 /// `pos` は ℝ で、範囲外 (`-0.5` や `1.5` など) も許容する。
 ///
+/// **前提条件: `pos` は全て有限であること。** `color_at` は position が全順序を
+/// 持つことを前提に区間を線形探索し、どれにも該当しなければ `unreachable!()` に
+/// 落ちる。NaN は「どの比較も false」なので、一つ混ざるだけでこの不変条件を破る。
+/// これは呼び出し側 (`resolve_gradient_stops`) が choke point で保証する契約で、
+/// ここを NaN 耐性にして握り潰すべきではない (fulgur-0vzf)。
+///
 /// 出力: `pos` が `[0, 1]` に収まる `(pos, rgba)` ベクタ。Krilla の
 /// `NormalizedF32` 制約をそのまま満たす。
 ///
@@ -1046,10 +1052,14 @@ fn resolve_gradient_stops(
     if stops.len() < 2 {
         return None;
     }
-    if line_length <= Px::ZERO {
+    if !line_length.is_finite() || line_length <= Px::ZERO {
         // length-typed stop が一つでもあれば解決不能。fraction-only でも
         // 退化した gradient なので Layer drop 相当 (caller で先に early
         // return しているため通常到達しない)。
+        //
+        // `is_finite` を先に見るのは `<= Px::ZERO` が NaN-blind だから:
+        // NaN との比較は全て false なので、NaN はこの符号ガードを素通りして
+        // `px / line_length` を NaN offset に変えてしまう (fulgur-0vzf)。
         return None;
     }
 
@@ -1106,6 +1116,18 @@ fn resolve_gradient_stops(
         i = end;
     }
 
+    // 有限性の choke point (fulgur-0vzf)。ここから下流 (hint 展開 → 周期展開
+    // → renormalize) は position が全順序を持つ前提で書かれている。NaN が
+    // 一つ混ざると `renormalize_stops_to_unit_range` の `color_at` で
+    // どの区間比較も成立せず `unreachable!()` に落ちる。
+    //
+    // 入力ではなく *解決後* の値を検査するのが要点: offset は入力由来の
+    // NaN だけでなく、個別には有限な `px / line_length` が f32 の表現域を
+    // 超えて `inf` に飽和する経路でも壊れる。
+    if !positions.iter().flatten().all(|p| p.is_finite()) {
+        return None;
+    }
+
     let resolved: Vec<ResolvedStop> = stops
         .iter()
         .zip(positions)
@@ -1133,10 +1155,15 @@ fn resolve_gradient_stops(
 
     // renormalize: 範囲外 fraction は端点合成で [0, 1] 内表現に変換 (fulgur-n3zk)
     let renormalized = renormalize_stops_to_unit_range(expanded);
-    debug_assert!(
-        renormalized.len() >= 2,
-        "renormalize_stops_to_unit_range guarantees len >= 2"
-    );
+
+    // 退化ケースの runtime guard。helper は有限 position に対しては常に
+    // len >= 2 を返すが、krilla の gradient は 2 stops 以上を要求するので、
+    // release build でも縮退した stop 列を krilla に渡さない (fulgur-0vzf)。
+    // 668f2031 で `debug_assert!` に落としたものを戻した: debug_assert は
+    // release で消えるため、不変条件が破れたときに保護が効かなかった。
+    if renormalized.len() < 2 {
+        return None;
+    }
 
     Some(
         renormalized
@@ -1249,7 +1276,10 @@ fn draw_linear_gradient(
     let cos_neg = -angle_rad.cos();
 
     let length = (ow * sin).abs() + (oh * cos_neg).abs();
-    if length <= 0.0 {
+    // `length <= 0.0` だけでは NaN を落とせない (NaN との比較は常に false)。
+    // NaN な gradient line は下流で NaN offset と NaN 座標の両方を生むので、
+    // ここで Layer drop する (fulgur-0vzf)。
+    if !length.is_finite() || length <= 0.0 {
         return;
     }
 
@@ -1384,7 +1414,8 @@ fn draw_radial_gradient(
         }
     };
 
-    if rx <= 0.0 || ry <= 0.0 {
+    // 符号ガードは NaN-blind なので、有限性を明示的に検査する (fulgur-0vzf)。
+    if !rx.is_finite() || !ry.is_finite() || rx <= 0.0 || ry <= 0.0 {
         return;
     }
 
@@ -3945,6 +3976,82 @@ mod resolve_gradient_stops_tests {
         ];
         let out = resolve_gradient_stops(&stops, 0.0_f32.as_px(), false);
         assert!(out.is_none());
+    }
+
+    // ─── non-finite hardening (fulgur-0vzf) ──────────────────────────────
+    //
+    // 下の各ケースは、以前は `renormalize_stops_to_unit_range` 内の
+    // `color_at` で NaN 比較が全て false になり `unreachable!()` に落ちて
+    // panic していた。choke point で弾いて `None` (= Layer drop) を返す。
+    //
+    // Stylo は computed angle / length を有限域に clamp するので、現時点で
+    // CSS からこの入力は作れない。`BgImageContent` の stops は pub なので
+    // ライブラリ利用者が直接構築する経路と、将来の上流変更に対する防御。
+
+    #[test]
+    fn line_length_nan_returns_none() {
+        let stops = vec![
+            stop(px(50.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, f32::NAN.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn line_length_infinite_returns_none() {
+        let stops = vec![
+            stop(px(50.0), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, f32::INFINITY.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn nan_fraction_stop_returns_none() {
+        let stops = vec![
+            stop(fr(f32::NAN), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn nan_length_stop_returns_none() {
+        let stops = vec![
+            stop(px(f32::NAN), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn infinite_length_stop_returns_none() {
+        let stops = vec![
+            stop(px(f32::INFINITY), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), false).is_none());
+    }
+
+    /// `px / line_length` が f32 の表現域を超えて `inf` に飽和するケース。
+    /// 入力側の `LengthPx` / `line_length` は個別には有限なので、除算 *後* の
+    /// offset を検査しないと素通りする。
+    #[test]
+    fn length_stop_overflowing_to_infinity_returns_none() {
+        let stops = vec![
+            stop(px(f32::MAX), [255, 0, 0, 255]),
+            stop(fr(1.0), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, f32::MIN_POSITIVE.as_px(), false).is_none());
+    }
+
+    #[test]
+    fn nan_stop_in_repeating_gradient_returns_none() {
+        let stops = vec![
+            stop(fr(f32::NAN), [255, 0, 0, 255]),
+            stop(fr(0.25), [0, 0, 255, 255]),
+        ];
+        assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).is_none());
     }
 
     /// `repeating-linear-gradient(red 0%, blue 25%)`: period = 0.25。
