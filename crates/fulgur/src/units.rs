@@ -194,6 +194,19 @@ impl Px {
     pub fn min(self, other: Px) -> Px {
         Px(self.0.min(other.0))
     }
+
+    /// `true` if this length is neither infinite nor NaN. Mirrors
+    /// `f32::is_finite`.
+    ///
+    /// Needed because the usual sign guards (`x <= Px::ZERO`) are NaN-blind:
+    /// every comparison against NaN is `false`, so a NaN slips through a
+    /// `<= 0` rejection and only surfaces later as a violated ordering
+    /// invariant. Validate with `is_finite` at the boundary where an
+    /// untyped `f32` first becomes a `Px`.
+    #[inline]
+    pub fn is_finite(self) -> bool {
+        self.0.is_finite()
+    }
 }
 
 impl Pt {
