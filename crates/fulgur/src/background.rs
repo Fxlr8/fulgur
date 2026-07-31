@@ -869,11 +869,15 @@ fn corner_to_angle_rad(
 /// 入力: monotonically non-decreasing position の `(pos, rgba)` ベクタ。
 /// `pos` は ℝ で、範囲外 (`-0.5` や `1.5` など) も許容する。
 ///
-/// **前提条件: `pos` は全て有限であること。** `color_at` は position が全順序を
+/// **前提条件: `pos` に NaN を含まないこと。** `color_at` は position が全順序を
 /// 持つことを前提に区間を線形探索し、どれにも該当しなければ `unreachable!()` に
 /// 落ちる。NaN は「どの比較も false」なので、一つ混ざるだけでこの不変条件を破る。
 /// これは呼び出し側 (`resolve_gradient_stops`) が choke point で保証する契約で、
 /// ここを NaN 耐性にして握り潰すべきではない (fulgur-0vzf)。
+///
+/// `±inf` は比較が正しく順序づくので不変条件は破らない (端点合成に落ちて有限な
+/// 出力になる)。ただし `p1 - p0` が `inf` に飽和する極端な入力では補間 alpha が
+/// 0 に潰れて色が不正確になる — caller 側で非有限を弾いているのはこのため。
 ///
 /// 出力: `pos` が `[0, 1]` に収まる `(pos, rgba)` ベクタ。Krilla の
 /// `NormalizedF32` 制約をそのまま満たす。
@@ -1142,6 +1146,16 @@ fn resolve_gradient_stops(
     // marker stop を 8 個の中間 stop (累乗カーブ) に展開する。hint を含まない
     // 入力は素通り。
     let after_hints: Vec<(f32, [u8; 4])> = expand_interpolation_hints(resolved);
+
+    // hint 展開は stop を減らしうる: `is_hint` だけの入力 (convert 段の
+    // validation を通らない直接構築) は全 marker が defensively skip されて
+    // 空ベクタになる。下流の `expand_repeating_stops` は `first()/last()` を
+    // `expect("len >= 2")` で剥がすので、ここで止めないと release build でも
+    // panic する (fulgur-0vzf)。非 repeating 側も `renormalize` の
+    // `debug_assert!` を踏むので同じ地点で弾く。
+    if after_hints.len() < 2 {
+        return None;
+    }
 
     // 周期展開: repeating-* gradient は first/last stop 間の差を周期に取り、
     // `[0, 1]` を覆うように copy を平行移動して並べる。renormalize 段で
@@ -1415,7 +1429,15 @@ fn draw_radial_gradient(
     };
 
     // 符号ガードは NaN-blind なので、有限性を明示的に検査する (fulgur-0vzf)。
-    if !rx.is_finite() || !ry.is_finite() || rx <= 0.0 || ry <= 0.0 {
+    // 中心座標も併せて見る: 半径が有限でも `position_x` / `position_y` 由来の
+    // cx / cy が非有限なら、そのまま krilla の focal / center 座標に流れる。
+    if !rx.is_finite()
+        || !ry.is_finite()
+        || !cx.is_finite()
+        || !cy.is_finite()
+        || rx <= 0.0
+        || ry <= 0.0
+    {
         return;
     }
 
@@ -1437,7 +1459,14 @@ fn draw_radial_gradient(
     // `from_row(sx, ky, kx, sy, tx, ty)` で行列直接構築する。
     let transform = if (rx - ry).abs() > f32::EPSILON {
         let scale_y = ry / rx;
-        krilla::geom::Transform::from_row(1.0, 0.0, 0.0, scale_y, 0.0, cy * (1.0 - scale_y))
+        let ty = cy * (1.0 - scale_y);
+        // 両オペランドが有限でも比が f32 の表現域を超えることがある
+        // (`ry = f32::MAX` / `rx = f32::MIN_POSITIVE` など)。派生値も検査して
+        // 非有限な行列を krilla に渡さない (fulgur-0vzf)。
+        if !scale_y.is_finite() || !ty.is_finite() {
+            return;
+        }
+        krilla::geom::Transform::from_row(1.0, 0.0, 0.0, scale_y, 0.0, ty)
     } else {
         krilla::geom::Transform::default()
     };
@@ -4052,6 +4081,26 @@ mod resolve_gradient_stops_tests {
             stop(fr(0.25), [0, 0, 255, 255]),
         ];
         assert!(resolve_gradient_stops(&stops, 100.0_f32.as_px(), true).is_none());
+    }
+
+    /// 全 stop が `is_hint` の入力は、hint 展開が全 marker を defensively skip
+    /// して空ベクタを返す。以前は `expand_repeating_stops` の
+    /// `expect("len >= 2")` を release build でも踏んで panic していた
+    /// (非 repeating 側は `renormalize` の `debug_assert!`)。
+    #[test]
+    fn all_hint_stops_return_none() {
+        let hint = |p: GradientStopPosition| GradientStop {
+            position: p,
+            rgba: [255, 0, 0, 255],
+            is_hint: true,
+        };
+        for repeating in [false, true] {
+            let stops = vec![hint(fr(0.0)), hint(fr(1.0))];
+            assert!(
+                resolve_gradient_stops(&stops, 100.0_f32.as_px(), repeating).is_none(),
+                "repeating={repeating}"
+            );
+        }
     }
 
     /// `repeating-linear-gradient(red 0%, blue 25%)`: period = 0.25。
