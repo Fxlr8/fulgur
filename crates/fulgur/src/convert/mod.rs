@@ -1971,15 +1971,27 @@ mod edge_case_tests {
         // shallow entries must be present, and elements past the depth cap
         // must NOT appear in drawables (verifying the guard actually fires).
         //
-        // The div at index 550 (depth ≈ 552 from root) is well beyond the
-        // 512 limit; giving it a unique id lets us confirm it was skipped.
+        // Sentinel placement: div at index 510.
+        //   Depth from <html>: html=0, body=1, div[0]=2, …, div[510]=512.
+        //   convert_node's guard fires at depth >= MAX_DOM_DEPTH (512), so
+        //   div[510] is the *first* element NOT processed by convert_node.
+        //   Removing convert_node's guard makes div[510] appear in
+        //   block_styles, failing the assertion below.
+        //
+        //   Note: positioned::walk_children_into_drawables has its own
+        //   independent guard at the same threshold (positioned.rs:25-27).
+        //   That guard fires on the *parent's* depth, so when convert_node's
+        //   guard is absent, div[510] is still processed (walk_children was
+        //   called with depth=511) but div[511]+ are blocked by walk_children.
+        //   The sentinel at div[510] therefore targets convert_node's guard
+        //   specifically, not walk_children's backup guard.
         //
         // Run in a thread with a large stack because the Blitz/Taffy parse
         // + layout pipelines recurse through the DOM tree before fulgur's
         // depth guard triggers.
         let mut html = String::from("<!DOCTYPE html><html><body>");
         for i in 0..560 {
-            if i == 550 {
+            if i == 510 {
                 html.push_str("<div id=\"beyond-depth-limit\">");
             } else {
                 html.push_str("<div>");
