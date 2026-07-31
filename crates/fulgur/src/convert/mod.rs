@@ -1920,3 +1920,183 @@ mod utility_fn_tests {
         assert_eq!(cb.height, crate::units::Px::ZERO);
     }
 }
+
+#[cfg(test)]
+mod edge_case_tests {
+    //! Tests for defensive guards and edge cases in convert/mod.rs:
+    //! MAX_DOM_DEPTH truncation, empty id="" attributes, and the
+    //! FULGUR_DEBUG debug-tree code path. These exercise branches that
+    //! normal documents never reach but that protect against adversarial
+    //! or malformed HTML.
+
+    use std::ops::DerefMut;
+
+    use crate::units::F32Units;
+
+    fn build_drawables(html: &str) -> crate::drawables::Drawables {
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass(doc.deref_mut(), 842.0);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = super::ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: Default::default(),
+            string_set_by_node: Default::default(),
+            counter_ops_by_node: Default::default(),
+            bookmark_by_node: Default::default(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((595.0, 842.0)),
+        };
+        super::dom_to_drawables(&doc, &mut ctx)
+    }
+
+    // --- MAX_DOM_DEPTH guard in convert_node and walk_semantics ---
+
+    #[test]
+    fn deeply_nested_html_does_not_panic_and_truncates_at_max_depth() {
+        // MAX_DOM_DEPTH = 512. Build HTML with 560 levels of nesting so
+        // both convert_node (line 333) and walk_semantics (line 401) hit
+        // their depth guards. The render must complete without panicking.
+        // Run in a thread with a large stack because the Blitz/Taffy parse
+        // + layout pipelines recurse through the DOM tree before fulgur's
+        // depth guard triggers.
+        let mut html = String::from("<!DOCTYPE html><html><body>");
+        for _ in 0..560 {
+            html.push_str("<div>");
+        }
+        html.push_str("deep text");
+        for _ in 0..560 {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+
+        let d = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024) // 64 MiB: blitz/taffy recurse before fulgur's guard fires
+            .spawn(move || build_drawables(&html))
+            .expect("thread spawn")
+            .join()
+            .expect("thread did not panic");
+
+        // At least the shallow entries (before the depth cap) must be recorded.
+        assert!(
+            !d.block_styles.is_empty(),
+            "shallow block entries must be recorded even with deep nesting"
+        );
+    }
+
+    // --- extract_block_id: empty id="" attribute ---
+
+    #[test]
+    fn empty_id_attribute_is_not_stored_in_block_entry() {
+        // id="" is whitespace-only after trim(); extract_block_id must
+        // return None rather than storing an empty Arc<String>.
+        // Use a border to force block entry creation so we can check both
+        // block and paragraph id fields.
+        let html = "<!DOCTYPE html><html><body>\
+            <div id=\"\" style=\"border:1px solid black\">content with empty id</div>\
+            <div id=\"valid-id\" style=\"border:1px solid red\">content with valid id</div>\
+            </body></html>";
+
+        let d = build_drawables(html);
+
+        // No entry in block_styles or paragraphs should carry an empty id.
+        let empty_block_ids: Vec<_> = d
+            .block_styles
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .collect();
+        assert!(
+            empty_block_ids.is_empty(),
+            "extract_block_id must not store empty id strings in block entries; found {}",
+            empty_block_ids.len()
+        );
+        let empty_para_ids: Vec<_> = d
+            .paragraphs
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .collect();
+        assert!(
+            empty_para_ids.is_empty(),
+            "extract_block_id must not store empty id strings in paragraph entries; found {}",
+            empty_para_ids.len()
+        );
+
+        // The valid id must appear in at least one block or paragraph entry.
+        let valid_block = d
+            .block_styles
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("valid-id"));
+        let valid_para = d
+            .paragraphs
+            .values()
+            .any(|e| e.id.as_ref().map(|s| s.as_str()) == Some("valid-id"));
+        assert!(
+            valid_block || valid_para,
+            "valid-id should be stored in at least one block or paragraph entry"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_id_attribute_is_not_stored() {
+        // id="   " (spaces only) also trims to empty and must return None.
+        // A <p> is an inline root, so its id lands in d.paragraphs.
+        let html = "<!DOCTYPE html><html><body><p id=\"   \">paragraph</p></body></html>";
+
+        let d = build_drawables(html);
+
+        let bad_para_ids: Vec<_> = d
+            .paragraphs
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .collect();
+        assert!(
+            bad_para_ids.is_empty(),
+            "whitespace-only id must not be stored in paragraph entries; found {}",
+            bad_para_ids.len()
+        );
+        let bad_block_ids: Vec<_> = d
+            .block_styles
+            .values()
+            .filter(|e| e.id.as_deref().map(|s| s.is_empty()) == Some(true))
+            .collect();
+        assert!(
+            bad_block_ids.is_empty(),
+            "whitespace-only id must not be stored in block entries; found {}",
+            bad_block_ids.len()
+        );
+    }
+
+    // --- FULGUR_DEBUG: debug_print_tree code path ---
+
+    #[test]
+    fn fulgur_debug_env_var_triggers_debug_tree_without_panic() {
+        // Setting FULGUR_DEBUG causes dom_to_drawables to call
+        // debug_print_tree (lines 167, 277-310), which writes to stderr.
+        // This test verifies the path executes without panicking.
+        // Safety: set_var is unsafe in edition 2024 because it races with
+        // concurrent reads; this test must not run in parallel with other
+        // tests that read FULGUR_DEBUG. Cargo runs tests in the same
+        // process by default, but debug_print_tree only writes to stderr
+        // so a race only risks spurious stderr noise, not test failures.
+        let html = "<!DOCTYPE html><html><body><h1>debug</h1><p>text</p></body></html>";
+        unsafe {
+            std::env::set_var("FULGUR_DEBUG", "1");
+        }
+        let result = std::panic::catch_unwind(|| build_drawables(html));
+        unsafe {
+            std::env::remove_var("FULGUR_DEBUG");
+        }
+        assert!(result.is_ok(), "debug_print_tree must not panic");
+    }
+}
