@@ -3559,4 +3559,88 @@ mod tests {
             "single item: expected ideal budget=5.0, got {budget}"
         );
     }
+
+    // ── resolve_column_layout: fits_count denom ≤ 0 branch ──────────────
+
+    #[test]
+    fn resolve_column_layout_negative_gap_clamps_fits_count_to_one() {
+        // When column-gap magnitude exceeds column-width, the denominator in
+        // fits_count (= w + gap) is ≤ 0. The defensive branch returns 1 to
+        // avoid division-by-zero or negative counts.
+        // gap=-2.0, width=1.0: denom = 1.0 + (-2.0) = -1.0 ≤ 0 → fits_count = 1.
+        let (n, w) = resolve_column_layout(300.0, None, Some(1.0), -2.0);
+        assert_eq!(n, 1);
+        // With n=1 and gap contributing nothing, col_w = avail = 300.
+        assert!((w - 300.0).abs() < 1e-3, "col_w={w}");
+    }
+
+    // ── layout_column_group: zero total_h → balance budget zero ─────────
+
+    #[test]
+    fn zero_height_children_give_zero_balance_budget() {
+        // A multicol container whose block children all measure to height=0
+        // drives total_h to 0.0 in layout_column_group, exercising the
+        // `total_h <= 0.0 → budget = 0` Balance-mode branch (line 1071).
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2; column-gap: 0;">
+              <div></div>
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+        let laid_out = tree.layout_multicol_subtrees();
+        assert_eq!(laid_out, 1);
+
+        let geom = tree.take_geometry();
+        assert_eq!(geom.len(), 1);
+        let mc_geom = geom.values().next().unwrap();
+        let group = &mc_geom.groups[0];
+        assert_eq!(group.n, 2);
+        assert!(
+            group.col_heights.iter().all(|h| h.to_f32() <= 0.01),
+            "zero-height children must produce near-zero column heights: {:?}",
+            group.col_heights
+        );
+    }
+
+    // ── parley_layout_is_glyph_run_only: InlineBox arm ──────────────────
+
+    #[test]
+    fn case_a_multicol_with_inline_block_falls_back_to_atomic_placement() {
+        // A multicol container that IS an inline root (Case A) containing an
+        // inline-block element (which Parley represents as an InlineBox) must
+        // not be split column-by-column, since GlyphRun materialisation would
+        // silently drop InlineBox content. The layout hook falls back:
+        // geometry is recorded but `paragraph_splits` is empty (whole
+        // paragraph stays atomic in column 0). Covers lines 847-902 and 1494.
+        let html = r#"<!doctype html><html><body>
+            <div style="column-count: 2; column-gap: 0;">
+              text <span style="display: inline-block; width: 20px; height: 20px;"></span> more
+            </div>
+        </body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+        let laid_out = tree.layout_multicol_subtrees();
+        assert_eq!(laid_out, 1);
+
+        let geom = tree.take_geometry();
+        assert_eq!(
+            geom.len(),
+            1,
+            "geometry must be recorded even on the fallback path"
+        );
+        let mc_geom = geom.values().next().unwrap();
+        let group = &mc_geom.groups[0];
+        assert!(
+            group.paragraph_splits.is_empty(),
+            "InlineBox fallback must not produce paragraph splits, got: {:?}",
+            group.paragraph_splits
+        );
+    }
 }
