@@ -177,6 +177,49 @@ impl Config {
     pub fn effective_bookmarks(&self) -> bool {
         self.bookmarks || self.pdf_ua
     }
+
+    /// Rejects page size / margin combinations that are unsafe to feed into
+    /// Blitz layout and pagination: non-finite or non-positive page
+    /// dimensions, non-finite or negative margins, and margins that leave no
+    /// content area. Called once at the top of the layout pipeline
+    /// (`Engine::layout_to_drawables`) so bad values fail fast with a clear
+    /// error instead of reaching Blitz/Taffy as e.g. a saturated `u32::MAX`
+    /// viewport height.
+    pub(crate) fn validate(&self) -> crate::Result<()> {
+        let ps = if self.landscape {
+            self.page_size.landscape()
+        } else {
+            self.page_size
+        };
+        if !ps.width.is_finite() || ps.width <= 0.0 || !ps.height.is_finite() || ps.height <= 0.0 {
+            return Err(crate::Error::PdfGeneration(format!(
+                "invalid page size: width and height must be finite and positive (got {}x{} pt)",
+                ps.width, ps.height
+            )));
+        }
+        for (name, v) in [
+            ("top", self.margin.top),
+            ("right", self.margin.right),
+            ("bottom", self.margin.bottom),
+            ("left", self.margin.left),
+        ] {
+            if !v.is_finite() || v < 0.0 {
+                return Err(crate::Error::PdfGeneration(format!(
+                    "invalid margin: {name} must be finite and non-negative (got {v})"
+                )));
+            }
+        }
+        if self.content_width() <= 0.0 || self.content_height() <= 0.0 {
+            return Err(crate::Error::PdfGeneration(format!(
+                "invalid margin: margins leave no content area ({}x{} pt page, {}x{} pt content)",
+                ps.width,
+                ps.height,
+                self.content_width(),
+                self.content_height()
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -309,6 +352,92 @@ mod tests {
             .build();
         assert!((config.content_width() - (841.89 - 144.0)).abs() < 0.01);
         assert!((config.content_height() - (595.28 - 144.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn validate_accepts_default_config() {
+        assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_nan_page_width() {
+        let config = Config::builder()
+            .page_size(PageSize::custom(f32::NAN, 297.0))
+            .build();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_infinite_page_height() {
+        let config = Config::builder()
+            .page_size(PageSize::custom(210.0, f32::INFINITY))
+            .build();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_page_size() {
+        assert!(
+            Config::builder()
+                .page_size(PageSize::custom(-210.0, 297.0))
+                .build()
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Config::builder()
+                .page_size(PageSize::custom(0.0, 297.0))
+                .build()
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_negative_margin() {
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .margin(Margin::uniform(-1.0))
+            .build();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_margin() {
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .margin(Margin {
+                top: f32::NAN,
+                right: 20.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .build();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_margin_collapsing_content_area() {
+        // A4 height is 841.89pt; a 1000pt uniform margin leaves no content
+        // area on any side.
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .margin(Margin::uniform(1000.0))
+            .build();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_landscape_with_valid_content_area() {
+        // Content-area validation must use the landscape-flipped page size,
+        // not the portrait one, or a legitimate landscape config could be
+        // rejected (or an invalid one wrongly accepted).
+        let config = Config::builder()
+            .page_size(PageSize::A4)
+            .margin(Margin::uniform(72.0))
+            .landscape(true)
+            .build();
+        assert!(config.validate().is_ok());
     }
 
     #[test]

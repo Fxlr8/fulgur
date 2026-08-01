@@ -166,6 +166,11 @@ impl Engine {
         html: &str,
         anchor_map: Option<&AnchorMap>,
     ) -> Result<LayoutArtifacts> {
+        // Reject non-finite/non-positive page size or margin values before
+        // they reach Blitz parsing below — an unvalidated f32 here can
+        // otherwise saturate to e.g. a u32::MAX viewport height.
+        self.config.validate()?;
+
         let html = crate::blitz_adapter::rewrite_marker_content_url_in_html(html);
 
         let combined_css = self

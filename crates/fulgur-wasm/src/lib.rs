@@ -306,7 +306,12 @@ impl Engine {
     /// `serde_json::from_str` で deserialize する。`serde-wasm-bindgen`
     /// の `Reflect::get` ベースの deserializer は `deny_unknown_fields`
     /// を honor せず typo を silently 通してしまうため、検証ゲートを
-    /// 効かせる経路として JSON 経由を採用している。
+    /// 効かせる経路として JSON 経由を採用している。副次効果として、JS の
+    /// `NaN` / `Infinity` は `JSON.stringify` で `null` に化けるため
+    /// `f32` フィールドの deserialize が型エラーで失敗し、非有限な
+    /// `widthMm` 等はここで弾かれる。負値や margin が content area を
+    /// 潰す組み合わせは構文的に正当な数値なので通るが、`render()` が
+    /// 呼び出す `fulgur::Config::validate` が最終的に弾く。
     pub fn configure(&mut self, options: JsValue) -> Result<(), JsError> {
         let json = js_sys::JSON::stringify(&options)
             .map_err(|_| JsError::new("invalid options: value cannot be converted to JSON"))?;
@@ -448,6 +453,89 @@ mod wasm_tests {
         let mut engine = Engine::new();
         let result = engine.configure(options(r#"{"pageSize":"Foo"}"#));
         assert!(result.is_err(), "unknown page size should be rejected");
+    }
+
+    // `options()` above goes through `JSON.parse`, which cannot represent
+    // `NaN`/`Infinity` as JSON text at all — it can only probe the
+    // `configure_json`-equivalent path. These two tests instead build a
+    // REAL JS object with an actual `NaN`/`Infinity` value, to exercise the
+    // exact `JsValue -> JSON.stringify -> serde_json::from_str` round trip
+    // that `configure` runs in production. JS's `JSON.stringify` replaces
+    // non-finite numbers with `null`, so a `f32`-typed field fails to
+    // deserialize with a type error — these values are rejected before ever
+    // reaching `PageSizeOption::to_page_size`.
+    #[wasm_bindgen_test]
+    fn configure_rejects_real_nan_via_jsvalue() {
+        let mut engine = Engine::new();
+        let opts = js_sys::Object::new();
+        js_sys::Reflect::set(&opts, &"pageSize".into(), &{
+            let ps = js_sys::Object::new();
+            js_sys::Reflect::set(&ps, &"widthMm".into(), &js_sys::Number::from(f64::NAN)).unwrap();
+            js_sys::Reflect::set(&ps, &"heightMm".into(), &js_sys::Number::from(297.0)).unwrap();
+            ps.into()
+        })
+        .unwrap();
+        let result = engine.configure(opts.into());
+        assert!(
+            result.is_err(),
+            "NaN pageSize should be rejected, got {result:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn configure_rejects_real_infinity_via_jsvalue() {
+        let mut engine = Engine::new();
+        let opts = js_sys::Object::new();
+        js_sys::Reflect::set(&opts, &"pageSize".into(), &{
+            let ps = js_sys::Object::new();
+            js_sys::Reflect::set(&ps, &"widthMm".into(), &js_sys::Number::from(210.0)).unwrap();
+            js_sys::Reflect::set(
+                &ps,
+                &"heightMm".into(),
+                &js_sys::Number::from(f64::INFINITY),
+            )
+            .unwrap();
+            ps.into()
+        })
+        .unwrap();
+        let result = engine.configure(opts.into());
+        assert!(
+            result.is_err(),
+            "Infinity pageSize should be rejected, got {result:?}"
+        );
+    }
+
+    // Negative dimensions and collapsing margins are ordinary finite JSON
+    // numbers, so `configure` itself accepts them (partial merge can't know
+    // the final page size when only a margin is being set). The core
+    // `fulgur::Engine::render` validation catches them instead — this is
+    // exercised through `render`, not `configure`.
+    #[wasm_bindgen_test]
+    fn render_rejects_negative_custom_page_size_via_jsvalue() {
+        let mut engine = Engine::new();
+        engine
+            .configure(options(
+                r#"{"pageSize":{"widthMm":-210.0,"heightMm":297.0}}"#,
+            ))
+            .expect("configure should accept a syntactically valid negative number");
+        let result = engine.render("<p>x</p>");
+        assert!(
+            result.is_err(),
+            "negative custom page size should be rejected at render, got {result:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn render_rejects_margin_collapsing_content_area_via_jsvalue() {
+        let mut engine = Engine::new();
+        engine
+            .configure(options(r#"{"pageSize":"A4","margin":{"mm":1000.0}}"#))
+            .expect("configure should accept a syntactically valid large margin");
+        let result = engine.render("<p>x</p>");
+        assert!(
+            result.is_err(),
+            "margin collapsing the content area should be rejected at render, got {result:?}"
+        );
     }
 }
 
@@ -662,6 +750,47 @@ mod tests {
             "pageSizeTypo": "A4",
         }));
         assert!(result.is_err(), "unknown field should be rejected");
+    }
+
+    // `serde_json` cannot represent NaN/Infinity (see the module doc comment
+    // on `configure`), so negative and collapsing values — ordinary finite
+    // numbers — are what this path can actually probe. `configure_json`
+    // itself accepts them (it can't know the final page size from a margin
+    // alone), and `render` is where core `fulgur` validation rejects them.
+    #[test]
+    fn configure_json_accepts_negative_dimensions_but_render_rejects() {
+        // Uses `render_impl` (plain `fulgur::Result`), not the `#[wasm_bindgen]`
+        // `render` wrapper: on the error path that wrapper calls
+        // `JsError::new`, which panics on non-wasm targets (see the
+        // `configure_json` doc note above on why native tests route around
+        // wasm-bindgen-imported functions).
+        let mut engine = Engine::new();
+        engine
+            .configure_json(serde_json::json!({
+                "pageSize": { "widthMm": -210.0, "heightMm": 297.0 },
+            }))
+            .expect("configure should accept a syntactically valid negative number");
+        let result = engine.render_impl("<p>x</p>");
+        assert!(
+            result.is_err(),
+            "negative custom page size should be rejected at render"
+        );
+    }
+
+    #[test]
+    fn configure_json_accepts_collapsing_margin_but_render_rejects() {
+        let mut engine = Engine::new();
+        engine
+            .configure_json(serde_json::json!({
+                "pageSize": "A4",
+                "margin": { "mm": 1000.0 },
+            }))
+            .expect("configure should accept a syntactically valid large margin");
+        let result = engine.render_impl("<p>x</p>");
+        assert!(
+            result.is_err(),
+            "margin collapsing the content area should be rejected at render"
+        );
     }
 
     #[test]

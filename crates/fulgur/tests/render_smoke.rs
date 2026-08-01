@@ -6431,3 +6431,68 @@ fn regex_lite_link_rects(text: &str) -> Vec<(f32, f32, f32, f32)> {
     }
     out
 }
+
+/// `Engine::render` must reject non-finite / non-positive page size and
+/// collapsing margins before they reach Blitz layout, instead of silently
+/// producing a saturated viewport or a krilla PDF-generation error deep in
+/// the pipeline. Exercised through the real `Engine::builder()` entry point
+/// (not a direct `Config::validate` unit call) so the render path itself is
+/// covered for codecov patch attribution — see CLAUDE.md "Coverage scope".
+#[test]
+fn render_rejects_non_finite_custom_page_size() {
+    use fulgur::PageSize;
+
+    let err = Engine::builder()
+        .page_size(PageSize::custom(210.0, f32::INFINITY))
+        .build()
+        .render("<p>x</p>")
+        .expect_err("infinite custom page height should be rejected");
+    assert!(err.to_string().contains("invalid page size"));
+}
+
+#[test]
+fn render_rejects_margin_collapsing_content_area() {
+    use fulgur::{Margin, PageSize};
+
+    let err = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(1000.0))
+        .build()
+        .render("<p>x</p>")
+        .expect_err("margins exceeding the page size should be rejected");
+    assert!(err.to_string().contains("invalid margin"));
+}
+
+/// `builder.margin(...)` sets `ConfigOverrides::margin`, which makes it
+/// authoritative over `@page { margin: ... }` (see
+/// `gcpm::page_settings::resolve_page_settings`) — so an invalid explicit
+/// builder margin is never "rescued" by CSS, and `Config::validate` rejecting
+/// it before GCPM resolution runs is correct, not a false positive.
+#[test]
+fn render_rejects_explicit_margin_override_even_with_at_page_css() {
+    use fulgur::Margin;
+
+    let html = r#"<style>@page { size: A4; margin: 20mm; }</style><p>x</p>"#;
+    let err = Engine::builder()
+        .margin(Margin::uniform(1000.0))
+        .build()
+        .render(html)
+        .expect_err("explicit builder margin override must win over @page and be rejected");
+    assert!(err.to_string().contains("invalid margin"));
+}
+
+/// The inverse of the test above: when the caller does *not* call
+/// `builder.margin(...)`, `self.config` stays at its always-valid default,
+/// so `Config::validate` is a no-op regardless of what `@page` declares.
+/// A pathological `@page`-only margin is unaffected by this PR — it is
+/// still handled by the pre-existing
+/// `resolved_content_{width,height}_pt.max(0.0)` clamp in `Engine::render`.
+#[test]
+fn render_unaffected_by_at_page_only_margin_without_builder_override() {
+    let html = r#"<style>@page { size: A4; margin: 1000mm; }</style><p>x</p>"#;
+    let pdf = Engine::builder()
+        .build()
+        .render(html)
+        .expect("no builder override means Config::validate must not reject @page-only CSS");
+    assert!(!pdf.is_empty());
+}
