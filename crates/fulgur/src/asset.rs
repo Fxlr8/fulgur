@@ -16,18 +16,31 @@ pub struct AssetBundle {
     base_path_str: Option<String>,
     /// Running total of bytes accepted via [`Self::add_css`] /
     /// [`Self::add_css_file`], enforcing [`MAX_TOTAL_CSS_BYTES`]. `css` is
-    /// `pub` for caller convenience, so this total only tracks pushes made
-    /// through those two methods — a direct `self.css.push(..)` bypasses
-    /// it. Fully emptying `self.css` (e.g. `bundle.css.clear()`) is
-    /// detected and resets this to 0 so bundle reuse doesn't get stuck
-    /// rejecting everything after the budget is hit once; a *partial*
-    /// external removal is not detected and can leave this over-counting.
+    /// `pub` for caller convenience, so a caller can mutate it directly
+    /// (`push`, `remove`, `clear`) bypassing those two methods; see
+    /// `css_synced_len` for how `try_push_css` detects and repairs that.
     css_total_bytes: usize,
-    /// Running total of `key.len() + data.len()` for entries accepted via
-    /// [`Self::add_image`] / [`Self::add_image_file`], enforcing
-    /// [`MAX_TOTAL_IMAGE_BYTES`]. Same `pub`-field caveats as
-    /// `css_total_bytes`, including the empty-map reset.
+    /// `self.css.len()` as of the last time `css_total_bytes` was known
+    /// accurate. `try_push_css` compares this against the vec's current
+    /// length on every call: a mismatch means the `pub` field was mutated
+    /// directly since, so it recomputes `css_total_bytes` from `self.css`
+    /// before charging the new entry. An attacker reachable only through
+    /// `add_css`/`add_image` (not the pub fields themselves — e.g. the
+    /// fulgur-wasm/binding path) can never cause this mismatch, since every
+    /// accepted push here updates both fields in lockstep; only trusted
+    /// embedder code that deliberately mutates the collection can trigger
+    /// it, and each trigger costs O(current length) once rather than O(n)
+    /// per call, so this doesn't reopen the entry-count-driven CPU sink the
+    /// budget itself exists to close.
+    css_synced_len: usize,
+    /// Running total of `STRING_ENTRY_OVERHEAD_BYTES + key.len() +
+    /// data.len()` for entries accepted via [`Self::add_image`] /
+    /// [`Self::add_image_file`], enforcing [`MAX_TOTAL_IMAGE_BYTES`]. Same
+    /// `pub`-field mutation caveat as `css_total_bytes`.
     image_total_bytes: usize,
+    /// `self.images.len()` counterpart to `css_synced_len`, checked by
+    /// `try_insert_image`.
+    image_synced_len: usize,
 }
 
 impl AssetBundle {
@@ -38,7 +51,9 @@ impl AssetBundle {
             images: HashMap::new(),
             base_path_str: None,
             css_total_bytes: 0,
+            css_synced_len: 0,
             image_total_bytes: 0,
+            image_synced_len: 0,
         }
     }
 
@@ -81,18 +96,18 @@ impl AssetBundle {
             ));
         }
         // `css` is `pub`, so a caller can bypass this method and mutate it
-        // directly (e.g. `bundle.css.clear()` to reuse a bundle). Detecting
-        // "the vec is now empty" and resetting the tracked total is a
-        // targeted fix for exactly that reuse pattern, not general
-        // desync-proofing: recomputing the true total from `self.css` on
-        // every call would make this O(n) per call, and since call count
-        // itself can be attacker-influenced (many small chunks instead of
-        // one large one), that reopens an O(n²) CPU sink of the same shape
-        // this cap exists to close. A partial removal (leaving some
-        // elements) is not caught by this and can still under-report the
-        // total, same as the original design's caveat.
-        if self.css.is_empty() {
-            self.css_total_bytes = 0;
+        // directly (push / remove / clear). See `css_synced_len`'s doc for
+        // why comparing lengths here is safe from an attacker-facing cost
+        // standpoint: only external mutation of the pub field can trigger
+        // the O(current length) recompute, not call volume through this
+        // method alone.
+        if self.css.len() != self.css_synced_len {
+            self.css_total_bytes = self
+                .css
+                .iter()
+                .map(|s| crate::STRING_ENTRY_OVERHEAD_BYTES + s.len())
+                .sum();
+            self.css_synced_len = self.css.len();
         }
         // Charging only `css.len()` let empty/tiny stylesheets accumulate
         // near-zero counted bytes while each still grows `self.css` by one
@@ -118,6 +133,7 @@ impl AssetBundle {
         css.shrink_to_fit();
         self.css_total_bytes += charge;
         self.css.push(css);
+        self.css_synced_len = self.css.len();
         Ok(())
     }
 
@@ -237,15 +253,17 @@ impl AssetBundle {
                 data.len()
             ));
         }
-        // `images` is `pub`, so a caller can bypass this method and clear it
-        // directly. The existing-key credit-back below handles overwriting
-        // one still-tracked key, but not a full external clear (nothing to
-        // look up afterward) — same targeted-not-general fix as
-        // `try_push_css`, and for the same O(n²) reason: recomputing the
-        // true total from `self.images` every call would make call count
-        // itself a CPU-cost lever.
-        if self.images.is_empty() {
-            self.image_total_bytes = 0;
+        // `images` is `pub`, so a caller can bypass this method and mutate
+        // it directly (insert / remove / clear). Same length-mismatch
+        // recompute as `try_push_css` — see `css_synced_len`'s doc for why
+        // this is safe from an attacker-facing cost standpoint.
+        if self.images.len() != self.image_synced_len {
+            self.image_total_bytes = self
+                .images
+                .iter()
+                .map(|(k, v)| crate::STRING_ENTRY_OVERHEAD_BYTES + k.len() + v.len())
+                .sum();
+            self.image_synced_len = self.images.len();
         }
         let charge = crate::STRING_ENTRY_OVERHEAD_BYTES + key.len() + data.len();
         let existing_charge = self
@@ -268,6 +286,7 @@ impl AssetBundle {
         data.shrink_to_fit();
         self.image_total_bytes = projected;
         self.images.insert(key, Arc::new(data));
+        self.image_synced_len = self.images.len();
         Ok(())
     }
 
@@ -1047,6 +1066,59 @@ mod tests {
         assert!(
             bundle.get_image(&probe_key).is_some(),
             "clearing the pub field directly must reset the tracked budget"
+        );
+    }
+
+    #[test]
+    fn add_css_budget_recomputes_after_partial_removal() {
+        // Codex review follow-up: the earlier is_empty()-only reset only
+        // caught a caller clearing the *entire* pub `css` field. Removing
+        // just one entry (e.g. `bundle.css.remove(0)`) left the tracked
+        // total stale and too high, permanently over-rejecting legitimate
+        // reuse even though real remaining usage was well under budget.
+        let mut bundle = AssetBundle::new();
+        let chunk = "a".repeat(MAX_CSS_BYTES);
+        let max_attempts = MAX_TOTAL_CSS_BYTES / MAX_CSS_BYTES + 1;
+        for _ in 0..max_attempts {
+            bundle.add_css(chunk.clone());
+        }
+        let filled_len = bundle.css.len();
+        assert!(filled_len >= 1, "fill loop must accept at least one chunk");
+
+        bundle.css.remove(0);
+        assert_eq!(bundle.css.len(), filled_len - 1);
+
+        bundle.add_css(chunk);
+        assert_eq!(
+            bundle.css.len(),
+            filled_len,
+            "removing one entry through the pub field must free budget for a new \
+             entry of the same size, proving the stale total was recomputed \
+             rather than staying stuck at the pre-removal ceiling"
+        );
+    }
+
+    #[test]
+    fn add_image_budget_recomputes_after_partial_removal() {
+        let mut bundle = AssetBundle::new();
+        let chunk = vec![0u8; MAX_IMAGE_BYTES];
+        let max_attempts = MAX_TOTAL_IMAGE_BYTES / MAX_IMAGE_BYTES + 1;
+        for i in 0..max_attempts {
+            bundle.add_image(format!("img{i}.bin"), chunk.clone());
+        }
+        let filled_len = bundle.images.len();
+        assert!(filled_len >= 1, "fill loop must accept at least one image");
+
+        bundle.images.remove("img0.bin");
+        assert_eq!(bundle.images.len(), filled_len - 1);
+
+        bundle.add_image("new.bin", chunk);
+        assert_eq!(
+            bundle.images.len(),
+            filled_len,
+            "removing one entry through the pub field must free budget for a new \
+             entry of the same size, proving the stale total was recomputed \
+             rather than staying stuck at the pre-removal ceiling"
         );
     }
 
