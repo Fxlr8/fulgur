@@ -3,6 +3,7 @@
 use crate::error::Error;
 use crate::error::Result;
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -14,15 +15,18 @@ pub struct AssetBundle {
     pub images: HashMap<String, Arc<Vec<u8>>>,
     base_path_str: Option<String>,
     /// Running total of bytes accepted via [`Self::add_css`] /
-    /// [`Self::add_css_file`], enforcing [`MAX_TOTAL_CSS_BYTES`]. Not
-    /// updated by direct `self.css` mutation (the fields are `pub` for
-    /// caller convenience) — the budget only guards the constructor
-    /// methods.
+    /// [`Self::add_css_file`], enforcing [`MAX_TOTAL_CSS_BYTES`]. `css` is
+    /// `pub` for caller convenience, so this total only tracks pushes made
+    /// through those two methods — a direct `self.css.push(..)` bypasses
+    /// it. Fully emptying `self.css` (e.g. `bundle.css.clear()`) is
+    /// detected and resets this to 0 so bundle reuse doesn't get stuck
+    /// rejecting everything after the budget is hit once; a *partial*
+    /// external removal is not detected and can leave this over-counting.
     css_total_bytes: usize,
     /// Running total of `key.len() + data.len()` for entries accepted via
     /// [`Self::add_image`] / [`Self::add_image_file`], enforcing
-    /// [`MAX_TOTAL_IMAGE_BYTES`]. Same caveat as `css_total_bytes` re:
-    /// direct `self.images` mutation.
+    /// [`MAX_TOTAL_IMAGE_BYTES`]. Same `pub`-field caveats as
+    /// `css_total_bytes`, including the empty-map reset.
     image_total_bytes: usize,
 }
 
@@ -55,31 +59,40 @@ impl AssetBundle {
         }
     }
 
-    /// File-backed sibling of [`Self::add_css`]. Gates on file size
-    /// *before* reading the entire file into memory, mirroring
+    /// File-backed sibling of [`Self::add_css`]. Bounds the actual bytes
+    /// read from disk (see [`read_file_capped`]), mirroring
     /// [`Self::add_font_file`].
     pub fn add_css_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        let len = std::fs::metadata(path)?.len();
-        if len > MAX_CSS_BYTES as u64 {
-            return Err(Error::Asset(format!(
-                "CSS file {} exceeds {MAX_CSS_BYTES} byte limit (got {len} bytes)",
-                path.display()
-            )));
-        }
-        let css = std::fs::read_to_string(path)?;
+        let data = read_file_capped(path, MAX_CSS_BYTES, "CSS file")?;
+        let css = String::from_utf8(data)
+            .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         self.try_push_css(css).map_err(Error::Asset)
     }
 
     /// Shared cap-enforcing push used by [`Self::add_css`] and
     /// [`Self::add_css_file`]. `Err` carries a human-readable reason; the
     /// CSS is dropped in both cases (never partially applied).
-    fn try_push_css(&mut self, css: String) -> std::result::Result<(), String> {
+    fn try_push_css(&mut self, mut css: String) -> std::result::Result<(), String> {
         if css.len() > MAX_CSS_BYTES {
             return Err(format!(
                 "stylesheet exceeds {MAX_CSS_BYTES} byte limit ({} bytes); dropping",
                 css.len()
             ));
+        }
+        // `css` is `pub`, so a caller can bypass this method and mutate it
+        // directly (e.g. `bundle.css.clear()` to reuse a bundle). Detecting
+        // "the vec is now empty" and resetting the tracked total is a
+        // targeted fix for exactly that reuse pattern, not general
+        // desync-proofing: recomputing the true total from `self.css` on
+        // every call would make this O(n) per call, and since call count
+        // itself can be attacker-influenced (many small chunks instead of
+        // one large one), that reopens an O(n²) CPU sink of the same shape
+        // this cap exists to close. A partial removal (leaving some
+        // elements) is not caught by this and can still under-report the
+        // total, same as the original design's caveat.
+        if self.css.is_empty() {
+            self.css_total_bytes = 0;
         }
         if self.css_total_bytes.saturating_add(css.len()) > MAX_TOTAL_CSS_BYTES {
             return Err(format!(
@@ -88,6 +101,13 @@ impl AssetBundle {
                 css.len()
             ));
         }
+        // Native Rust callers can hand in a `String` whose retained
+        // allocation capacity is much larger than its length (e.g. built
+        // with `String::with_capacity`); charging by `.len()` alone would
+        // under-count the actual retained memory. `shrink_to_fit` is
+        // best-effort (the allocator may keep a little slack) but brings
+        // capacity back in line with what the budget is counting.
+        css.shrink_to_fit();
         self.css_total_bytes += css.len();
         self.css.push(css);
         Ok(())
@@ -95,21 +115,12 @@ impl AssetBundle {
 
     pub fn add_font_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        // Gate on file size *before* reading the entire file into memory so
-        // a malicious multi-gigabyte font cannot drive the process into OOM
-        // via `std::fs::read`. `MAX_DECODED_FONT_BYTES` is the generous
-        // upper bound used across the font pipeline; WOFF2-specific input
-        // capping happens later in `decode_woff2`.
-        let len = std::fs::metadata(path)?.len();
-        if len > MAX_DECODED_FONT_BYTES as u64 {
-            return Err(Error::Asset(format!(
-                "font file {} exceeds {} byte limit (got {} bytes)",
-                path.display(),
-                MAX_DECODED_FONT_BYTES,
-                len
-            )));
-        }
-        let data = std::fs::read(path)?;
+        // Bounds the actual bytes read from disk (see `read_file_capped`) so
+        // a malicious multi-gigabyte font cannot drive the process into OOM.
+        // `MAX_DECODED_FONT_BYTES` is the generous upper bound used across
+        // the font pipeline; WOFF2-specific input capping happens later in
+        // `decode_woff2`.
+        let data = read_file_capped(path, MAX_DECODED_FONT_BYTES, "font file")?;
         self.add_font_bytes(data)
     }
 
@@ -183,8 +194,8 @@ impl AssetBundle {
         }
     }
 
-    /// File-backed sibling of [`Self::add_image`]. Gates on file size
-    /// *before* reading the entire file into memory, mirroring
+    /// File-backed sibling of [`Self::add_image`]. Bounds the actual bytes
+    /// read from disk (see [`read_file_capped`]), mirroring
     /// [`Self::add_font_file`].
     pub fn add_image_file(
         &mut self,
@@ -192,14 +203,7 @@ impl AssetBundle {
         path: impl AsRef<Path>,
     ) -> Result<()> {
         let path = path.as_ref();
-        let len = std::fs::metadata(path)?.len();
-        if len > MAX_IMAGE_BYTES as u64 {
-            return Err(Error::Asset(format!(
-                "image file {} exceeds {MAX_IMAGE_BYTES} byte limit (got {len} bytes)",
-                path.display()
-            )));
-        }
-        let data = std::fs::read(path)?;
+        let data = read_file_capped(path, MAX_IMAGE_BYTES, "image file")?;
         let key = Self::normalize_key(&name.into()).to_string();
         self.try_insert_image(key, data).map_err(Error::Asset)
     }
@@ -211,12 +215,26 @@ impl AssetBundle {
     /// Overwriting an existing key first credits back that entry's charge,
     /// so repeated re-registration of the same key (a legitimate "replace
     /// this image" use) can't leak budget over time.
-    fn try_insert_image(&mut self, key: String, data: Vec<u8>) -> std::result::Result<(), String> {
+    fn try_insert_image(
+        &mut self,
+        key: String,
+        mut data: Vec<u8>,
+    ) -> std::result::Result<(), String> {
         if data.len() > MAX_IMAGE_BYTES {
             return Err(format!(
                 "image {key:?} exceeds {MAX_IMAGE_BYTES} byte limit ({} bytes); dropping",
                 data.len()
             ));
+        }
+        // `images` is `pub`, so a caller can bypass this method and clear it
+        // directly. The existing-key credit-back below handles overwriting
+        // one still-tracked key, but not a full external clear (nothing to
+        // look up afterward) — same targeted-not-general fix as
+        // `try_push_css`, and for the same O(n²) reason: recomputing the
+        // true total from `self.images` every call would make call count
+        // itself a CPU-cost lever.
+        if self.images.is_empty() {
+            self.image_total_bytes = 0;
         }
         let charge = key.len() + data.len();
         let existing_charge = self
@@ -234,6 +252,9 @@ impl AssetBundle {
                  budget; dropping {key:?}"
             ));
         }
+        // See `try_push_css`'s `shrink_to_fit` comment — same rationale for
+        // native Rust callers passing an over-capacity `Vec<u8>`.
+        data.shrink_to_fit();
         self.image_total_bytes = projected;
         self.images.insert(key, Arc::new(data));
         Ok(())
@@ -295,6 +316,34 @@ pub(crate) fn detect_font_format(bytes: &[u8]) -> FontFormat {
         Some(b"true") | Some(b"typ1") => FontFormat::Ttf,
         _ => FontFormat::Unknown,
     }
+}
+
+/// Read `path` up to `max_bytes` (+1, to distinguish "exactly at the cap"
+/// from "over it") through a capped reader, shared by
+/// [`AssetBundle::add_css_file`], [`AssetBundle::add_image_file`], and
+/// [`AssetBundle::add_font_file`].
+///
+/// The prior implementation checked `fs::metadata(path)?.len()` and then
+/// read the file separately — a TOCTOU/FIFO gap. `stat` commonly reports
+/// length 0 for a named pipe (whose writer can then stream unbounded data
+/// through the later read), and a regular file can grow or be replaced
+/// between the check and the read. Reading through `Read::take` bounds the
+/// bytes actually pulled off the file descriptor regardless of what
+/// metadata claimed, so the cap holds even for changing or non-regular
+/// files. Trade-off: an oversized *regular* file now costs up to
+/// `max_bytes + 1` bytes of read (vs. a free `stat`-only rejection before)
+/// to close that gap — bounded, not the unbounded read it replaces.
+fn read_file_capped(path: &Path, max_bytes: usize, kind: &str) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut data = Vec::new();
+    file.take(max_bytes as u64 + 1).read_to_end(&mut data)?;
+    if data.len() > max_bytes {
+        return Err(Error::Asset(format!(
+            "{kind} {} exceeds {max_bytes} byte limit",
+            path.display()
+        )));
+    }
+    Ok(data)
 }
 
 /// Upper bound on accepted WOFF2 input size (32 MiB). Rejects obviously
@@ -571,6 +620,43 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
         assert_eq!(bundle.fonts.len(), 0);
+    }
+
+    // --- Codex review on PR #688: read_file_capped TOCTOU/FIFO fix ---
+    // The old `_file` methods checked `fs::metadata(path)?.len()` and then
+    // read the file separately, which is a TOCTOU gap: a named pipe reports
+    // length 0 via `stat` (its writer can then stream unbounded data through
+    // the later read), and a regular file can grow or be replaced between
+    // the check and the read. `read_file_capped` never calls `metadata` —
+    // it bounds the actual bytes pulled off the file descriptor via
+    // `Read::take`. These tests exercise that function directly with a
+    // small `max_bytes` so the boundary is exact and the test is cheap; a
+    // literal FIFO repro isn't used because named pipes aren't portable
+    // across the Windows/macOS/Linux CI matrix, and the fix holds
+    // structurally (no `metadata` call at all) rather than by demonstrating
+    // one specific non-regular-file case.
+
+    #[test]
+    fn read_file_capped_accepts_data_exactly_at_the_cap() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        tmp.write_all(&[b'x'; 10]).expect("write");
+        let data =
+            read_file_capped(tmp.path(), 10, "test file").expect("exactly-at-cap must be accepted");
+        assert_eq!(data.len(), 10);
+    }
+
+    #[test]
+    fn read_file_capped_rejects_data_one_byte_over_the_cap() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        tmp.write_all(&[b'x'; 11]).expect("write");
+        let err =
+            read_file_capped(tmp.path(), 10, "test file").expect_err("over-cap must be rejected");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("limit"), "msg: {msg}"),
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
@@ -863,5 +949,117 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
         assert!(bundle.get_image("big.png").is_none());
+    }
+
+    // --- Codex review on PR #688: budget desync + retained capacity ---
+
+    #[test]
+    fn add_css_budget_resets_after_bundle_is_cleared_directly() {
+        // `css` is `pub`, so a caller can reuse a bundle by clearing it
+        // directly instead of going through the constructor methods. Before
+        // this fix, `css_total_bytes` never noticed the clear and stayed at
+        // the budget ceiling, so every following `add_css` was silently
+        // dropped even though the bundle held nothing.
+        let mut bundle = AssetBundle::new();
+        // Fill the aggregate budget with per-item-cap-sized chunks (a
+        // single chunk can't exceed MAX_CSS_BYTES).
+        let chunk = "a".repeat(MAX_CSS_BYTES);
+        let fits = MAX_TOTAL_CSS_BYTES / MAX_CSS_BYTES;
+        for _ in 0..fits {
+            bundle.add_css(chunk.clone());
+        }
+        assert_eq!(
+            bundle.css.len(),
+            fits,
+            "chunks must fill the aggregate budget"
+        );
+        bundle.add_css("body { color: red; }");
+        assert_eq!(
+            bundle.css.len(),
+            fits,
+            "budget must still be exhausted before the direct clear"
+        );
+
+        bundle.css.clear();
+        bundle.add_css("body { color: red; }");
+        assert_eq!(
+            bundle.css,
+            vec!["body { color: red; }"],
+            "clearing the pub field directly must reset the tracked budget, \
+             not leave the bundle permanently stuck rejecting"
+        );
+    }
+
+    #[test]
+    fn add_image_budget_resets_after_bundle_is_cleared_directly() {
+        let mut bundle = AssetBundle::new();
+        let chunk = vec![0u8; MAX_IMAGE_BYTES];
+        // Fill until one full-size chunk is rejected (per-entry key
+        // overhead means fewer than a naive total/per-item division fit —
+        // see `add_image_drops_once_aggregate_budget_exceeded`), so a
+        // further same-size chunk is a reliable "budget exhausted" probe.
+        // A tiny probe wouldn't be: the coarse fill can leave nearly one
+        // whole chunk of slack that a tiny item would still fit into.
+        let max_attempts = MAX_TOTAL_IMAGE_BYTES / MAX_IMAGE_BYTES + 1;
+        for i in 0..max_attempts {
+            bundle.add_image(format!("img{i}.bin"), chunk.clone());
+        }
+        let probe_key = format!("img{}.bin", max_attempts - 1);
+        assert!(
+            bundle.get_image(&probe_key).is_none(),
+            "the last fill attempt must have been rejected"
+        );
+
+        bundle.add_image(probe_key.clone(), chunk.clone());
+        assert!(
+            bundle.get_image(&probe_key).is_none(),
+            "budget must still be exhausted before the direct clear"
+        );
+
+        bundle.images.clear();
+        bundle.add_image(probe_key.clone(), chunk);
+        assert!(
+            bundle.get_image(&probe_key).is_some(),
+            "clearing the pub field directly must reset the tracked budget"
+        );
+    }
+
+    #[test]
+    fn add_css_shrinks_retained_capacity_to_length() {
+        // A native Rust caller can hand in a `String` whose capacity is far
+        // larger than its content (e.g. built with `String::with_capacity`
+        // then only partially filled). Charging the budget by `.len()`
+        // alone would under-count retained memory if that excess capacity
+        // is kept; `add_css` must shrink it down before storing.
+        let mut oversized_capacity = String::with_capacity(1024 * 1024);
+        oversized_capacity.push_str("small");
+        assert!(oversized_capacity.capacity() >= 1024 * 1024);
+
+        let mut bundle = AssetBundle::new();
+        bundle.add_css(oversized_capacity);
+        assert_eq!(bundle.css.len(), 1);
+        assert!(
+            bundle.css[0].capacity() < 1024 * 1024,
+            "retained capacity must be shrunk toward the actual content length \
+             (got {})",
+            bundle.css[0].capacity()
+        );
+    }
+
+    #[test]
+    fn add_image_shrinks_retained_capacity_to_length() {
+        let mut oversized_capacity: Vec<u8> = Vec::with_capacity(1024 * 1024);
+        oversized_capacity.extend_from_slice(&[1, 2, 3]);
+        assert!(oversized_capacity.capacity() >= 1024 * 1024);
+
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("small.bin", oversized_capacity);
+        let stored = bundle.get_image("small.bin").expect("must be stored");
+        assert!(
+            stored.capacity() < 1024 * 1024,
+            "retained capacity must be shrunk toward the actual content length \
+             (got {})",
+            stored.capacity()
+        );
     }
 }
