@@ -13,6 +13,17 @@ pub struct AssetBundle {
     pub fonts: Vec<Arc<Vec<u8>>>,
     pub images: HashMap<String, Arc<Vec<u8>>>,
     base_path_str: Option<String>,
+    /// Running total of bytes accepted via [`Self::add_css`] /
+    /// [`Self::add_css_file`], enforcing [`MAX_TOTAL_CSS_BYTES`]. Not
+    /// updated by direct `self.css` mutation (the fields are `pub` for
+    /// caller convenience) — the budget only guards the constructor
+    /// methods.
+    css_total_bytes: usize,
+    /// Running total of `key.len() + data.len()` for entries accepted via
+    /// [`Self::add_image`] / [`Self::add_image_file`], enforcing
+    /// [`MAX_TOTAL_IMAGE_BYTES`]. Same caveat as `css_total_bytes` re:
+    /// direct `self.images` mutation.
+    image_total_bytes: usize,
 }
 
 impl AssetBundle {
@@ -22,15 +33,62 @@ impl AssetBundle {
             fonts: Vec::new(),
             images: HashMap::new(),
             base_path_str: None,
+            css_total_bytes: 0,
+            image_total_bytes: 0,
         }
     }
 
+    /// Register a stylesheet.
+    ///
+    /// `css` is attacker-controlled in any embedding that forwards
+    /// tenant-supplied stylesheets (WASM/binding callers in particular —
+    /// see fulgur-wasm's `Engine.add_css`). A single call exceeding
+    /// [`MAX_CSS_BYTES`], or one that would push the bundle's aggregate
+    /// registered CSS past [`MAX_TOTAL_CSS_BYTES`] (`combined_css`
+    /// allocates a fresh `String` this large on every render), is dropped
+    /// with a `log::warn!` rather than silently retained without bound.
+    /// Realistic stylesheets are orders of magnitude below either cap.
     pub fn add_css(&mut self, css: impl Into<String>) {
-        self.css.push(css.into());
+        let css = css.into();
+        if let Err(msg) = self.try_push_css(css) {
+            log::warn!("add_css: {msg}");
+        }
     }
 
+    /// File-backed sibling of [`Self::add_css`]. Gates on file size
+    /// *before* reading the entire file into memory, mirroring
+    /// [`Self::add_font_file`].
     pub fn add_css_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let len = std::fs::metadata(path)?.len();
+        if len > MAX_CSS_BYTES as u64 {
+            return Err(Error::Asset(format!(
+                "CSS file {} exceeds {MAX_CSS_BYTES} byte limit (got {len} bytes)",
+                path.display()
+            )));
+        }
         let css = std::fs::read_to_string(path)?;
+        self.try_push_css(css).map_err(Error::Asset)
+    }
+
+    /// Shared cap-enforcing push used by [`Self::add_css`] and
+    /// [`Self::add_css_file`]. `Err` carries a human-readable reason; the
+    /// CSS is dropped in both cases (never partially applied).
+    fn try_push_css(&mut self, css: String) -> std::result::Result<(), String> {
+        if css.len() > MAX_CSS_BYTES {
+            return Err(format!(
+                "stylesheet exceeds {MAX_CSS_BYTES} byte limit ({} bytes); dropping",
+                css.len()
+            ));
+        }
+        if self.css_total_bytes.saturating_add(css.len()) > MAX_TOTAL_CSS_BYTES {
+            return Err(format!(
+                "aggregate registered CSS would exceed {MAX_TOTAL_CSS_BYTES} byte budget; \
+                 dropping {} bytes",
+                css.len()
+            ));
+        }
+        self.css_total_bytes += css.len();
         self.css.push(css);
         Ok(())
     }
@@ -105,20 +163,78 @@ impl AssetBundle {
         key.strip_prefix("./").unwrap_or(key)
     }
 
+    /// Register an image asset.
+    ///
+    /// `data` is attacker-controlled in any embedding that forwards
+    /// tenant-supplied images (WASM/binding callers in particular — see
+    /// fulgur-wasm's `Engine.add_image`). Raster decode itself is bounded
+    /// by the downstream decoders' own defaults (png: 64 MiB allocation
+    /// limit, gif: 50 MB memory limit, krilla's zune-jpeg: 16384×16384 max
+    /// dimensions), but the *raw, undecoded* bytes handed to this method
+    /// were retained with no bound at all. A single call exceeding
+    /// [`MAX_IMAGE_BYTES`], or one that would push the bundle's aggregate
+    /// registered image bytes past [`MAX_TOTAL_IMAGE_BYTES`], is dropped
+    /// with a `log::warn!` instead. Realistic images are orders of
+    /// magnitude below either cap.
     pub fn add_image(&mut self, name: impl Into<String>, data: Vec<u8>) {
-        let key = name.into();
-        let key = Self::normalize_key(&key).to_string();
-        self.images.insert(key, Arc::new(data));
+        let key = Self::normalize_key(&name.into()).to_string();
+        if let Err(msg) = self.try_insert_image(key, data) {
+            log::warn!("add_image: {msg}");
+        }
     }
 
+    /// File-backed sibling of [`Self::add_image`]. Gates on file size
+    /// *before* reading the entire file into memory, mirroring
+    /// [`Self::add_font_file`].
     pub fn add_image_file(
         &mut self,
         name: impl Into<String>,
         path: impl AsRef<Path>,
     ) -> Result<()> {
+        let path = path.as_ref();
+        let len = std::fs::metadata(path)?.len();
+        if len > MAX_IMAGE_BYTES as u64 {
+            return Err(Error::Asset(format!(
+                "image file {} exceeds {MAX_IMAGE_BYTES} byte limit (got {len} bytes)",
+                path.display()
+            )));
+        }
         let data = std::fs::read(path)?;
-        let key = name.into();
-        let key = Self::normalize_key(&key).to_string();
+        let key = Self::normalize_key(&name.into()).to_string();
+        self.try_insert_image(key, data).map_err(Error::Asset)
+    }
+
+    /// Shared cap-enforcing insert used by [`Self::add_image`] and
+    /// [`Self::add_image_file`]. Charges `key.len() + data.len()` against
+    /// the aggregate budget so many distinct tiny-value entries can't
+    /// accumulate unbounded `HashMap` overhead under a data-only budget.
+    /// Overwriting an existing key first credits back that entry's charge,
+    /// so repeated re-registration of the same key (a legitimate "replace
+    /// this image" use) can't leak budget over time.
+    fn try_insert_image(&mut self, key: String, data: Vec<u8>) -> std::result::Result<(), String> {
+        if data.len() > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "image {key:?} exceeds {MAX_IMAGE_BYTES} byte limit ({} bytes); dropping",
+                data.len()
+            ));
+        }
+        let charge = key.len() + data.len();
+        let existing_charge = self
+            .images
+            .get(&key)
+            .map(|old| key.len() + old.len())
+            .unwrap_or(0);
+        let projected = self
+            .image_total_bytes
+            .saturating_sub(existing_charge)
+            .saturating_add(charge);
+        if projected > MAX_TOTAL_IMAGE_BYTES {
+            return Err(format!(
+                "aggregate registered image bytes would exceed {MAX_TOTAL_IMAGE_BYTES} byte \
+                 budget; dropping {key:?}"
+            ));
+        }
+        self.image_total_bytes = projected;
         self.images.insert(key, Arc::new(data));
         Ok(())
     }
@@ -190,6 +306,29 @@ const MAX_WOFF2_INPUT_BYTES: usize = 32 * 1024 * 1024;
 /// A single real-world font family tops out well below this; anything larger
 /// is likely a decompression bomb.
 const MAX_DECODED_FONT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Upper bound on a single [`AssetBundle::add_css`] / [`AssetBundle::add_css_file`]
+/// call (16 MiB). A real-world stylesheet is KBs to low MBs; this is
+/// generous headroom, not a realistic ceiling.
+const MAX_CSS_BYTES: usize = 16 * 1024 * 1024;
+
+/// Aggregate ceiling across every stylesheet registered on one bundle
+/// (64 MiB). `AssetBundle::combined_css` allocates a fresh `String` this
+/// large on every render, so this also bounds that per-render allocation.
+const MAX_TOTAL_CSS_BYTES: usize = 64 * 1024 * 1024;
+
+/// Upper bound on a single [`AssetBundle::add_image`] / [`AssetBundle::add_image_file`]
+/// call (64 MiB), matching [`MAX_DECODED_FONT_BYTES`]. This bounds the raw,
+/// undecoded bytes retained by the bundle — decode-time memory is separately
+/// bounded by the downstream decoders' own defaults (see `add_image`'s doc
+/// comment).
+const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Aggregate ceiling across every image registered on one bundle (256 MiB).
+/// Generous enough for a report embedding many photos/logos, but bounds the
+/// case of many separately-reasonable `add_image` calls (or a compromised
+/// tenant issuing many of them) accumulating without limit.
+const MAX_TOTAL_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Decode a WOFF2 byte stream into an uncompressed TTF/OTF font.
 ///
@@ -560,5 +699,169 @@ mod tests {
             .expect("add_image_file");
         let stored = bundle.get_image("photo.jpg").expect("should be present");
         assert_eq!(&stored[..], &pixels[..]);
+    }
+
+    // --- Codex finding: unbounded CSS/image asset registration ---
+    // fulgur-wasm's Engine.add_css/add_image forward JS-caller-controlled
+    // strings/bytes straight into AssetBundle with no cap. The same is true
+    // of the native add_css/add_image API used directly (and via
+    // pyfulgur/fulgur-ruby), so the fix lives here rather than in the WASM
+    // shim. These tests assert the caps actually engage under adversarial
+    // input, and that ordinary small assets are unaffected.
+
+    #[test]
+    fn add_css_drops_oversized_single_stylesheet() {
+        let mut bundle = AssetBundle::new();
+        let huge = "a".repeat(MAX_CSS_BYTES + 1);
+        bundle.add_css(huge);
+        assert!(
+            bundle.css.is_empty(),
+            "oversized single stylesheet must be dropped, not stored"
+        );
+    }
+
+    #[test]
+    fn add_css_drops_once_aggregate_budget_exceeded() {
+        let mut bundle = AssetBundle::new();
+        // Largest single chunk that still fits the per-call cap; push exactly
+        // as many as the aggregate budget holds, then one more.
+        let chunk = "a".repeat(MAX_CSS_BYTES);
+        let fits = MAX_TOTAL_CSS_BYTES / MAX_CSS_BYTES;
+        for _ in 0..fits {
+            bundle.add_css(chunk.clone());
+        }
+        assert_eq!(
+            bundle.css.len(),
+            fits,
+            "chunks within the aggregate budget must all be accepted"
+        );
+        bundle.add_css(chunk);
+        assert_eq!(
+            bundle.css.len(),
+            fits,
+            "one more chunk exceeds the aggregate budget and must be dropped"
+        );
+    }
+
+    #[test]
+    fn add_css_normal_stylesheet_is_unaffected() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_css("body { color: red; }");
+        assert_eq!(bundle.css, vec!["body { color: red; }"]);
+    }
+
+    #[test]
+    fn add_css_file_rejects_oversized_before_reading() {
+        use std::io::Seek;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let oversized = (MAX_CSS_BYTES as u64) + 1;
+        tmp.as_file_mut()
+            .set_len(oversized)
+            .expect("extend tempfile");
+        tmp.as_file_mut().rewind().expect("rewind");
+        let mut bundle = AssetBundle::new();
+        let err = bundle
+            .add_css_file(tmp.path())
+            .expect_err("oversized CSS file must be rejected");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("limit"), "msg: {msg}"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert!(bundle.css.is_empty());
+    }
+
+    #[test]
+    fn add_image_drops_oversized_single_image() {
+        let mut bundle = AssetBundle::new();
+        let huge = vec![0u8; MAX_IMAGE_BYTES + 1];
+        bundle.add_image("big.png", huge);
+        assert!(
+            bundle.get_image("big.png").is_none(),
+            "oversized single image must be dropped, not stored"
+        );
+    }
+
+    #[test]
+    fn add_image_drops_once_aggregate_budget_exceeded() {
+        let mut bundle = AssetBundle::new();
+        // Largest single image that still fits the per-call cap; register
+        // distinct-keyed images (charge = key + data bytes) until the
+        // aggregate budget rejects one, which must happen well before an
+        // unbounded amount of data has been accepted.
+        let chunk = vec![0u8; MAX_IMAGE_BYTES];
+        let max_possible_fits = MAX_TOTAL_IMAGE_BYTES / MAX_IMAGE_BYTES + 1;
+        let mut accepted = 0;
+        for i in 0..=max_possible_fits {
+            let key = format!("img{i}.bin");
+            bundle.add_image(key.clone(), chunk.clone());
+            if bundle.get_image(&key).is_some() {
+                accepted += 1;
+            } else {
+                // Each accepted entry also charges its (small) key length, so
+                // one fewer full-size chunk fits than a naive
+                // total/per-item division would suggest — allow that slack
+                // without allowing the cap to engage drastically early.
+                assert!(
+                    accepted >= max_possible_fits.saturating_sub(2),
+                    "aggregate budget must accept close to MAX_TOTAL_IMAGE_BYTES worth of \
+                     images before rejecting (accepted {accepted}, expected near \
+                     {max_possible_fits})"
+                );
+                return;
+            }
+        }
+        panic!(
+            "aggregate image budget never rejected a push after {} images \
+             ({} bytes each) — the cap did not engage",
+            max_possible_fits + 1,
+            MAX_IMAGE_BYTES
+        );
+    }
+
+    #[test]
+    fn add_image_overwriting_same_key_does_not_leak_budget() {
+        // Repeated re-registration of the *same* key is a legitimate
+        // "replace this image" use. If the budget didn't credit back the
+        // superseded entry, enough overwrites would eventually trip the
+        // aggregate cap even though the bundle only ever holds one entry.
+        let mut bundle = AssetBundle::new();
+        let chunk = vec![0u8; MAX_IMAGE_BYTES / 2];
+        for _ in 0..10 {
+            bundle.add_image("logo.png", chunk.clone());
+        }
+        assert!(
+            bundle.get_image("logo.png").is_some(),
+            "repeated overwrite of one key must not exhaust the aggregate budget"
+        );
+    }
+
+    #[test]
+    fn add_image_normal_image_is_unaffected() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("icon.png", vec![1, 2, 3]);
+        assert_eq!(
+            bundle.get_image("icon.png").map(|d| d.as_slice()),
+            Some([1, 2, 3].as_slice())
+        );
+    }
+
+    #[test]
+    fn add_image_file_rejects_oversized_before_reading() {
+        use std::io::Seek;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let oversized = (MAX_IMAGE_BYTES as u64) + 1;
+        tmp.as_file_mut()
+            .set_len(oversized)
+            .expect("extend tempfile");
+        tmp.as_file_mut().rewind().expect("rewind");
+        let mut bundle = AssetBundle::new();
+        let err = bundle
+            .add_image_file("big.png", tmp.path())
+            .expect_err("oversized image file must be rejected");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("limit"), "msg: {msg}"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert!(bundle.get_image("big.png").is_none());
     }
 }
