@@ -94,7 +94,15 @@ impl AssetBundle {
         if self.css.is_empty() {
             self.css_total_bytes = 0;
         }
-        if self.css_total_bytes.saturating_add(css.len()) > MAX_TOTAL_CSS_BYTES {
+        // Charging only `css.len()` let empty/tiny stylesheets accumulate
+        // near-zero counted bytes while each still grows `self.css` by one
+        // `String` entry (heap header + struct) and, at render time,
+        // `combined_css()` inserts a `\n` separator between every pair of
+        // entries — an uncounted O(entry count) cost. `STRING_ENTRY_OVERHEAD_BYTES`
+        // (shared with the string-set store's identical gap, gcpm/string_set.rs)
+        // makes the byte budget bound the entry count too.
+        let charge = crate::STRING_ENTRY_OVERHEAD_BYTES + css.len();
+        if self.css_total_bytes.saturating_add(charge) > MAX_TOTAL_CSS_BYTES {
             return Err(format!(
                 "aggregate registered CSS would exceed {MAX_TOTAL_CSS_BYTES} byte budget; \
                  dropping {} bytes",
@@ -108,7 +116,7 @@ impl AssetBundle {
         // best-effort (the allocator may keep a little slack) but brings
         // capacity back in line with what the budget is counting.
         css.shrink_to_fit();
-        self.css_total_bytes += css.len();
+        self.css_total_bytes += charge;
         self.css.push(css);
         Ok(())
     }
@@ -209,9 +217,12 @@ impl AssetBundle {
     }
 
     /// Shared cap-enforcing insert used by [`Self::add_image`] and
-    /// [`Self::add_image_file`]. Charges `key.len() + data.len()` against
-    /// the aggregate budget so many distinct tiny-value entries can't
-    /// accumulate unbounded `HashMap` overhead under a data-only budget.
+    /// [`Self::add_image_file`]. Charges `STRING_ENTRY_OVERHEAD_BYTES +
+    /// key.len() + data.len()` against the aggregate budget: the fixed
+    /// overhead bounds the *entry count* (many distinct tiny/empty-payload
+    /// images each also retain a `String` key struct, an `Arc<Vec<u8>>`
+    /// allocation, and `HashMap` bucket overhead that a content-only charge
+    /// misses entirely), while `key.len() + data.len()` bounds the *content*.
     /// Overwriting an existing key first credits back that entry's charge,
     /// so repeated re-registration of the same key (a legitimate "replace
     /// this image" use) can't leak budget over time.
@@ -236,11 +247,11 @@ impl AssetBundle {
         if self.images.is_empty() {
             self.image_total_bytes = 0;
         }
-        let charge = key.len() + data.len();
+        let charge = crate::STRING_ENTRY_OVERHEAD_BYTES + key.len() + data.len();
         let existing_charge = self
             .images
             .get(&key)
-            .map(|old| key.len() + old.len())
+            .map(|old| crate::STRING_ENTRY_OVERHEAD_BYTES + key.len() + old.len())
             .unwrap_or(0);
         let projected = self
             .image_total_bytes
@@ -809,23 +820,33 @@ mod tests {
     #[test]
     fn add_css_drops_once_aggregate_budget_exceeded() {
         let mut bundle = AssetBundle::new();
-        // Largest single chunk that still fits the per-call cap; push exactly
-        // as many as the aggregate budget holds, then one more.
+        // Largest single chunk that still fits the per-call cap. Each
+        // accepted entry also charges STRING_ENTRY_OVERHEAD_BYTES, so one
+        // fewer full-size chunk fits than a naive total/per-item division
+        // would suggest (same reasoning as the image aggregate test) —
+        // push until one is rejected rather than assuming an exact count.
         let chunk = "a".repeat(MAX_CSS_BYTES);
-        let fits = MAX_TOTAL_CSS_BYTES / MAX_CSS_BYTES;
-        for _ in 0..fits {
+        let max_possible_fits = MAX_TOTAL_CSS_BYTES / MAX_CSS_BYTES + 1;
+        let mut accepted = 0;
+        for _ in 0..=max_possible_fits {
             bundle.add_css(chunk.clone());
+            if bundle.css.len() > accepted {
+                accepted += 1;
+            } else {
+                assert!(
+                    accepted >= max_possible_fits.saturating_sub(2),
+                    "aggregate budget must accept close to MAX_TOTAL_CSS_BYTES worth of \
+                     stylesheets before rejecting (accepted {accepted}, expected near \
+                     {max_possible_fits})"
+                );
+                return;
+            }
         }
-        assert_eq!(
-            bundle.css.len(),
-            fits,
-            "chunks within the aggregate budget must all be accepted"
-        );
-        bundle.add_css(chunk);
-        assert_eq!(
-            bundle.css.len(),
-            fits,
-            "one more chunk exceeds the aggregate budget and must be dropped"
+        panic!(
+            "aggregate CSS budget never rejected a push after {} chunks \
+             ({} bytes each) — the cap did not engage",
+            max_possible_fits + 1,
+            MAX_CSS_BYTES
         );
     }
 
@@ -961,22 +982,27 @@ mod tests {
         // the budget ceiling, so every following `add_css` was silently
         // dropped even though the bundle held nothing.
         let mut bundle = AssetBundle::new();
-        // Fill the aggregate budget with per-item-cap-sized chunks (a
-        // single chunk can't exceed MAX_CSS_BYTES).
         let chunk = "a".repeat(MAX_CSS_BYTES);
-        let fits = MAX_TOTAL_CSS_BYTES / MAX_CSS_BYTES;
-        for _ in 0..fits {
+        // Fill until one full-size chunk is rejected (per-entry overhead
+        // means fewer than a naive total/per-item division fit — see
+        // `add_css_drops_once_aggregate_budget_exceeded`), so a further
+        // same-size chunk is a reliable "budget exhausted" probe. A tiny
+        // probe wouldn't be: the coarse fill can leave nearly one whole
+        // chunk of slack that a tiny item would still fit into.
+        let max_attempts = MAX_TOTAL_CSS_BYTES / MAX_CSS_BYTES + 1;
+        for _ in 0..max_attempts {
             bundle.add_css(chunk.clone());
         }
-        assert_eq!(
-            bundle.css.len(),
-            fits,
-            "chunks must fill the aggregate budget"
+        let filled_len = bundle.css.len();
+        assert!(
+            filled_len < max_attempts,
+            "at least one fill attempt must have been rejected"
         );
-        bundle.add_css("body { color: red; }");
+
+        bundle.add_css(chunk.clone());
         assert_eq!(
             bundle.css.len(),
-            fits,
+            filled_len,
             "budget must still be exhausted before the direct clear"
         );
 
@@ -1060,6 +1086,47 @@ mod tests {
             "retained capacity must be shrunk toward the actual content length \
              (got {})",
             stored.capacity()
+        );
+    }
+
+    #[test]
+    fn add_css_charges_overhead_for_empty_stylesheets() {
+        // Before this fix, `css.len()` was the only charge, so an empty (or
+        // tiny) stylesheet cost ~0 counted bytes each — a caller could push
+        // an unbounded number of entries (each still a `Vec<String>` slot,
+        // plus a `\n` separator per pair at `combined_css()` time) without
+        // ever tripping the budget. Assert the fixed overhead is actually
+        // charged by inspecting the running total directly, rather than
+        // looping to the (~1M-entry) ceiling, which would make this test
+        // slow without proving anything the arithmetic check doesn't.
+        let mut bundle = AssetBundle::new();
+        bundle.add_css("");
+        bundle.add_css("");
+        bundle.add_css("");
+        assert_eq!(bundle.css.len(), 3);
+        assert_eq!(
+            bundle.css_total_bytes,
+            3 * crate::STRING_ENTRY_OVERHEAD_BYTES,
+            "each empty stylesheet must still be charged a fixed per-entry \
+             overhead, not zero — otherwise entry count is unbounded"
+        );
+    }
+
+    #[test]
+    fn add_image_charges_overhead_for_tiny_images() {
+        // Same gap as `add_css_charges_overhead_for_empty_stylesheets`, for
+        // images: `key.len() + data.len()` alone doesn't cover the `String`
+        // key struct, `Arc<Vec<u8>>` allocation, and `HashMap` bucket that
+        // every accepted entry retains regardless of content size.
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("a", vec![]);
+        bundle.add_image("b", vec![]);
+        assert_eq!(bundle.images.len(), 2);
+        assert_eq!(
+            bundle.image_total_bytes,
+            2 * crate::STRING_ENTRY_OVERHEAD_BYTES + "a".len() + "b".len(),
+            "each tiny image must still be charged a fixed per-entry overhead \
+             in addition to key+data bytes — otherwise entry count is unbounded"
         );
     }
 }
