@@ -406,6 +406,17 @@ fn parse_margin(s: &str) -> Margin {
         );
         return Margin::default();
     }
+    // `f32::from_str` accepts "nan"/"inf"/"-inf" as valid numbers, and a
+    // bare negative value parses fine syntactically — neither is a usable
+    // margin, so reject explicitly rather than let `Engine::render` reject
+    // it later with a less specific error.
+    if values.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        eprintln!(
+            "Invalid margin '{}': all values must be finite and non-negative (mm). Using default 20mm",
+            s
+        );
+        return Margin::default();
+    }
     let to_pt = |mm: f32| mm * 72.0 / 25.4;
     match values.as_slice() {
         [all] => Margin::uniform(to_pt(*all)),
@@ -881,5 +892,43 @@ mod tests {
             parse_page_size("0ptx100pt").width,
             PageSize::A4.width
         )); // 非正値
+    }
+
+    #[test]
+    fn margin_valid_uniform() {
+        let m = parse_margin("20");
+        assert!(approx(m.top, 20.0 * 72.0 / 25.4));
+        assert_eq!(m.top, m.right);
+        assert_eq!(m.top, m.bottom);
+        assert_eq!(m.top, m.left);
+    }
+
+    #[test]
+    fn margin_rejects_negative_falls_back_to_default() {
+        let m = parse_margin("-5");
+        assert_eq!(m, Margin::default());
+    }
+
+    #[test]
+    fn margin_rejects_nan_falls_back_to_default() {
+        // Rust's f32::from_str accepts "nan"/"inf"/"-inf" as valid numbers,
+        // so these parse successfully as tokens and must be caught by the
+        // finite check rather than the "not a number" branch.
+        let m = parse_margin("nan");
+        assert_eq!(m, Margin::default());
+    }
+
+    #[test]
+    fn margin_rejects_infinite_falls_back_to_default() {
+        let m = parse_margin("inf");
+        assert_eq!(m, Margin::default());
+        let m = parse_margin("-inf");
+        assert_eq!(m, Margin::default());
+    }
+
+    #[test]
+    fn margin_rejects_one_bad_value_among_four() {
+        let m = parse_margin("10 10 10 -10");
+        assert_eq!(m, Margin::default());
     }
 }

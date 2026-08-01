@@ -6431,3 +6431,34 @@ fn regex_lite_link_rects(text: &str) -> Vec<(f32, f32, f32, f32)> {
     }
     out
 }
+
+/// `Engine::render` must reject non-finite / non-positive page size and
+/// collapsing margins before they reach Blitz layout, instead of silently
+/// producing a saturated viewport or a krilla PDF-generation error deep in
+/// the pipeline. Exercised through the real `Engine::builder()` entry point
+/// (not a direct `Config::validate` unit call) so the render path itself is
+/// covered for codecov patch attribution — see CLAUDE.md "Coverage scope".
+#[test]
+fn render_rejects_non_finite_custom_page_size() {
+    use fulgur::PageSize;
+
+    let err = Engine::builder()
+        .page_size(PageSize::custom(210.0, f32::INFINITY))
+        .build()
+        .render("<p>x</p>")
+        .expect_err("infinite custom page height should be rejected");
+    assert!(err.to_string().contains("invalid page size"));
+}
+
+#[test]
+fn render_rejects_margin_collapsing_content_area() {
+    use fulgur::{Margin, PageSize};
+
+    let err = Engine::builder()
+        .page_size(PageSize::A4)
+        .margin(Margin::uniform(1000.0))
+        .build()
+        .render("<p>x</p>")
+        .expect_err("margins exceeding the page size should be rejected");
+    assert!(err.to_string().contains("invalid margin"));
+}
