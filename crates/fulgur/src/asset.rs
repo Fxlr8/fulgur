@@ -26,12 +26,26 @@ pub struct AssetBundle {
     /// directly since, so it recomputes `css_total_bytes` from `self.css`
     /// before charging the new entry. An attacker reachable only through
     /// `add_css`/`add_image` (not the pub fields themselves — e.g. the
-    /// fulgur-wasm/binding path) can never cause this mismatch, since every
-    /// accepted push here updates both fields in lockstep; only trusted
-    /// embedder code that deliberately mutates the collection can trigger
-    /// it, and each trigger costs O(current length) once rather than O(n)
-    /// per call, so this doesn't reopen the entry-count-driven CPU sink the
-    /// budget itself exists to close.
+    /// fulgur-wasm/binding path, and confirmed none of fulgur-wasm/pyfulgur/
+    /// fulgur-ruby expose `css`/`images` to their callers at all) can never
+    /// cause this mismatch, since every accepted push here updates both
+    /// fields in lockstep; only trusted native-Rust embedder code with
+    /// direct struct access, choosing to bypass the accessor methods, can
+    /// trigger it — and each trigger costs O(current length) once rather
+    /// than O(n) per call, so this doesn't reopen the entry-count-driven
+    /// CPU sink the budget itself exists to close.
+    ///
+    /// Known residual gap (Codex review, PR #688): a length-preserving
+    /// in-place edit through the `pub` field — `bundle.css[i] = new_value`,
+    /// or mutating the `String` at that index directly — changes retained
+    /// bytes without changing `self.css.len()`, so this check can't detect
+    /// it and `css_total_bytes` goes stale until some *other* mutation
+    /// changes the length. Not fixed: doing so would mean either giving up
+    /// the length check's O(1)-amortized property (recomputing every call,
+    /// reopening the CPU sink above) or making `css` non-`pub` (a breaking
+    /// API change for a path that, per the confirmation above, no shipped
+    /// binding can even reach). Direct index-assignment into `AssetBundle`
+    /// fields is not a documented usage pattern; use `add_css`/`add_css_file`.
     css_synced_len: usize,
     /// Running total of `STRING_ENTRY_OVERHEAD_BYTES + key.len() +
     /// data.len()` for entries accepted via [`Self::add_image`] /
@@ -39,7 +53,11 @@ pub struct AssetBundle {
     /// `pub`-field mutation caveat as `css_total_bytes`.
     image_total_bytes: usize,
     /// `self.images.len()` counterpart to `css_synced_len`, checked by
-    /// `try_insert_image`.
+    /// `try_insert_image`. Same length-preserving-replacement residual gap:
+    /// `bundle.images.insert(existing_key, bigger_value)` overwrites in
+    /// place without changing `self.images.len()`, so it isn't detected
+    /// either. Use `add_image`/`add_image_file` instead of mutating the map
+    /// directly.
     image_synced_len: usize,
 }
 
