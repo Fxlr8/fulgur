@@ -1919,6 +1919,94 @@ mod utility_fn_tests {
         assert_eq!(cb.width, crate::units::Px::ZERO);
         assert_eq!(cb.height, crate::units::Px::ZERO);
     }
+
+    // --- LinkCache::lookup cache hit paths ---
+    //
+    // Two paths through the cache-hit branch of `lookup` (line 1063) are not
+    // reached by integration tests:
+    //   line 1064: `let anchor_id = (*cached)?;` — None short-circuit
+    //   line 1065: `return self.by_anchor.get(&anchor_id).cloned();` — Some hit
+    // Covered here by calling `lookup` twice for the same node id.
+
+    fn find_first_by_tag_in_tests(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
+        let node = doc.get_node(start_id)?;
+        if node
+            .element_data()
+            .is_some_and(|e| e.name.local.as_ref() == tag)
+        {
+            return Some(start_id);
+        }
+        for &c in &node.children {
+            if let Some(found) = find_first_by_tag_in_tests(doc, c, tag) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn link_cache_second_lookup_hits_cached_none() {
+        // First call for a node not inside any <a> inserts None into by_start.
+        // Second call finds the cached None and short-circuits at line 1064.
+        let doc = crate::blitz_adapter::parse_and_layout(
+            "<!DOCTYPE html><html><body><p>no anchor here</p></body></html>",
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            false,
+        );
+        let base: &BaseDocument = doc.deref();
+        let root_id = doc.root_element().id;
+
+        let mut cache = LinkCache::default();
+        let first = cache.lookup(base, root_id);
+        // Second call: cache hit → `(*cached)?` at line 1064 returns None.
+        let second = cache.lookup(base, root_id);
+
+        assert!(
+            first.is_none(),
+            "root element should not be inside an anchor"
+        );
+        assert!(
+            second.is_none(),
+            "cached None hit must also return None (line 1064)"
+        );
+    }
+
+    #[test]
+    fn link_cache_second_lookup_returns_cached_arc() {
+        // First call for a node inside <a href="…"> resolves and caches the anchor.
+        // Second call returns the Arc from by_anchor at line 1065.
+        let doc = crate::blitz_adapter::parse_and_layout(
+            r#"<!DOCTYPE html><html><body><a href="https://example.com"><span>link</span></a></body></html>"#,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            false,
+        );
+        let base: &BaseDocument = doc.deref();
+        let root_id = doc.root_element().id;
+        let span_id = find_first_by_tag_in_tests(base, root_id, "span")
+            .expect("<span> should exist inside <a>");
+
+        let mut cache = LinkCache::default();
+        let first = cache.lookup(base, span_id);
+        // Second call: cache hit → returns Arc from by_anchor at line 1065.
+        let second = cache.lookup(base, span_id);
+
+        assert!(
+            first.is_some(),
+            "span inside <a href> should resolve to Some link"
+        );
+        assert!(
+            second.is_some(),
+            "cached anchor hit must also return Some link (line 1065)"
+        );
+        assert!(
+            Arc::ptr_eq(first.as_ref().unwrap(), second.as_ref().unwrap()),
+            "both calls must return the same Arc (memoization invariant)"
+        );
+    }
 }
 
 #[cfg(test)]
