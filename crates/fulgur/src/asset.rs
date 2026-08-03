@@ -519,15 +519,21 @@ fn decode_woff2(data: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// Guards the handful of tests below that fill the aggregate CSS/image
-    /// budgets with production-sized chunks (tens to ~320 MiB transiently
-    /// each) to exercise the real per-item/aggregate boundary interaction.
-    /// Rust's default test harness runs tests in parallel, so without this
-    /// several of them running at once could approach ~1 GiB combined —
-    /// fine on this machine, but a real OOM risk on memory-constrained CI
-    /// runners (Codex review, PR #688). Serializing just these tests caps
-    /// the peak at roughly the single largest one instead of their sum,
-    /// without touching production code or adding a dependency.
+    /// Guards *every* test below that allocates or reads a production-sized
+    /// (tens to ~320 MiB transiently) CSS/image/font buffer — both the
+    /// aggregate-budget-boundary tests and the individual oversized-single-
+    /// entry / oversized-file tests (the latter now genuinely read that
+    /// many bytes off disk too, since `read_file_capped` no longer trusts
+    /// `fs::metadata` and actually reads up to the cap). Rust's default
+    /// test harness runs tests in parallel, so without a *complete* set of
+    /// callers here, an unguarded test can still run alongside a guarded
+    /// one and the lock doesn't actually bound suite-wide peak memory —
+    /// exactly the gap a follow-up Codex review found in an earlier,
+    /// partial version of this lock (PR #688). Serializing all of them
+    /// against this one caps the peak at roughly the single largest test
+    /// instead of their sum, without touching production code or adding a
+    /// dependency. When adding a new test that builds a `MAX_*_BYTES`-sized
+    /// value (in memory or via a file read), take this lock too.
     static HEAVY_BUDGET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -705,10 +711,14 @@ mod tests {
 
     #[test]
     fn test_add_font_file_rejects_oversized_before_reading() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         use std::io::Seek;
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         // Create a sparse file larger than the cap. `set_len` extends the
-        // file without actually allocating blocks, so the test is cheap.
+        // file on disk without actually allocating blocks, but
+        // `read_file_capped` reads real (zeroed) bytes off it up to the
+        // cap — this test now genuinely allocates ~MAX_DECODED_FONT_BYTES,
+        // hence the lock above (Codex review, PR #688).
         let oversized = (MAX_DECODED_FONT_BYTES as u64) + 1;
         tmp.as_file_mut()
             .set_len(oversized)
@@ -900,6 +910,7 @@ mod tests {
 
     #[test]
     fn add_css_drops_oversized_single_stylesheet() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
         let huge = "a".repeat(MAX_CSS_BYTES + 1);
         bundle.add_css(huge);
@@ -952,6 +963,7 @@ mod tests {
 
     #[test]
     fn add_css_file_rejects_oversized_before_reading() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         use std::io::Seek;
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let oversized = (MAX_CSS_BYTES as u64) + 1;
@@ -972,6 +984,7 @@ mod tests {
 
     #[test]
     fn add_image_drops_oversized_single_image() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
         let huge = vec![0u8; MAX_IMAGE_BYTES + 1];
         bundle.add_image("big.png", huge);
@@ -992,6 +1005,7 @@ mod tests {
         // enough that formatting it in full would be a clear test failure
         // (via timeout/OOM in CI) if the cap regressed, while staying small
         // enough (~16 MiB) to run fast today.
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
         let huge_key = "k".repeat(MAX_IMAGE_KEY_BYTES + (16 * 1024 * 1024));
         bundle.add_image(huge_key, vec![1, 2, 3]);
@@ -1098,6 +1112,7 @@ mod tests {
 
     #[test]
     fn add_image_file_rejects_oversized_before_reading() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         use std::io::Seek;
         let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let oversized = (MAX_IMAGE_BYTES as u64) + 1;
