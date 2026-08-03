@@ -218,17 +218,18 @@ impl AssetBundle {
 
     /// Register an image asset.
     ///
-    /// `data` is attacker-controlled in any embedding that forwards
-    /// tenant-supplied images (WASM/binding callers in particular — see
-    /// fulgur-wasm's `Engine.add_image`). Raster decode itself is bounded
+    /// `name` and `data` are both attacker-controlled in any embedding that
+    /// forwards tenant-supplied images (WASM/binding callers in particular —
+    /// see fulgur-wasm's `Engine.add_image`). Raster decode itself is bounded
     /// by the downstream decoders' own defaults (png: 64 MiB allocation
     /// limit, gif: 50 MB memory limit, krilla's zune-jpeg: 16384×16384 max
     /// dimensions), but the *raw, undecoded* bytes handed to this method
-    /// were retained with no bound at all. A single call exceeding
+    /// were retained with no bound at all. A single call with a `name`
+    /// exceeding [`MAX_IMAGE_KEY_BYTES`] or `data` exceeding
     /// [`MAX_IMAGE_BYTES`], or one that would push the bundle's aggregate
     /// registered image bytes past [`MAX_TOTAL_IMAGE_BYTES`], is dropped
-    /// with a `log::warn!` instead. Realistic images are orders of
-    /// magnitude below either cap.
+    /// with a `log::warn!` instead. Realistic images (and their names) are
+    /// orders of magnitude below any of these caps.
     pub fn add_image(&mut self, name: impl Into<String>, data: Vec<u8>) {
         let key = Self::normalize_key(&name.into()).to_string();
         if let Err(msg) = self.try_insert_image(key, data) {
@@ -265,6 +266,23 @@ impl AssetBundle {
         key: String,
         mut data: Vec<u8>,
     ) -> std::result::Result<(), String> {
+        // Checked first, and deliberately *not* included in this error
+        // message: `key` is attacker-controlled with no length limit of its
+        // own (the WASM entry point forwards it straight from the JS
+        // caller), so `Debug`-formatting it — as every other rejection
+        // message below does — would allocate another string proportional
+        // to (and, once escaping is counted, potentially several times
+        // larger than) an arbitrarily huge key right at the moment we're
+        // trying to reject the request for being oversized. Once this
+        // passes, `key.len() <= MAX_IMAGE_KEY_BYTES` is guaranteed for the
+        // rest of this function, so the other `{key:?}` sites below are
+        // bounded.
+        if key.len() > MAX_IMAGE_KEY_BYTES {
+            return Err(format!(
+                "image name exceeds {MAX_IMAGE_KEY_BYTES} byte limit ({} bytes); dropping",
+                key.len()
+            ));
+        }
         if data.len() > MAX_IMAGE_BYTES {
             return Err(format!(
                 "image {key:?} exceeds {MAX_IMAGE_BYTES} byte limit ({} bytes); dropping",
@@ -421,6 +439,15 @@ const MAX_TOTAL_CSS_BYTES: usize = 64 * 1024 * 1024;
 /// comment).
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Upper bound on an image's registration key/name (4 KiB), checked before
+/// any `data` size or budget logic. `name` in [`AssetBundle::add_image`] /
+/// [`AssetBundle::add_image_file`] is attacker-controlled with no length
+/// limit of its own — the WASM entry point forwards it straight from the JS
+/// caller's string — and, unlike `data`, the raw key length was previously
+/// unbounded even though rejection messages elsewhere `Debug`-format it.
+/// Generous: real asset keys are short relative paths/filenames.
+const MAX_IMAGE_KEY_BYTES: usize = 4 * 1024;
+
 /// Aggregate ceiling across every image registered on one bundle (256 MiB).
 /// Generous enough for a report embedding many photos/logos, but bounds the
 /// case of many separately-reasonable `add_image` calls (or a compromised
@@ -474,6 +501,17 @@ fn decode_woff2(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guards the handful of tests below that fill the aggregate CSS/image
+    /// budgets with production-sized chunks (tens to ~320 MiB transiently
+    /// each) to exercise the real per-item/aggregate boundary interaction.
+    /// Rust's default test harness runs tests in parallel, so without this
+    /// several of them running at once could approach ~1 GiB combined —
+    /// fine on this machine, but a real OOM risk on memory-constrained CI
+    /// runners (Codex review, PR #688). Serializing just these tests caps
+    /// the peak at roughly the single largest one instead of their sum,
+    /// without touching production code or adding a dependency.
+    static HEAVY_BUDGET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_get_image_normalizes_dot_slash() {
@@ -856,6 +894,7 @@ mod tests {
 
     #[test]
     fn add_css_drops_once_aggregate_budget_exceeded() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
         // Largest single chunk that still fits the per-call cap. Each
         // accepted entry also charges STRING_ENTRY_OVERHEAD_BYTES, so one
@@ -926,7 +965,36 @@ mod tests {
     }
 
     #[test]
+    fn add_image_drops_oversized_key_without_formatting_it_in_full() {
+        // Codex review follow-up: `name` had no length cap of its own, so a
+        // deliberately huge key (independent of `data` size) reached the
+        // rejection paths below, which `Debug`-format `key` into the error
+        // message — Debug-formatting an unbounded attacker-controlled
+        // string is itself an unbounded allocation, happening precisely
+        // while rejecting the request for being oversized. Use a key large
+        // enough that formatting it in full would be a clear test failure
+        // (via timeout/OOM in CI) if the cap regressed, while staying small
+        // enough (~16 MiB) to run fast today.
+        let mut bundle = AssetBundle::new();
+        let huge_key = "k".repeat(MAX_IMAGE_KEY_BYTES + (16 * 1024 * 1024));
+        bundle.add_image(huge_key, vec![1, 2, 3]);
+        assert!(
+            bundle.images.is_empty(),
+            "oversized key must be dropped, not stored"
+        );
+    }
+
+    #[test]
+    fn add_image_accepts_key_exactly_at_the_cap() {
+        let mut bundle = AssetBundle::new();
+        let key = "k".repeat(MAX_IMAGE_KEY_BYTES);
+        bundle.add_image(key.clone(), vec![1, 2, 3]);
+        assert!(bundle.get_image(&key).is_some());
+    }
+
+    #[test]
     fn add_image_drops_once_aggregate_budget_exceeded() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
         // Largest single image that still fits the per-call cap; register
         // distinct-keyed images (charge = key + data bytes) until the
@@ -964,6 +1032,7 @@ mod tests {
 
     #[test]
     fn add_image_overwriting_same_key_does_not_leak_budget() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         // Repeated re-registration of the *same* key is a legitimate
         // "replace this image" use. If the budget didn't credit back the
         // superseded entry, enough overwrites would eventually trip the
@@ -1013,6 +1082,7 @@ mod tests {
 
     #[test]
     fn add_css_budget_resets_after_bundle_is_cleared_directly() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         // `css` is `pub`, so a caller can reuse a bundle by clearing it
         // directly instead of going through the constructor methods. Before
         // this fix, `css_total_bytes` never noticed the clear and stayed at
@@ -1055,6 +1125,7 @@ mod tests {
 
     #[test]
     fn add_image_budget_resets_after_bundle_is_cleared_directly() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
         let chunk = vec![0u8; MAX_IMAGE_BYTES];
         // Fill until one full-size chunk is rejected (per-entry key
@@ -1089,6 +1160,7 @@ mod tests {
 
     #[test]
     fn add_css_budget_recomputes_after_partial_removal() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         // Codex review follow-up: the earlier is_empty()-only reset only
         // caught a caller clearing the *entire* pub `css` field. Removing
         // just one entry (e.g. `bundle.css.remove(0)`) left the tracked
@@ -1118,6 +1190,7 @@ mod tests {
 
     #[test]
     fn add_image_budget_recomputes_after_partial_removal() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
         let mut bundle = AssetBundle::new();
         let chunk = vec![0u8; MAX_IMAGE_BYTES];
         let max_attempts = MAX_TOTAL_IMAGE_BYTES / MAX_IMAGE_BYTES + 1;
