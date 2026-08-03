@@ -2007,6 +2007,30 @@ mod utility_fn_tests {
             "both calls must return the same Arc (memoization invariant)"
         );
     }
+
+    // --- get_text_color fallback ---
+    //
+    // Production callers always pass valid, styled node ids, so the fallback
+    // path at mod.rs:1110 (when `doc.get_node` returns None) is only reachable
+    // via an out-of-range id. Tested here directly on the private function.
+
+    #[test]
+    fn get_text_color_falls_back_to_black_for_missing_node() {
+        let doc = crate::blitz_adapter::parse_and_layout(
+            "<!DOCTYPE html><html><body><p>text</p></body></html>",
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            false,
+        );
+        use std::ops::Deref;
+        let base: &BaseDocument = doc.deref();
+        assert_eq!(
+            get_text_color(base, usize::MAX),
+            [0, 0, 0, 255],
+            "get_text_color must return opaque black for an out-of-range node id"
+        );
+    }
 }
 
 #[cfg(test)]

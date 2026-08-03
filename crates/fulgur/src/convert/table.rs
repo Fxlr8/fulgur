@@ -131,3 +131,88 @@ fn collect_table_cells(
         convert_node(doc, child_id, ctx, depth + 1, out);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // --- comment node inside <tbody> ---
+    //
+    // HTML5 keeps comment nodes inside their table-section parent rather than
+    // foster-parenting them. `collect_table_cells` must skip them via the
+    // `NodeData::Comment` guard (table.rs:104) rather than trying to lay them
+    // out, so the real cell content still reaches the drawable maps.
+    #[test]
+    fn table_comment_in_tbody_produces_valid_pdf() {
+        let html = "<!DOCTYPE html><html><body>\
+            <table>\
+                <tbody>\
+                    <!-- comment node exercises NodeData::Comment guard -->\
+                    <tr><td>Cell</td></tr>\
+                </tbody>\
+            </table>\
+            </body></html>";
+        let pdf = crate::engine::Engine::builder()
+            .build()
+            .render(html)
+            .expect("render");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Regression: a table entry must be created even when the only content
+    // before the first real row is an HTML comment.
+    #[test]
+    fn table_comment_before_rows_still_registers_table_entry() {
+        use crate::units::F32Units;
+        use std::ops::DerefMut;
+
+        let html = "<!DOCTYPE html><html><body>\
+            <table>\
+                <tbody>\
+                    <!-- comment before rows -->\
+                    <tr><td style=\"width:50px;height:20px\">A</td></tr>\
+                </tbody>\
+            </table>\
+            </body></html>";
+
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass(doc.deref_mut(), 842.0);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = crate::convert::ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: Default::default(),
+            string_set_by_node: Default::default(),
+            counter_ops_by_node: Default::default(),
+            bookmark_by_node: Default::default(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((595.0, 842.0)),
+        };
+        let d = crate::convert::dom_to_drawables(&doc, &mut ctx);
+
+        assert!(
+            !d.tables.is_empty(),
+            "table entry must be present in drawables even when tbody has a leading comment"
+        );
+        // Stronger assertion: the cell content must also have been converted.
+        // `collect_table_cells` inserts `<td>` content via `convert_node`, which
+        // produces paragraph entries for inline text. A non-empty `paragraphs`
+        // map proves `collect_table_cells` walked past the comment and processed
+        // the real `<tr><td>` — something `!d.tables.is_empty()` alone cannot
+        // verify, since `TableEntry` is inserted before the child walk.
+        assert!(
+            !d.paragraphs.is_empty(),
+            "cell content must be converted to paragraph drawables, \
+             proving collect_table_cells walked past the comment node"
+        );
+    }
+}
