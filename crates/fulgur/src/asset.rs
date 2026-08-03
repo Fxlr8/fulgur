@@ -231,7 +231,21 @@ impl AssetBundle {
     /// with a `log::warn!` instead. Realistic images (and their names) are
     /// orders of magnitude below any of these caps.
     pub fn add_image(&mut self, name: impl Into<String>, data: Vec<u8>) {
-        let key = Self::normalize_key(&name.into()).to_string();
+        let name = name.into();
+        // Check the *borrowed* normalized key against MAX_IMAGE_KEY_BYTES
+        // before allocating an owned copy of it (`to_string()` below) — a
+        // deliberately huge `name` would otherwise cost that allocation
+        // even though it's about to be rejected anyway.
+        let key = Self::normalize_key(&name);
+        if key.len() > MAX_IMAGE_KEY_BYTES {
+            log::warn!(
+                "add_image: image name exceeds {MAX_IMAGE_KEY_BYTES} byte limit \
+                 ({} bytes); dropping",
+                key.len()
+            );
+            return;
+        }
+        let key = key.to_string();
         if let Err(msg) = self.try_insert_image(key, data) {
             log::warn!("add_image: {msg}");
         }
@@ -245,9 +259,22 @@ impl AssetBundle {
         name: impl Into<String>,
         path: impl AsRef<Path>,
     ) -> Result<()> {
+        let name = name.into();
+        // Same borrowed-key-first check as `add_image`, and checked before
+        // the file read too: a huge `name` shouldn't cost either the
+        // to-owned allocation or the (now-bounded, but still real) I/O of
+        // reading the file, when the request is going to be rejected on the
+        // name alone regardless of what the file contains.
+        let key = Self::normalize_key(&name);
+        if key.len() > MAX_IMAGE_KEY_BYTES {
+            return Err(Error::Asset(format!(
+                "image name exceeds {MAX_IMAGE_KEY_BYTES} byte limit ({} bytes); dropping",
+                key.len()
+            )));
+        }
+        let key = key.to_string();
         let path = path.as_ref();
         let data = read_file_capped(path, MAX_IMAGE_BYTES, "image file")?;
-        let key = Self::normalize_key(&name.into()).to_string();
         self.try_insert_image(key, data).map_err(Error::Asset)
     }
 
@@ -261,28 +288,18 @@ impl AssetBundle {
     /// Overwriting an existing key first credits back that entry's charge,
     /// so repeated re-registration of the same key (a legitimate "replace
     /// this image" use) can't leak budget over time.
+    ///
+    /// Precondition: `key.len() <= MAX_IMAGE_KEY_BYTES`. Both callers check
+    /// this against the *borrowed* key before constructing the owned `key`
+    /// passed in here (so a huge name is rejected without the extra
+    /// allocation), which is also why this function itself never
+    /// `Debug`-formats an unbounded `key` into a rejection message.
     fn try_insert_image(
         &mut self,
         key: String,
         mut data: Vec<u8>,
     ) -> std::result::Result<(), String> {
-        // Checked first, and deliberately *not* included in this error
-        // message: `key` is attacker-controlled with no length limit of its
-        // own (the WASM entry point forwards it straight from the JS
-        // caller), so `Debug`-formatting it — as every other rejection
-        // message below does — would allocate another string proportional
-        // to (and, once escaping is counted, potentially several times
-        // larger than) an arbitrarily huge key right at the moment we're
-        // trying to reject the request for being oversized. Once this
-        // passes, `key.len() <= MAX_IMAGE_KEY_BYTES` is guaranteed for the
-        // rest of this function, so the other `{key:?}` sites below are
-        // bounded.
-        if key.len() > MAX_IMAGE_KEY_BYTES {
-            return Err(format!(
-                "image name exceeds {MAX_IMAGE_KEY_BYTES} byte limit ({} bytes); dropping",
-                key.len()
-            ));
-        }
+        debug_assert!(key.len() <= MAX_IMAGE_KEY_BYTES);
         if data.len() > MAX_IMAGE_BYTES {
             return Err(format!(
                 "image {key:?} exceeds {MAX_IMAGE_BYTES} byte limit ({} bytes); dropping",
@@ -990,6 +1007,27 @@ mod tests {
         let key = "k".repeat(MAX_IMAGE_KEY_BYTES);
         bundle.add_image(key.clone(), vec![1, 2, 3]);
         assert!(bundle.get_image(&key).is_some());
+    }
+
+    #[test]
+    fn add_image_file_rejects_oversized_key_before_touching_the_file() {
+        // coderabbit review follow-up (PR #688): the key-length check must
+        // run before add_image_file reads the file, not just before
+        // try_insert_image is called. If it happened after the read, a
+        // nonexistent path would surface as `Error::Io` (file not found)
+        // before ever reaching the name check — using one here proves the
+        // name is validated first, without needing to inspect I/O directly.
+        let mut bundle = AssetBundle::new();
+        let huge_key = "k".repeat(MAX_IMAGE_KEY_BYTES + 1);
+        let err = bundle
+            .add_image_file(huge_key, "/nonexistent/path/does/not/exist.png")
+            .expect_err("oversized name must be rejected");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("limit"), "msg: {msg}"),
+            other => {
+                panic!("expected Error::Asset (name checked before file I/O), got {other:?}")
+            }
+        }
     }
 
     #[test]
