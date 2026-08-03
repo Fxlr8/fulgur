@@ -203,5 +203,16 @@ mod tests {
             !d.tables.is_empty(),
             "table entry must be present in drawables even when tbody has a leading comment"
         );
+        // Stronger assertion: the cell content must also have been converted.
+        // `collect_table_cells` inserts `<td>` content via `convert_node`, which
+        // produces paragraph entries for inline text. A non-empty `paragraphs`
+        // map proves `collect_table_cells` walked past the comment and processed
+        // the real `<tr><td>` — something `!d.tables.is_empty()` alone cannot
+        // verify, since `TableEntry` is inserted before the child walk.
+        assert!(
+            !d.paragraphs.is_empty(),
+            "cell content must be converted to paragraph drawables, \
+             proving collect_table_cells walked past the comment node"
+        );
     }
 }
