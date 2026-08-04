@@ -65,14 +65,17 @@ For a quick iteration build (no size tuning, ~37 MB), use `--dev` instead.
 ## Run
 
 ES modules require a real HTTP origin (file:// will not work). The demo
-also fetches assets from `../.fonts/` and `../image/`, so you must serve
-the **repository root** (not just `examples/wasm-demo/`) so the relative
-paths resolve:
+also fetches assets from `../.fonts/` and `../image/`, so the document
+root must be `examples/` (not just `examples/wasm-demo/`) so the relative
+paths resolve. Do **not** serve the repository root — it would expose
+`.git/`, any local `.env` files, and other repo-root content over HTTP.
+`--directory` scopes the doc root to `examples/`, and `--bind` keeps the
+server off the network:
 
 ```bash
 # from repo root
-python3 -m http.server 8000
-# then visit http://localhost:8000/examples/wasm-demo/
+python3 -m http.server 8000 --directory examples --bind 127.0.0.1
+# then visit http://127.0.0.1:8000/wasm-demo/
 ```
 
 Edit the HTML in the textarea and click "Render PDF". The generated PDF is
