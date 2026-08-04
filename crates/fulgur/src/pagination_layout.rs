@@ -6816,4 +6816,127 @@ h2 { string-set: chapter-title content(text); }
             geom.keys().collect::<Vec<_>>()
         );
     }
+
+    // ── has_forced_break_below: recursive return (line 1423) ────────────────────
+
+    /// `has_forced_break_below` must recurse into grandchildren: when a body-
+    /// direct outer div contains a middle div (no direct break) that in turn
+    /// contains an inner div with `break-after: page`, the recursive call at
+    /// line 1422 must return `true` (triggering line 1423) so the outer div
+    /// enters `fragment_block_subtree` and the break fires.
+    #[test]
+    fn has_forced_break_below_recursive_return_detects_grandchild_break() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 300px">
+                <div style="height: 150px">
+                  <div style="height: 50px; break-after: page"></div>
+                  <div style="height: 50px"></div>
+                </div>
+                <div style="height: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        // The inner div has break-after: page; has_forced_break_below must
+        // recurse through the middle div and detect it, causing the outer
+        // subtree to be split and emitting a page-1 fragment.
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "has_forced_break_below must recurse into grandchild and detect \
+             break-after: page (line 1423); geom={geom:?}"
+        );
+    }
+
+    // ── break-after: page on a normal-height body-direct block (lines 1118-1124)
+
+    /// A body-direct block with positive height and `break-after: page` must
+    /// advance page_index and reset cursor_y even when the block does NOT
+    /// overflow the page and does NOT need recursion. This exercises lines
+    /// 1118-1124 in `fragment_pagination_root` (the normal-emit path), which
+    /// is distinct from the zero-height path (lines 628-658) and the
+    /// slice/recursion paths that both also carry a `break-after` arm.
+    #[test]
+    fn break_after_page_on_normal_height_body_direct_block_pushes_sibling() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 200px; break-after: page"></div>
+              <div style="height: 100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        // The second div must land on page 1 because the first carries
+        // break-after: page; both divs fit in the 800px strip so overflow
+        // logic is not what triggers the break.
+        assert!(
+            geom.values()
+                .flat_map(|g| g.fragments.iter())
+                .any(|f| f.page_index == 1),
+            "break-after: page on a normal-height body-direct block (normal path, \
+             lines 1118-1124) must push the sibling to page 1; geom={geom:?}"
+        );
+    }
+
+    // ── is_float guard in body-direct normal-height path (lines 1108-1110) ──────
+
+    /// A `float: left` body-direct child must be processed by
+    /// `fragment_pagination_root` with `is_float = true`, causing the
+    /// `if !is_float { prev_used_page = ... }` guard (lines 1108-1110) to
+    /// take its false branch. This exercises the normal-height float path;
+    /// the float's sibling must still be recorded correctly on page 0.
+    #[test]
+    fn body_direct_float_child_processed_without_prev_used_page_update() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="float: left; height: 200px; width: 100px"></div>
+              <div style="clear: left; height: 100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        // Both elements fit on page 0; the float must appear in geometry and
+        // the following in-flow sibling must also land on page 0.
+        assert_eq!(
+            super::implied_page_count(&geom),
+            1,
+            "float + clear sibling must both be on page 0; geom={geom:?}"
+        );
+        // At least the float and its sibling must be present in geometry.
+        assert!(
+            geom.len() >= 2,
+            "float and its sibling must both appear in geometry; geom={geom:?}"
+        );
+    }
+
+    // ── is_float guard in body-direct slicing path (lines 1056-1058) ────────────
+
+    /// A `float: left` body-direct child whose height exceeds the page height
+    /// must be sliced across pages (the `child_h > page_height_px + 1.0` path)
+    /// with `is_float = true`. This exercises the `if !is_float` guard at
+    /// lines 1056-1058 inside the slicing branch of `fragment_pagination_root`.
+    #[test]
+    fn body_direct_tall_float_sliced_across_pages_is_float_guard() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="float: left; height: 1200px; width: 100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        // A 1200px float on an 800px page must be sliced into ≥ 2 fragments.
+        let max_frags = geom.values().map(|g| g.fragments.len()).max().unwrap_or(0);
+        assert!(
+            max_frags >= 2,
+            "a 1200px float on an 800px page must be sliced into ≥ 2 fragments \
+             (exercises lines 1056-1058); max_frags={max_frags}, geom={geom:?}"
+        );
+    }
 }
