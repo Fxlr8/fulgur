@@ -6888,27 +6888,33 @@ h2 { string-set: chapter-title content(text); }
     /// A `float: left` body-direct child must be processed by
     /// `fragment_pagination_root` with `is_float = true`, causing the
     /// `if !is_float { prev_used_page = ... }` guard (lines 1108-1110) to
-    /// take its false branch. This exercises the normal-height float path;
-    /// the float's sibling must still be recorded correctly on page 0.
+    /// take its false branch. This exercises the normal-height float path.
+    ///
+    /// The float carries `page: float-page` so that, without the guard,
+    /// `prev_used_page` would be set to `Some("float-page")`.  The
+    /// following in-flow sibling has the default (unnamed) page, so without
+    /// the guard `page_name_changed` would fire and push the sibling to
+    /// page 1 — causing `implied_page_count` to become 2.  The guard
+    /// suppresses that forced break, keeping both elements on page 0.
     #[test]
     fn body_direct_float_child_processed_without_prev_used_page_update() {
         let html = r#"
             <html><body style="margin: 0; padding: 0">
-              <div style="float: left; height: 200px; width: 100px"></div>
+              <div style="float: left; height: 200px; width: 100px; page: float-page"></div>
               <div style="clear: left; height: 100px"></div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
-        // Both elements fit on page 0; the float must appear in geometry and
-        // the following in-flow sibling must also land on page 0.
+        // The is_float guard prevents the float's named page from being stored
+        // in prev_used_page, so the following in-flow sibling must stay on page 0.
         assert_eq!(
             super::implied_page_count(&geom),
             1,
-            "float + clear sibling must both be on page 0; geom={geom:?}"
+            "is_float guard must prevent float's named page from triggering a \
+             forced break before the sibling; both must remain on page 0; geom={geom:?}"
         );
-        // At least the float and its sibling must be present in geometry.
         assert!(
             geom.len() >= 2,
             "float and its sibling must both appear in geometry; geom={geom:?}"
@@ -6921,22 +6927,38 @@ h2 { string-set: chapter-title content(text); }
     /// must be sliced across pages (the `child_h > page_height_px + 1.0` path)
     /// with `is_float = true`. This exercises the `if !is_float` guard at
     /// lines 1056-1058 inside the slicing branch of `fragment_pagination_root`.
+    ///
+    /// The float carries `page: float-page` so that, without the guard,
+    /// `prev_used_page` would be set to `Some("float-page")` after slicing.
+    /// The following `clear: left` sibling has the default page, so removing
+    /// the guard would trigger `page_name_changed` and advance `page_index`
+    /// to 2, landing the sibling on page 2 instead of page 1.
     #[test]
     fn body_direct_tall_float_sliced_across_pages_is_float_guard() {
         let html = r#"
             <html><body style="margin: 0; padding: 0">
-              <div style="float: left; height: 1200px; width: 100px"></div>
+              <div style="float: left; height: 1200px; width: 100px; page: float-page"></div>
+              <div style="clear: left; height: 100px"></div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
-        // A 1200px float on an 800px page must be sliced into ≥ 2 fragments.
+        // The 1200px float must be sliced into ≥ 2 fragments (slicing path exercised).
         let max_frags = geom.values().map(|g| g.fragments.len()).max().unwrap_or(0);
         assert!(
             max_frags >= 2,
             "a 1200px float on an 800px page must be sliced into ≥ 2 fragments \
              (exercises lines 1056-1058); max_frags={max_frags}, geom={geom:?}"
+        );
+        // The is_float guard must prevent the float's named page from being stored
+        // in prev_used_page after slicing, so the clear sibling stays on page 1
+        // (not forced to page 2 by a spurious page_name_changed).
+        assert_eq!(
+            super::implied_page_count(&geom),
+            2,
+            "is_float guard must keep the clear sibling on page 1, not page 2; \
+             implied_page_count must be 2 (pages 0 and 1); geom={geom:?}"
         );
     }
 }
