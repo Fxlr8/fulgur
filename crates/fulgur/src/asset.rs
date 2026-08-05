@@ -206,8 +206,17 @@ impl AssetBundle {
                 // pays the full decode for every rejected request — the
                 // final size-accurate charge in `try_push_font` only runs
                 // *after* decoding (coderabbit review, PR #697).
+                // `declared_size` is a raw, unvalidated header field (up to
+                // `u32::MAX`) at this point — `decode_woff2`'s own
+                // MAX_DECODED_FONT_BYTES check hasn't run yet. On a 32-bit
+                // `usize` target (wasm32, exactly what `Engine.add_font`
+                // runs on) a bare `+` here can overflow and panic with
+                // overflow checks enabled, turning an expected `Result::Err`
+                // into a wasm trap for JS callers (Codex Review, PR #697).
                 let declared_size = woff2_declared_sfnt_size(&data)?;
-                self.check_font_budget(crate::STRING_ENTRY_OVERHEAD_BYTES + declared_size)?;
+                self.check_font_budget(
+                    crate::STRING_ENTRY_OVERHEAD_BYTES.saturating_add(declared_size),
+                )?;
                 decode_woff2(&data)?
             }
             FontFormat::Woff1 => {
@@ -1135,6 +1144,33 @@ mod tests {
             len_before,
             "the garbage WOFF2 payload must not have been registered"
         );
+    }
+
+    #[test]
+    fn add_font_bytes_woff2_near_u32_max_declared_size_does_not_panic() {
+        // Codex review (PR #697): the preflight charge computation
+        // (`STRING_ENTRY_OVERHEAD_BYTES + declared_size`) used a bare `+`
+        // against a raw, unvalidated `u32` header field. On a 32-bit `usize`
+        // target (wasm32 — exactly what `Engine.add_font` runs on) a
+        // declared_size near `u32::MAX` overflows that addition, which
+        // panics with overflow checks enabled instead of returning a clean
+        // `Result::Err`. This test can't reproduce the overflow itself on a
+        // 64-bit host (`usize` is 64-bit here, so the sum never overflows),
+        // but locks in that `saturating_add` — not a bare `+` — is used at
+        // this call site, and that the near-`u32::MAX` boundary is rejected
+        // cleanly rather than left to a future edit to regress silently.
+        let mut bundle = AssetBundle::new();
+        let mut fake = b"wOF2".to_vec();
+        fake.extend_from_slice(&[0u8; 12]); // bytes 4..16, unused by the header check
+        fake.extend_from_slice(&u32::MAX.to_be_bytes()); // bytes 16..20: totalSfntSize
+        fake.extend_from_slice(b"irrelevant tail bytes");
+        let err = bundle
+            .add_font_bytes(fake)
+            .expect_err("near-u32::MAX declared size must be rejected, not panic");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("budget"), "msg: {msg}"),
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
