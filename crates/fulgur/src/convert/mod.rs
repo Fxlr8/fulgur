@@ -1718,6 +1718,92 @@ mod semantics_tests {
 }
 
 #[cfg(test)]
+mod debug_print_tree_tests {
+    //! Tests that drive the FULGUR_DEBUG-gated `debug_print_tree` path.
+    //! The function only writes to stderr and is only triggered when the env
+    //! var is set, so normal test runs skip it entirely.  The mutex below
+    //! serialises `set_var` / `remove_var` to avoid data-races in the
+    //! parallel test harness (Rust 1.84+ requires `unsafe` for `set_var`).
+
+    use crate::units::F32Units;
+    use std::ops::DerefMut;
+
+    static DEBUG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn build_drawables(html: &str) -> crate::drawables::Drawables {
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass(doc.deref_mut(), 842.0);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = super::ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: Default::default(),
+            string_set_by_node: Default::default(),
+            counter_ops_by_node: Default::default(),
+            bookmark_by_node: Default::default(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((595.0, 842.0)),
+        };
+        super::dom_to_drawables(&doc, &mut ctx)
+    }
+
+    #[test]
+    fn fulgur_debug_env_var_triggers_debug_print_tree_without_panic() {
+        // Sets FULGUR_DEBUG so that dom_to_drawables calls debug_print_tree.
+        // Verifies the function runs without panic for a normal DOM tree,
+        // covering the main body of debug_print_tree (lines 282-309).
+        let _g = DEBUG_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialised by DEBUG_ENV_LOCK; removed before the guard drops.
+        unsafe { std::env::set_var("FULGUR_DEBUG", "1") };
+        let _d = build_drawables(
+            "<!DOCTYPE html><html><body><p>text</p><!-- comment --><div><span>nested</span></div></body></html>",
+        );
+        // SAFETY: serialised by DEBUG_ENV_LOCK.
+        unsafe { std::env::remove_var("FULGUR_DEBUG") };
+        // Reaching here without panic confirms debug_print_tree ran (lines 277-310).
+    }
+
+    #[test]
+    fn fulgur_debug_with_deeply_nested_html_hits_max_depth_guard() {
+        // Builds a 560-level-deep DOM so that debug_print_tree hits the
+        // `depth >= MAX_DOM_DEPTH` guard (line 278-280).  Runs on a
+        // thread with an enlarged stack because 560 recursive calls would
+        // otherwise overflow the default 8 MiB stack.
+        let _g = DEBUG_ENV_LOCK.lock().unwrap();
+        let mut html = String::from("<!DOCTYPE html><html><body>");
+        for _ in 0..560 {
+            html.push_str("<div>");
+        }
+        html.push_str("deep");
+        for _ in 0..560 {
+            html.push_str("</div>");
+        }
+        html.push_str("</body></html>");
+        // SAFETY: serialised by DEBUG_ENV_LOCK; removed before the guard drops.
+        unsafe { std::env::set_var("FULGUR_DEBUG", "1") };
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || build_drawables(&html))
+            .expect("thread spawn")
+            .join()
+            .expect("thread did not panic");
+        // SAFETY: serialised by DEBUG_ENV_LOCK.
+        unsafe { std::env::remove_var("FULGUR_DEBUG") };
+    }
+}
+
+#[cfg(test)]
 mod utility_fn_tests {
     //! Unit tests for pure utility functions in this module.
     //! These exercise branches that the integration tests (semantics_tests,
