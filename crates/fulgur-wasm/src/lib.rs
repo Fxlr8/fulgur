@@ -597,6 +597,28 @@ mod tests {
     }
 
     #[test]
+    fn add_font_surfaces_oversized_raw_font_error() {
+        // Codex finding: Engine.add_font forwarded caller bytes straight into
+        // AssetBundle::add_font_bytes with no cap on the raw TTF/OTF/TTC/
+        // Unknown passthrough (fixed in fulgur::asset::MAX_DECODED_FONT_BYTES
+        // / MAX_TOTAL_FONT_BYTES). Drives add_font_impl (the native-safe
+        // helper — the #[wasm_bindgen] add_font wrapper's error path
+        // constructs a JsError, which panics off wasm32, same reasoning as
+        // configure_json vs. configure above) to confirm the new AssetBundle
+        // cap's Err surfaces through the wasm Engine rather than being lost.
+        let mut engine = Engine::new();
+        let mut huge = vec![0x00u8, 0x01, 0x00, 0x00]; // TTF magic
+        huge.resize(64 * 1024 * 1024 + 1, 0xAA); // MAX_DECODED_FONT_BYTES + 1
+        let err = engine
+            .add_font_impl(huge)
+            .expect_err("oversized raw font bytes must be rejected");
+        assert!(
+            err.to_string().contains("limit"),
+            "error should mention the byte limit: {err}"
+        );
+    }
+
+    #[test]
     fn render_html_standalone_still_works() {
         let pdf = render_html(r#"<div style="background:red; width:100px; height:100px"></div>"#)
             .expect("render_html standalone should succeed");

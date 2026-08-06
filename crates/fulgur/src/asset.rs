@@ -59,6 +59,17 @@ pub struct AssetBundle {
     /// either. Use `add_image`/`add_image_file` instead of mutating the map
     /// directly.
     image_synced_len: usize,
+    /// Running total of `STRING_ENTRY_OVERHEAD_BYTES + font.len()` for
+    /// entries accepted via [`Self::add_font_bytes`] / [`Self::add_font_file`],
+    /// enforcing [`MAX_TOTAL_FONT_BYTES`]. Same `pub`-field mutation caveat
+    /// as `css_total_bytes` (`fonts` is `pub`).
+    font_total_bytes: usize,
+    /// `self.fonts.len()` counterpart to `css_synced_len`, checked by
+    /// `try_push_font`. Same length-preserving-replacement residual gap as
+    /// `css_synced_len`/`image_synced_len`: `bundle.fonts[i] = bigger_value`
+    /// changes retained bytes without changing `self.fonts.len()`. Use
+    /// `add_font_bytes`/`add_font_file` instead of mutating the vec directly.
+    font_synced_len: usize,
 }
 
 impl AssetBundle {
@@ -72,6 +83,8 @@ impl AssetBundle {
             css_synced_len: 0,
             image_total_bytes: 0,
             image_synced_len: 0,
+            font_total_bytes: 0,
+            font_synced_len: 0,
         }
     }
 
@@ -173,9 +186,39 @@ impl AssetBundle {
     /// - WOFF2: `woff2_patched` で TTF にデコードしてから登録
     /// - WOFF1: `Error::UnsupportedFontFormat` を返す（未対応）
     /// - その他: 警告ログを出してそのまま登録（caller が正しい形式を渡している可能性）
+    ///
+    /// `data` は attacker-controlled（fulgur-wasm の `Engine.add_font` が
+    /// JS 呼び出し元から渡された `Uint8Array` をそのまま転送する）。WOFF2 は
+    /// 既存の `decode_woff2` が入力/デコード後サイズ双方を
+    /// [`MAX_WOFF2_INPUT_BYTES`]/[`MAX_DECODED_FONT_BYTES`] で bound するが、
+    /// TTF/OTF/TTC/Unknown の生バイト列にはこの経路が通らず、以前は無制限に
+    /// 保持されていた。単一エントリが [`MAX_DECODED_FONT_BYTES`] を超える、
+    /// または bundle 全体の累積が [`MAX_TOTAL_FONT_BYTES`] を超える場合は
+    /// `Err` を返しフォントを登録しない（CSS/image の silent-drop とは異なり、
+    /// 既存の WOFF2 系エラーと同じ `Result` 契約に揃える）。
     pub fn add_font_bytes(&mut self, data: Vec<u8>) -> Result<()> {
         let decoded = match detect_font_format(&data) {
-            FontFormat::Woff2 => decode_woff2(&data)?,
+            FontFormat::Woff2 => {
+                // Preflight the aggregate budget against the header's
+                // declared `totalSfntSize` *before* paying `decode_woff2`'s
+                // real cost (up to 64 MiB of brotli decompression). Without
+                // this, a bundle already at/near MAX_TOTAL_FONT_BYTES still
+                // pays the full decode for every rejected request — the
+                // final size-accurate charge in `try_push_font` only runs
+                // *after* decoding (coderabbit review, PR #697).
+                // `declared_size` is a raw, unvalidated header field (up to
+                // `u32::MAX`) at this point — `decode_woff2`'s own
+                // MAX_DECODED_FONT_BYTES check hasn't run yet. On a 32-bit
+                // `usize` target (wasm32, exactly what `Engine.add_font`
+                // runs on) a bare `+` here can overflow and panic with
+                // overflow checks enabled, turning an expected `Result::Err`
+                // into a wasm trap for JS callers (Codex Review, PR #697).
+                let declared_size = woff2_declared_sfnt_size(&data)?;
+                self.check_font_budget(
+                    crate::STRING_ENTRY_OVERHEAD_BYTES.saturating_add(declared_size),
+                )?;
+                decode_woff2(&data)?
+            }
             FontFormat::Woff1 => {
                 return Err(Error::UnsupportedFontFormat(
                     "WOFF1 is not supported; convert to WOFF2 or TTF/OTF".into(),
@@ -187,7 +230,65 @@ impl AssetBundle {
             }
             FontFormat::Ttf | FontFormat::Otf | FontFormat::Ttc => data,
         };
+        self.try_push_font(decoded)
+    }
+
+    /// Recompute-if-desynced-then-check against the aggregate font budget.
+    /// Shared by [`Self::add_font_bytes`]'s pre-decode WOFF2 preflight
+    /// (charged with the header's *declared* size, to fail fast before
+    /// `decode_woff2`'s real CPU/temp-buffer cost — coderabbit review, PR
+    /// #697) and [`Self::try_push_font`]'s final charge on the *actual*
+    /// decoded size. Does not mutate `font_total_bytes` by `charge` itself —
+    /// callers that accept the entry apply that separately once they're
+    /// committed to pushing it.
+    ///
+    /// `fonts` is `pub`, so a caller can bypass the `add_font_*` methods and
+    /// mutate it directly (push / remove / clear). Same length-mismatch
+    /// recompute as `try_push_css`/`try_insert_image` — see
+    /// `css_synced_len`'s doc for why this is safe from an attacker-facing
+    /// cost standpoint.
+    fn check_font_budget(&mut self, charge: usize) -> Result<()> {
+        if self.fonts.len() != self.font_synced_len {
+            self.font_total_bytes = self
+                .fonts
+                .iter()
+                .map(|f| crate::STRING_ENTRY_OVERHEAD_BYTES + f.len())
+                .sum();
+            self.font_synced_len = self.fonts.len();
+        }
+        if self.font_total_bytes.saturating_add(charge) > MAX_TOTAL_FONT_BYTES {
+            return Err(Error::Asset(format!(
+                "aggregate registered font bytes would exceed {MAX_TOTAL_FONT_BYTES} byte budget"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Shared cap-enforcing push used by [`Self::add_font_bytes`] (and, via
+    /// it, [`Self::add_font_file`]). A single choke point so the WOFF2
+    /// decoded output and the raw TTF/OTF/TTC/Unknown passthrough are both
+    /// charged against the same per-entry and aggregate budgets.
+    fn try_push_font(&mut self, mut decoded: Vec<u8>) -> Result<()> {
+        // Redundant for the WOFF2 branch (`decode_woff2` already enforces
+        // this internally) but the only size gate for the raw
+        // TTF/OTF/TTC/Unknown passthrough, which previously had none.
+        if decoded.len() > MAX_DECODED_FONT_BYTES {
+            return Err(Error::Asset(format!(
+                "font exceeds {MAX_DECODED_FONT_BYTES} byte limit ({} bytes)",
+                decoded.len()
+            )));
+        }
+        // Fixed per-entry overhead bounds the *count* too (repeatedly
+        // calling `add_font` with small/near-empty payloads), not just
+        // cumulative content bytes — same reasoning as `try_push_css`.
+        let charge = crate::STRING_ENTRY_OVERHEAD_BYTES + decoded.len();
+        self.check_font_budget(charge)?;
+        // See `try_push_css`'s `shrink_to_fit` comment — same rationale for
+        // native Rust callers passing an over-capacity `Vec<u8>`.
+        decoded.shrink_to_fit();
+        self.font_total_bytes += charge;
         self.fonts.push(Arc::new(decoded));
+        self.font_synced_len = self.fonts.len();
         Ok(())
     }
 
@@ -436,8 +537,20 @@ const MAX_WOFF2_INPUT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Upper bound on accepted decompressed TTF/OTF output size (64 MiB).
 /// A single real-world font family tops out well below this; anything larger
-/// is likely a decompression bomb.
+/// is likely a decompression bomb. Also enforced, via [`AssetBundle::try_push_font`],
+/// as the per-call cap on raw TTF/OTF/TTC/Unknown bytes passed to
+/// [`AssetBundle::add_font_bytes`] (that path has no decode step of its own).
 const MAX_DECODED_FONT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Aggregate ceiling across every font registered on one bundle (256 MiB),
+/// matching [`MAX_TOTAL_IMAGE_BYTES`]. Generous enough for a report embedding
+/// several full font families with multiple weights/styles, but bounds the
+/// case of many separately-reasonable `add_font_bytes`/`add_font_file` calls
+/// (or a compromised tenant issuing many of them via fulgur-wasm's
+/// `Engine.add_font`) accumulating without limit. Render time clones every
+/// registered font into a `fontique::Blob` (`blitz_adapter::apply_passes`),
+/// so this also bounds that per-render amplification.
+const MAX_TOTAL_FONT_BYTES: usize = 256 * 1024 * 1024;
 
 /// Upper bound on a single [`AssetBundle::add_css`] / [`AssetBundle::add_css_file`]
 /// call (16 MiB). A real-world stylesheet is KBs to low MBs; this is
@@ -471,33 +584,42 @@ const MAX_IMAGE_KEY_BYTES: usize = 4 * 1024;
 /// tenant issuing many of them) accumulating without limit.
 const MAX_TOTAL_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Decode a WOFF2 byte stream into an uncompressed TTF/OTF font.
-///
-/// Three layered defenses against decompression-bomb inputs, since
-/// `woff2_patched` itself caps neither input nor output:
-///
-/// 1. `MAX_WOFF2_INPUT_BYTES` rejects oversized compressed inputs up front.
-/// 2. The WOFF2 header's `totalSfntSize` field (bytes 16-19, big-endian
-///    u32) is inspected *before* invoking brotli so an adversarial header
-///    declaring a huge output cannot drive the decoder into OOM.
-/// 3. `MAX_DECODED_FONT_BYTES` is re-checked after decode as a belt-and-
-///    suspenders guard against a liar header.
-fn decode_woff2(data: &[u8]) -> Result<Vec<u8>> {
+/// Validate a WOFF2 byte stream's input-size cap and header, returning the
+/// header's declared `totalSfntSize` (bytes 16-19, big-endian u32; see
+/// <https://www.w3.org/TR/WOFF2/#woff20Header>) without running the decoder.
+/// Shared by [`decode_woff2`] and [`AssetBundle::add_font_bytes`]'s
+/// pre-decode aggregate-budget preflight, so the cheap header check runs
+/// before `decode_woff2`'s real (up to 64 MiB brotli) decode cost.
+fn woff2_declared_sfnt_size(data: &[u8]) -> Result<usize> {
     if data.len() > MAX_WOFF2_INPUT_BYTES {
         return Err(Error::WoffDecode(format!(
             "WOFF2 input exceeds {MAX_WOFF2_INPUT_BYTES} byte limit (got {} bytes)",
             data.len()
         )));
     }
-    // WOFF2 header: bytes 16..20 are totalSfntSize (big-endian u32).
-    // See https://www.w3.org/TR/WOFF2/#woff20Header.
     if data.len() < 20 {
         return Err(Error::WoffDecode(format!(
             "WOFF2 header truncated: expected >= 20 bytes, got {}",
             data.len()
         )));
     }
-    let total_sfnt_size = u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as usize;
+    Ok(u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as usize)
+}
+
+/// Decode a WOFF2 byte stream into an uncompressed TTF/OTF font.
+///
+/// Three layered defenses against decompression-bomb inputs, since
+/// `woff2_patched` itself caps neither input nor output:
+///
+/// 1. `MAX_WOFF2_INPUT_BYTES` rejects oversized compressed inputs up front
+///    (via [`woff2_declared_sfnt_size`]).
+/// 2. The WOFF2 header's declared `totalSfntSize` is checked *before*
+///    invoking brotli so an adversarial header declaring a huge output
+///    cannot drive the decoder into OOM.
+/// 3. `MAX_DECODED_FONT_BYTES` is re-checked after decode as a belt-and-
+///    suspenders guard against a liar header.
+fn decode_woff2(data: &[u8]) -> Result<Vec<u8>> {
+    let total_sfnt_size = woff2_declared_sfnt_size(data)?;
     if total_sfnt_size > MAX_DECODED_FONT_BYTES {
         return Err(Error::WoffDecode(format!(
             "WOFF2 header declares uncompressed size {total_sfnt_size} which exceeds {MAX_DECODED_FONT_BYTES} byte limit"
@@ -660,7 +782,15 @@ mod tests {
     fn test_add_font_bytes_woff2_invalid_returns_error() {
         use crate::error::Error;
         let mut bundle = AssetBundle::new();
-        let fake = b"wOF2\x00\x00\x00\x00garbagegarbagegarbage".to_vec();
+        // bytes 16..20 (totalSfntSize) must declare a small, budget-passing
+        // size so add_font_bytes's pre-decode aggregate-budget preflight
+        // (PR #697) doesn't short-circuit before decode_woff2 ever runs —
+        // this test's intent is specifically to exercise decode_woff2's own
+        // WoffDecode rejection of invalid brotli data, not the preflight.
+        let mut fake = b"wOF2".to_vec();
+        fake.extend_from_slice(&[0u8; 12]); // bytes 4..16, unused by the header check
+        fake.extend_from_slice(&100u32.to_be_bytes()); // bytes 16..20: totalSfntSize
+        fake.extend_from_slice(b"garbagegarbagegarbage");
         let err = bundle
             .add_font_bytes(fake)
             .expect_err("bad WOFF2 must error");
@@ -872,6 +1002,266 @@ mod tests {
             .expect("add_font_file should accept TTF");
         assert_eq!(bundle.fonts.len(), 1);
         assert_eq!(&bundle.fonts[0][..], &data[..]);
+    }
+
+    // --- Codex finding: unbounded raw font-byte registration ---
+    // fulgur-wasm's Engine.add_font forwards JS-caller-controlled bytes
+    // straight into AssetBundle::add_font_bytes. WOFF2 input/output was
+    // already bounded by decode_woff2's own checks, but the raw
+    // TTF/OTF/TTC/Unknown passthrough had no size cap of its own, and no
+    // registration was charged against a bundle-wide aggregate — so a
+    // single oversized raw font, or many small ones, could grow the bundle
+    // (and the render-time clone of every entry, blitz_adapter.rs) without
+    // bound. These tests assert the caps engage under adversarial input and
+    // that ordinary fonts are unaffected.
+
+    #[test]
+    fn add_font_bytes_rejects_oversized_raw_ttf() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        let mut bundle = AssetBundle::new();
+        let mut huge = vec![0x00u8, 0x01, 0x00, 0x00]; // TTF magic
+        huge.resize(MAX_DECODED_FONT_BYTES + 1, 0xAA);
+        let err = bundle
+            .add_font_bytes(huge)
+            .expect_err("oversized raw TTF must be rejected");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("limit"), "msg: {msg}"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert!(bundle.fonts.is_empty());
+    }
+
+    #[test]
+    fn add_font_bytes_rejects_oversized_unknown_format() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        let mut bundle = AssetBundle::new();
+        let huge = vec![0xDEu8; MAX_DECODED_FONT_BYTES + 1]; // no recognized magic
+        assert_eq!(detect_font_format(&huge), FontFormat::Unknown);
+        let err = bundle
+            .add_font_bytes(huge)
+            .expect_err("oversized unknown-format payload must be rejected");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("limit"), "msg: {msg}"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert!(bundle.fonts.is_empty());
+    }
+
+    #[test]
+    fn add_font_bytes_normal_font_is_unaffected() {
+        let mut bundle = AssetBundle::new();
+        let mut data = vec![0x00u8, 0x01, 0x00, 0x00];
+        data.extend_from_slice(&[0xAB; 128]);
+        bundle
+            .add_font_bytes(data.clone())
+            .expect("ordinary TTF should be accepted");
+        assert_eq!(bundle.fonts.len(), 1);
+        assert_eq!(&bundle.fonts[0][..], &data[..]);
+    }
+
+    #[test]
+    fn add_font_bytes_drops_once_aggregate_budget_exceeded() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        let mut bundle = AssetBundle::new();
+        // Largest single font that still fits the per-call cap.
+        let mut chunk = vec![0x00u8, 0x01, 0x00, 0x00];
+        chunk.resize(MAX_DECODED_FONT_BYTES, 0xAA);
+        let max_possible_fits = MAX_TOTAL_FONT_BYTES / MAX_DECODED_FONT_BYTES + 1;
+        let mut accepted = 0;
+        for _ in 0..=max_possible_fits {
+            match bundle.add_font_bytes(chunk.clone()) {
+                Ok(()) => accepted += 1,
+                Err(_) => {
+                    assert!(
+                        accepted >= max_possible_fits.saturating_sub(2),
+                        "aggregate budget must accept close to MAX_TOTAL_FONT_BYTES worth of \
+                         fonts before rejecting (accepted {accepted}, expected near \
+                         {max_possible_fits})"
+                    );
+                    return;
+                }
+            }
+        }
+        panic!(
+            "aggregate font budget never rejected a push after {} fonts \
+             ({} bytes each) — the cap did not engage",
+            max_possible_fits + 1,
+            MAX_DECODED_FONT_BYTES
+        );
+    }
+
+    #[test]
+    fn add_font_bytes_rejects_woff2_by_declared_size_before_decoding() {
+        // coderabbit review (PR #697): decode_woff2 used to run *before* the
+        // aggregate-budget check, so a bundle already at/near
+        // MAX_TOTAL_FONT_BYTES still paid the full brotli decode cost for
+        // every rejected request. add_font_bytes now preflights the budget
+        // against the WOFF2 header's declared totalSfntSize first.
+        //
+        // To prove the preflight fires *before* decode_woff2 runs (rather
+        // than just checking the end-to-end Err), the payload's post-header
+        // bytes are garbage — not valid brotli. If decode_woff2 actually
+        // ran, `woff2_patched::decode::convert_woff2_to_ttf` would fail and
+        // surface as `Error::WoffDecode("WOFF2 decode failed...")`. Getting
+        // `Error::Asset` (the aggregate-budget message) instead is only
+        // possible if the preflight rejected the request first.
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        let mut bundle = AssetBundle::new();
+        let mut chunk = vec![0x00u8, 0x01, 0x00, 0x00];
+        chunk.resize(MAX_DECODED_FONT_BYTES, 0xAA);
+        let max_attempts = MAX_TOTAL_FONT_BYTES / MAX_DECODED_FONT_BYTES + 1;
+        for _ in 0..max_attempts {
+            // Fill until the aggregate budget has little headroom left (see
+            // add_font_bytes_drops_once_aggregate_budget_exceeded — this
+            // loop count always leaves remaining budget < MAX_DECODED_FONT_BYTES).
+            let _ = bundle.add_font_bytes(chunk.clone());
+        }
+
+        let len_before = bundle.fonts.len();
+
+        let mut fake_woff2 = b"wOF2".to_vec();
+        fake_woff2.extend_from_slice(&[0u8; 12]); // bytes 4..16, unused by the header check
+        let declared = MAX_DECODED_FONT_BYTES as u32; // remaining headroom is well under this
+        fake_woff2.extend_from_slice(&declared.to_be_bytes()); // bytes 16..20: totalSfntSize
+        fake_woff2.extend_from_slice(b"not valid brotli data at all, would fail to decode");
+
+        let err = bundle
+            .add_font_bytes(fake_woff2)
+            .expect_err("declared size over remaining budget must be rejected");
+        match err {
+            Error::Asset(msg) => assert!(
+                msg.contains("budget"),
+                "must be the aggregate-budget preflight error: {msg}"
+            ),
+            other => panic!(
+                "expected Error::Asset from the pre-decode budget preflight, got {other:?} — \
+                 a WoffDecode error here would mean decode_woff2 ran on garbage bytes, i.e. \
+                 the preflight didn't fire before the expensive decode"
+            ),
+        }
+        assert_eq!(
+            bundle.fonts.len(),
+            len_before,
+            "the garbage WOFF2 payload must not have been registered"
+        );
+    }
+
+    #[test]
+    fn add_font_bytes_woff2_near_u32_max_declared_size_does_not_panic() {
+        // Codex review (PR #697): the preflight charge computation
+        // (`STRING_ENTRY_OVERHEAD_BYTES + declared_size`) used a bare `+`
+        // against a raw, unvalidated `u32` header field. On a 32-bit `usize`
+        // target (wasm32 — exactly what `Engine.add_font` runs on) a
+        // declared_size near `u32::MAX` overflows that addition, which
+        // panics with overflow checks enabled instead of returning a clean
+        // `Result::Err`. This test can't reproduce the overflow itself on a
+        // 64-bit host (`usize` is 64-bit here, so the sum never overflows),
+        // but locks in that `saturating_add` — not a bare `+` — is used at
+        // this call site, and that the near-`u32::MAX` boundary is rejected
+        // cleanly rather than left to a future edit to regress silently.
+        let mut bundle = AssetBundle::new();
+        let mut fake = b"wOF2".to_vec();
+        fake.extend_from_slice(&[0u8; 12]); // bytes 4..16, unused by the header check
+        fake.extend_from_slice(&u32::MAX.to_be_bytes()); // bytes 16..20: totalSfntSize
+        fake.extend_from_slice(b"irrelevant tail bytes");
+        let err = bundle
+            .add_font_bytes(fake)
+            .expect_err("near-u32::MAX declared size must be rejected, not panic");
+        match err {
+            Error::Asset(msg) => assert!(msg.contains("budget"), "msg: {msg}"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_font_bytes_charges_overhead_for_tiny_fonts() {
+        let mut bundle = AssetBundle::new();
+        // Unknown-format tiny payloads (<4 bytes, no magic to match) also
+        // cover the "repeatedly calling add_font" count vector — a fixed
+        // per-entry overhead bounds count even when content is ~0 bytes each.
+        bundle.add_font_bytes(vec![0xAAu8]).unwrap();
+        bundle.add_font_bytes(vec![0xBBu8]).unwrap();
+        assert_eq!(bundle.fonts.len(), 2);
+        assert_eq!(
+            bundle.font_total_bytes,
+            2 * crate::STRING_ENTRY_OVERHEAD_BYTES + 1 + 1,
+            "each tiny font must still be charged a fixed per-entry overhead \
+             in addition to content bytes — otherwise entry count is unbounded"
+        );
+    }
+
+    #[test]
+    fn add_font_bytes_shrinks_retained_capacity_to_length() {
+        let mut oversized_capacity: Vec<u8> = Vec::with_capacity(1024 * 1024);
+        oversized_capacity.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+        assert!(oversized_capacity.capacity() >= 1024 * 1024);
+        let mut bundle = AssetBundle::new();
+        bundle
+            .add_font_bytes(oversized_capacity)
+            .expect("should accept");
+        assert!(
+            bundle.fonts[0].capacity() < 1024 * 1024,
+            "retained capacity must be shrunk toward the actual content length \
+             (got {})",
+            bundle.fonts[0].capacity()
+        );
+    }
+
+    #[test]
+    fn add_font_bytes_budget_resets_after_bundle_is_cleared_directly() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        let mut bundle = AssetBundle::new();
+        let mut chunk = vec![0x00u8, 0x01, 0x00, 0x00];
+        chunk.resize(MAX_DECODED_FONT_BYTES, 0xAA);
+        let max_attempts = MAX_TOTAL_FONT_BYTES / MAX_DECODED_FONT_BYTES + 1;
+        for _ in 0..max_attempts {
+            let _ = bundle.add_font_bytes(chunk.clone());
+        }
+        let filled_len = bundle.fonts.len();
+        assert!(
+            filled_len < max_attempts,
+            "at least one fill attempt must have been rejected"
+        );
+
+        assert!(bundle.add_font_bytes(chunk.clone()).is_err());
+        assert_eq!(
+            bundle.fonts.len(),
+            filled_len,
+            "budget must still be exhausted before the direct clear"
+        );
+
+        bundle.fonts.clear();
+        bundle.add_font_bytes(vec![0x00, 0x01, 0x00, 0x00]).expect(
+            "clearing the pub field directly must reset the tracked budget, \
+                 not leave the bundle permanently stuck rejecting",
+        );
+        assert_eq!(bundle.fonts.len(), 1);
+    }
+
+    #[test]
+    fn add_font_bytes_budget_recomputes_after_partial_removal() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        let mut bundle = AssetBundle::new();
+        let mut chunk = vec![0x00u8, 0x01, 0x00, 0x00];
+        chunk.resize(MAX_DECODED_FONT_BYTES, 0xAA);
+        let max_attempts = MAX_TOTAL_FONT_BYTES / MAX_DECODED_FONT_BYTES + 1;
+        for _ in 0..max_attempts {
+            let _ = bundle.add_font_bytes(chunk.clone());
+        }
+        let filled_len = bundle.fonts.len();
+        assert!(filled_len >= 1, "fill loop must accept at least one font");
+
+        bundle.fonts.remove(0);
+        assert_eq!(bundle.fonts.len(), filled_len - 1);
+
+        bundle.add_font_bytes(chunk).unwrap_or_else(|e| {
+            panic!(
+                "removing one entry through the pub field must free budget for a new \
+                 entry of the same size, proving the stale total was recomputed \
+                 rather than staying stuck at the pre-removal ceiling: {e}"
+            )
+        });
+        assert_eq!(bundle.fonts.len(), filled_len);
     }
 
     #[test]
