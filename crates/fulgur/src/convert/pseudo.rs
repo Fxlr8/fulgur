@@ -858,4 +858,182 @@ mod tests {
         );
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // build_pseudo_image_entry: `extract_content_image_url` returns None when
+    // the block pseudo's content is a string literal (no url()).
+    // Covers the line 19 `?` short-circuit in build_pseudo_image_entry.
+    #[test]
+    fn smoke_block_pseudo_text_content_skips_image_entry() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"div::before { content: "arrow"; display: block; }"#);
+        let pdf = render_with_assets(
+            r#"<!DOCTYPE html><html><body><div>Text</div></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_pseudo_image_entry: `ImageRender::detect_format` returns None when
+    // the registered image bytes are not a recognised format.
+    // Covers the line 22 `?` short-circuit in build_pseudo_image_entry.
+    #[test]
+    fn smoke_block_pseudo_unrecognized_format_skips_entry() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("bad.bin", vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        bundle.add_css(
+            r#"div::before { content: url("bad.bin"); display: block; width: 10px; height: 10px; }"#,
+        );
+        let pdf = render_with_assets(
+            r#"<!DOCTYPE html><html><body><div>Text</div></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_inline_pseudo_image: `get_image` returns None when the inline
+    // pseudo's url() is not registered in the bundle (covers line 171 `?`).
+    #[test]
+    fn smoke_inline_pseudo_image_url_not_in_bundle() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("other.png", RED_1X1_PNG.to_vec());
+        bundle.add_css(r#"p::before { content: url("missing.png"); }"#);
+        let pdf = render_with_assets(
+            r#"<!DOCTYPE html><html><body><p>Paragraph</p></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // build_inline_pseudo_image: `detect_format` returns None for unrecognised
+    // bytes in the bundle (covers line 172 `?`).
+    #[test]
+    fn smoke_inline_pseudo_unrecognized_format_skips() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("bad.bin", vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        bundle.add_css(r#"p::before { content: url("bad.bin"); }"#);
+        let pdf = render_with_assets(
+            r#"<!DOCTYPE html><html><body><p>Paragraph</p></body></html>"#,
+            bundle,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── node_has_inline_pseudo_image direct unit tests ───────────────────────
+    // The function is #[allow(dead_code)] because v2 inline-root no longer
+    // calls it, but it mirrors node_has_block_pseudo_image and its semantics
+    // warrant direct coverage.
+
+    fn parse_doc_for_inline_pseudo_tests(html: &str) -> blitz_html::HtmlDocument {
+        crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            false,
+        )
+    }
+
+    fn find_elem_by_tag_in_pseudo_tests<'a>(
+        base: &'a crate::blitz_adapter::BaseDocument,
+        start_id: usize,
+        tag: &str,
+    ) -> Option<&'a crate::blitz_adapter::Node> {
+        let node = base.get_node(start_id)?;
+        if node
+            .element_data()
+            .is_some_and(|e| e.name.local.as_ref() == tag)
+        {
+            return Some(node);
+        }
+        for &child in &node.children {
+            if let Some(found) = find_elem_by_tag_in_pseudo_tests(base, child, tag) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn node_has_inline_pseudo_image_true_for_before_with_url() {
+        use std::ops::Deref;
+        let doc = parse_doc_for_inline_pseudo_tests(
+            r#"<!DOCTYPE html><html><head><style>
+            div::before { content: url("dot.png"); }
+            </style></head><body><div>Text</div></body></html>"#,
+        );
+        let base = doc.deref();
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+            .expect("div element must be present");
+        assert!(
+            super::node_has_inline_pseudo_image(base, div_node),
+            "inline ::before with url() must return true"
+        );
+    }
+
+    #[test]
+    fn node_has_inline_pseudo_image_true_for_after_with_url() {
+        use std::ops::Deref;
+        let doc = parse_doc_for_inline_pseudo_tests(
+            r#"<!DOCTYPE html><html><head><style>
+            div::after { content: url("dot.png"); }
+            </style></head><body><div>Text</div></body></html>"#,
+        );
+        let base = doc.deref();
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+            .expect("div element must be present");
+        assert!(
+            super::node_has_inline_pseudo_image(base, div_node),
+            "inline ::after with url() must return true"
+        );
+    }
+
+    #[test]
+    fn node_has_inline_pseudo_image_false_when_before_is_block() {
+        use std::ops::Deref;
+        let doc = parse_doc_for_inline_pseudo_tests(
+            r#"<!DOCTYPE html><html><head><style>
+            div::before { content: url("dot.png"); display: block; }
+            </style></head><body><div>Text</div></body></html>"#,
+        );
+        let base = doc.deref();
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+            .expect("div element must be present");
+        assert!(
+            !super::node_has_inline_pseudo_image(base, div_node),
+            "block ::before must not be reported as inline pseudo image"
+        );
+    }
+
+    #[test]
+    fn node_has_inline_pseudo_image_false_when_no_pseudo() {
+        use std::ops::Deref;
+        let doc = parse_doc_for_inline_pseudo_tests(
+            r#"<!DOCTYPE html><html><body><div>No pseudo here</div></body></html>"#,
+        );
+        let base = doc.deref();
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+            .expect("div element must be present");
+        assert!(
+            !super::node_has_inline_pseudo_image(base, div_node),
+            "element with no pseudo must return false"
+        );
+    }
+
+    #[test]
+    fn node_has_inline_pseudo_image_false_when_before_has_text_content() {
+        use std::ops::Deref;
+        let doc = parse_doc_for_inline_pseudo_tests(
+            r#"<!DOCTYPE html><html><head><style>
+            div::before { content: "arrow"; }
+            </style></head><body><div>Text</div></body></html>"#,
+        );
+        let base = doc.deref();
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+            .expect("div element must be present");
+        assert!(
+            !super::node_has_inline_pseudo_image(base, div_node),
+            "::before with text content must return false (no url())"
+        );
+    }
 }
