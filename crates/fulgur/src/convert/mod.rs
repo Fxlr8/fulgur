@@ -1718,6 +1718,48 @@ mod semantics_tests {
 }
 
 #[cfg(test)]
+mod debug_print_tree_tests {
+    //! Tests that directly exercise `debug_print_tree`.
+    //! Calling the function directly with a parsed `BaseDocument` avoids
+    //! process-global env-var mutation and is safe under the parallel test
+    //! harness (no `set_var` / `remove_var`, no mutex needed).
+
+    use crate::units::F32Units;
+    use std::ops::Deref;
+
+    fn parsed_doc(html: &str) -> blitz_html::HtmlDocument {
+        crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        )
+    }
+
+    #[test]
+    fn debug_print_tree_traverses_dom_without_panic() {
+        // Covers the main body of debug_print_tree: all NodeData arms
+        // (Element, Text, Comment) and the child-recursion loop.
+        let doc = parsed_doc(
+            "<!DOCTYPE html><html><body><p>text</p><!-- comment --><div><span>nested</span></div></body></html>",
+        );
+        let root_id = doc.root_element().id;
+        super::debug_print_tree(doc.deref(), root_id, 0);
+    }
+
+    #[test]
+    fn debug_print_tree_max_depth_guard_returns_early() {
+        // Pass depth = MAX_DOM_DEPTH directly so the first line of
+        // debug_print_tree hits the early-return guard without building a
+        // pathologically deep DOM or running a large-stack thread.
+        let doc = parsed_doc("<!DOCTYPE html><html><body><p>x</p></body></html>");
+        let root_id = doc.root_element().id;
+        super::debug_print_tree(doc.deref(), root_id, crate::MAX_DOM_DEPTH);
+    }
+}
+
+#[cfg(test)]
 mod utility_fn_tests {
     //! Unit tests for pure utility functions in this module.
     //! These exercise branches that the integration tests (semantics_tests,
