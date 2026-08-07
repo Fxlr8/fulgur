@@ -1611,4 +1611,100 @@ mod tests {
             .expect("render failed");
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // try_convert: pseudo-only (before_inline=Some, paragraph_opt=None) where
+    // needs_block_pre=true via background (has_visual_style), but clipping_pre=false
+    // and opacity_scope_pre=false (opacity=1.0). Exercises the `if needs_block {}`
+    // block insertion at lines 191-203 WITHOUT a pre_mark.
+    #[test]
+    fn smoke_pseudo_only_with_background_covers_needs_block_no_pre_mark() {
+        let pdf = make_engine_with_dot_png()
+            .render(
+                r#"<!doctype html><html><head>
+                <style>
+                  p.marker::before { content: url("dot.png"); width: 10px; height: 10px; }
+                </style>
+                </head><body>
+                <p class="marker" style="background: #eee; padding: 4px;"></p>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — pseudo-only needs_block (no pre_mark) path may have been skipped"
+        );
+    }
+
+    // try_convert: pseudo-only where needs_block_pre=true and clipping_pre=true
+    // (overflow:hidden). Exercises the pre_mark + clip_descendants path at
+    // lines 204-215 inside the needs_block block.
+    #[test]
+    fn smoke_pseudo_only_with_overflow_hidden_covers_clip_descendants() {
+        let pdf = make_engine_with_dot_png()
+            .render(
+                r#"<!doctype html><html><head>
+                <style>
+                  p.marker::before { content: url("dot.png"); width: 10px; height: 10px; }
+                </style>
+                </head><body>
+                <p class="marker" style="overflow: hidden; height: 20px;"></p>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — pseudo-only clip_descendants path may have been skipped"
+        );
+    }
+
+    // try_convert: pseudo-only where needs_block_pre=true via background and
+    // opacity_scope_pre=true (opacity<1.0, no overflow:hidden). Exercises the
+    // pre_mark + opacity_descendants path at lines 204-215 inside needs_block.
+    #[test]
+    fn smoke_pseudo_only_with_opacity_covers_opacity_descendants() {
+        let pdf = make_engine_with_dot_png()
+            .render(
+                r#"<!doctype html><html><head>
+                <style>
+                  p.marker::before { content: url("dot.png"); width: 10px; height: 10px; }
+                </style>
+                </head><body>
+                <p class="marker" style="background: #eee; opacity: 0.5;"></p>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+        assert!(
+            pdf_has_image(&pdf),
+            "image XObject missing — pseudo-only opacity_descendants path may have been skipped"
+        );
+    }
+
+    // pageable_last_baseline_from_drawables: exercises line 393 (closing `}` of
+    // the `if let Some(inner) = …` arm when the recursive call returns None).
+    // DOM order inside <section>: [div(text), aside(empty)]. Reversed: [aside, div].
+    // The aside yields None from the recursive call (no paragraph, no children),
+    // so the if-let condition is false and its closing `}` is reached. The div
+    // then yields Some and the function returns.
+    #[test]
+    fn pageable_last_baseline_walk_past_empty_sibling_to_find_baseline() {
+        let doc = parse_doc(
+            "<html><body><section><div>text</div><aside></aside></section></body></html>",
+        );
+        let section_id = find_tag(&doc, "section");
+        let div_id = find_tag(&doc, "div");
+        let mut out = crate::drawables::Drawables::new();
+        out.paragraphs.insert(div_id, make_paragraph_entry(&[12.0]));
+        let result = super::pageable_last_baseline_from_drawables(doc.deref(), &out, section_id, 0);
+        assert!(
+            result.is_some(),
+            "must find div paragraph baseline via DOM walk past empty aside sibling"
+        );
+        assert!(
+            result.unwrap().to_f32() >= 12.0,
+            "baseline must be at least the child paragraph's baseline"
+        );
+    }
 }
