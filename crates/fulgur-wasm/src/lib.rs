@@ -578,15 +578,13 @@ mod tests {
             let lopdf::Object::Dictionary(dict) = obj else {
                 continue;
             };
-            if let Ok(name_obj) = dict.get(b"BaseFont") {
-                if let Ok(name_bytes) = name_obj.as_name() {
-                    if let Ok(s) = std::str::from_utf8(name_bytes) {
-                        if s.contains("Noto") {
-                            found_noto = true;
-                            break;
-                        }
-                    }
-                }
+            if let Ok(name_obj) = dict.get(b"BaseFont")
+                && let Ok(name_bytes) = name_obj.as_name()
+                && let Ok(s) = std::str::from_utf8(name_bytes)
+                && s.contains("Noto")
+            {
+                found_noto = true;
+                break;
             }
         }
         assert!(
@@ -643,13 +641,12 @@ mod tests {
         let doc = lopdf::Document::load_mem(&pdf).expect("PDF parses");
         let mut found_image = false;
         for obj in doc.objects.values() {
-            if let lopdf::Object::Stream(stream) = obj {
-                if let Ok(subtype) = stream.dict.get(b"Subtype") {
-                    if matches!(subtype.as_name(), Ok(name) if name == b"Image") {
-                        found_image = true;
-                        break;
-                    }
-                }
+            if let lopdf::Object::Stream(stream) = obj
+                && let Ok(subtype) = stream.dict.get(b"Subtype")
+                && matches!(subtype.as_name(), Ok(name) if name == b"Image")
+            {
+                found_image = true;
+                break;
             }
         }
         assert!(

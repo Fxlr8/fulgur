@@ -38,10 +38,10 @@ fn walk(dir: &Path, bundle: &mut AssetBundle) -> Result<()> {
             .extension()
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase());
-        if let Some("ttf" | "otf" | "woff" | "woff2") = ext.as_deref() {
-            if let Err(e) = bundle.add_font_file(&path) {
-                log::warn!("load_fonts_dir: skipping {}: {e}", path.display());
-            }
+        if let Some("ttf" | "otf" | "woff" | "woff2") = ext.as_deref()
+            && let Err(e) = bundle.add_font_file(&path)
+        {
+            log::warn!("load_fonts_dir: skipping {}: {e}", path.display());
         }
     }
     Ok(())

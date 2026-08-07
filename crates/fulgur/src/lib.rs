@@ -1,3 +1,10 @@
+// MSRV 1.89 newly enables clippy's MSRV-gated suggestions for these two
+// lints (let-chains stabilized in 1.88; `is_multiple_of` likewise recent),
+// firing on ~65 pre-existing call sites across this crate. Suppressed here
+// to keep the MSRV bump (PR #701) a mechanical version-number change rather
+// than a large reindent; tracked for a follow-up migration in fulgur-pt70.
+#![allow(clippy::collapsible_if, clippy::manual_is_multiple_of)]
+
 /// Maximum DOM tree depth before recursion is cut off. Prevents stack overflow
 /// from pathologically deep HTML input.
 pub(crate) const MAX_DOM_DEPTH: usize = 512;

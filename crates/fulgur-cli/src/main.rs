@@ -343,10 +343,10 @@ fn take_number(rest: &str) -> Option<(f32, &str)> {
 /// Returns `(Some(unit), tail)` or `(None, rest)` when none matches.
 fn take_unit(rest: &str) -> (Option<&str>, &str) {
     for u in PAGE_UNITS {
-        if let Some(head) = rest.get(..u.len()) {
-            if head.eq_ignore_ascii_case(u) {
-                return (Some(head), &rest[u.len()..]);
-            }
+        if let Some(head) = rest.get(..u.len())
+            && head.eq_ignore_ascii_case(u)
+        {
+            return (Some(head), &rest[u.len()..]);
         }
     }
     (None, rest)

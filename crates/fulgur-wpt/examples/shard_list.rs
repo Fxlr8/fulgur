@@ -138,15 +138,15 @@ fn main() -> Result<()> {
             input_data_lines += 1;
             let entry = parse_entry(line)
                 .with_context(|| format!("parse error at {}:{}", path.display(), lineno + 1))?;
-            if let Some(prefix) = &filter {
-                if !entry.path.starts_with(prefix) {
-                    continue;
-                }
+            if let Some(prefix) = &filter
+                && !entry.path.starts_with(prefix)
+            {
+                continue;
             }
-            if let Some(set) = &status_filter {
-                if !set.contains(&entry.status) {
-                    continue;
-                }
+            if let Some(set) = &status_filter
+                && !set.contains(&entry.status)
+            {
+                continue;
             }
             entries.push(entry);
         }

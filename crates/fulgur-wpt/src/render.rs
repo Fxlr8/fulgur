@@ -63,12 +63,12 @@ pub fn render_test(
         let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
         let p = entry.path();
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with(&stale_needle) && name.ends_with(".png") {
-            if let Err(e) = std::fs::remove_file(&p) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
-                }
-            }
+        if name.starts_with(&stale_needle)
+            && name.ends_with(".png")
+            && let Err(e) = std::fs::remove_file(&p)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
         }
     }
 
