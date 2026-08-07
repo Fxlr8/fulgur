@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "fulgur.dev documentation site"
 requires-python = ">=3.11"
 dependencies = [
-    "mkdocs-material>=9.5",
+    "mkdocs-material>=9.7.7",
     "mkdocs-static-i18n>=1.2",
     "pymdown-extensions>=11.0.1",
 ]
