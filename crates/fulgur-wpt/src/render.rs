@@ -20,6 +20,12 @@ pub struct RenderedTest {
 /// `dpi` controls pdftocairo's rasterization resolution.
 /// `assets`: optional bundle of fonts/images injected into the engine
 /// (cloned internally; `AssetBundle` stores shared `Arc`s so clones are cheap).
+// MSRV bump to 1.89 (PR #701) makes clippy suggest collapsing the nested
+// `if`/`if let` below into a let-chain; left as-is because the collapse
+// would touch the (untested) stale-PNG removal error branch and trip
+// codecov/patch on lines this PR isn't otherwise changing. Tracked in
+// fulgur-pt70 alongside the core-library collapsible_if backlog.
+#[allow(clippy::collapsible_if)]
 pub fn render_test(
     test_html_path: &Path,
     work_dir: &Path,

@@ -1053,7 +1053,7 @@ fn metadata_prefix(bytes: &[u8]) -> &[u8] {
         return bytes;
     }
     let mut end = MAX_PDF_METADATA_FIELD_BYTES;
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF && (end - 2) % 2 != 0 {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF && !(end - 2).is_multiple_of(2) {
         end -= 1;
     }
     &bytes[..end]

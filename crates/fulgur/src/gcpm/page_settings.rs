@@ -26,12 +26,12 @@ fn selector_matches(selector: &str, page_num: usize, first_page_is_left: bool) -
             if first_page_is_left {
                 page_num % 2 == 1
             } else {
-                page_num % 2 == 0
+                page_num.is_multiple_of(2)
             }
         }
         ":right" => {
             if first_page_is_left {
-                page_num % 2 == 0
+                page_num.is_multiple_of(2)
             } else {
                 page_num % 2 == 1
             }

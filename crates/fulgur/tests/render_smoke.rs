@@ -3652,10 +3652,10 @@ fn outline_titles(pdf_bytes: &[u8]) -> Vec<String> {
             .expect("outline node")
             .as_dict()
             .expect("outline dict");
-        if let Ok(title) = dict.get(b"Title") {
-            if let Ok(s) = title.as_str() {
-                out.push(decode_title(s));
-            }
+        if let Ok(title) = dict.get(b"Title")
+            && let Ok(s) = title.as_str()
+        {
+            out.push(decode_title(s));
         }
         cur = dict.get(b"Next").ok().and_then(|v| v.as_reference().ok());
     }

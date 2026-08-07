@@ -3716,8 +3716,8 @@ impl<'a> MarginBoxRenderer<'a> {
                 None => true,
                 Some(sel) => match sel.as_str() {
                     ":first" => page_num == 1,
-                    ":left" => page_num % 2 == 0,
-                    ":right" => page_num % 2 != 0,
+                    ":left" => page_num.is_multiple_of(2),
+                    ":right" => !page_num.is_multiple_of(2),
                     _ => true,
                 },
             };
