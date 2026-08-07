@@ -21,7 +21,7 @@ for later releases.
 > **Note:** v0.0.1 is an early MVP. Pre-built gems are not yet published to
 > RubyGems; build from source for now.
 
-Requires a Rust toolchain (1.85+) and Ruby 3.3+.
+Requires a Rust toolchain (1.89+) and Ruby 3.3+.
 
 ```bash
 # From a checkout of the fulgur repository
