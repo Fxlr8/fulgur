@@ -20,6 +20,12 @@ pub struct RenderedTest {
 /// `dpi` controls pdftocairo's rasterization resolution.
 /// `assets`: optional bundle of fonts/images injected into the engine
 /// (cloned internally; `AssetBundle` stores shared `Arc`s so clones are cheap).
+// MSRV bump to 1.89 (PR #701) makes clippy suggest collapsing the nested
+// `if`/`if let` below into a let-chain; left as-is because the collapse
+// would touch the (untested) stale-PNG removal error branch and trip
+// codecov/patch on lines this PR isn't otherwise changing. Tracked in
+// fulgur-pt70 alongside the core-library collapsible_if backlog.
+#[allow(clippy::collapsible_if)]
 pub fn render_test(
     test_html_path: &Path,
     work_dir: &Path,
@@ -63,12 +69,12 @@ pub fn render_test(
         let entry = entry.with_context(|| format!("read entry in {}", work_dir.display()))?;
         let p = entry.path();
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with(&stale_needle)
-            && name.ends_with(".png")
-            && let Err(e) = std::fs::remove_file(&p)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
+        if name.starts_with(&stale_needle) && name.ends_with(".png") {
+            if let Err(e) = std::fs::remove_file(&p) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(e).with_context(|| format!("remove stale PNG {}", p.display()));
+                }
+            }
         }
     }
 

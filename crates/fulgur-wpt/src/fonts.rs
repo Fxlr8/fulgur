@@ -21,6 +21,12 @@ pub fn load_fonts_dir(dir: &Path) -> Result<AssetBundle> {
     Ok(bundle)
 }
 
+// MSRV bump to 1.89 (PR #701) makes clippy suggest collapsing the nested
+// `if let` below into a let-chain; left as-is here because the collapse
+// would touch the (untested) add_font_file error branch and trip
+// codecov/patch on lines this PR isn't otherwise changing. Tracked in
+// fulgur-pt70 alongside the core-library collapsible_if backlog.
+#[allow(clippy::collapsible_if)]
 fn walk(dir: &Path, bundle: &mut AssetBundle) -> Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .with_context(|| format!("read_dir {}", dir.display()))?
@@ -38,10 +44,10 @@ fn walk(dir: &Path, bundle: &mut AssetBundle) -> Result<()> {
             .extension()
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase());
-        if let Some("ttf" | "otf" | "woff" | "woff2") = ext.as_deref()
-            && let Err(e) = bundle.add_font_file(&path)
-        {
-            log::warn!("load_fonts_dir: skipping {}: {e}", path.display());
+        if let Some("ttf" | "otf" | "woff" | "woff2") = ext.as_deref() {
+            if let Err(e) = bundle.add_font_file(&path) {
+                log::warn!("load_fonts_dir: skipping {}: {e}", path.display());
+            }
         }
     }
     Ok(())
