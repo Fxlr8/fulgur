@@ -6996,22 +6996,39 @@ h2 { string-set: chapter-title content(text); }
     fn break_after_page_advances_after_recursive_split() {
         // 600px page; outer div (break-after: page) has two 400px children —
         // total 800px overflows the page, so `needs_recursion = true`.
-        // fragment_block_subtree leaves page=1, cursor=400.
+        // fragment_block_subtree places inner1 on page 0, inner2 on page 1,
+        // leaving page=1, cursor=400.
         // break-after fires: page=2, cursor=0.
         // Trailing 100px sibling must land on page 2.
+        //
+        // Discriminant vs the oversized-slice path (which would also produce
+        // page=2 for #after): in the recursion path `fragment_block_subtree`
+        // records inner2 on page 1; in the slice path `record_subtree_descendants`
+        // records both inner children on page 0 (the first slice's page).
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="break-after: page">
-                <div style="height: 400px"></div>
-                <div style="height: 400px"></div>
+                <div id="inner1" style="height: 400px"></div>
+                <div id="inner2" style="height: 400px"></div>
               </div>
               <div id="after" style="height: 100px"></div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
+        let inner2_id = find_by_id(doc.deref_mut(), "inner2").expect("div#inner2");
         let after_id = find_by_id(doc.deref_mut(), "after").expect("div#after");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 600.0_f32.as_px(), &table);
+        // Recursion-specific check: fragment_block_subtree records inner2 on
+        // page 1. The slice path would record it on page 0 instead.
+        let inner2_geom = geom
+            .get(&inner2_id)
+            .expect("div#inner2 must be in geometry");
+        assert_eq!(
+            inner2_geom.fragments[0].page_index, 1,
+            "recursion path must place inner2 on page 1; slice path would give page 0; \
+             geom={geom:?}"
+        );
         let after_geom = geom.get(&after_id).expect("div#after must be in geometry");
         assert_eq!(after_geom.fragments.len(), 1);
         assert_eq!(
