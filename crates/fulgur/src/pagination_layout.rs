@@ -6961,4 +6961,116 @@ h2 { string-set: chapter-title content(text); }
              implied_page_count must be 2 (pages 0 and 1); geom={geom:?}"
         );
     }
+
+    // ── break-inside: avoid (lines 718-720, 732-733) ─────────────────────────
+
+    /// A body-direct element with `break-inside: avoid` must set `avoid_inside`
+    /// and take the `Vec::new()` branch (lines 718-733), suppressing the inline
+    /// split path so the element is treated as an atomic block.
+    #[test]
+    fn break_inside_avoid_suppresses_inline_split() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <p style="break-inside: avoid">first paragraph</p>
+              <p style="break-inside: avoid">second paragraph</p>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        assert_eq!(
+            super::implied_page_count(&geom),
+            1,
+            "two short avoid-inside paragraphs on an 800px page must land on page 0; \
+             geom={geom:?}"
+        );
+    }
+
+    // ── break-after: page after recursive split (lines 876-882) ──────────────
+
+    /// A body-direct element with `break-after: page` that triggers the
+    /// recursion path (children overflow the page) must advance the page cursor
+    /// *after* the subtree is processed, so the following sibling lands two
+    /// pages after where the recursion started (lines 876-882).
+    #[test]
+    fn break_after_page_advances_after_recursive_split() {
+        // 600px page; outer div (break-after: page) has two 400px children —
+        // total 800px overflows the page, so `needs_recursion = true`.
+        // fragment_block_subtree leaves page=1, cursor=400.
+        // break-after fires: page=2, cursor=0.
+        // Trailing 100px sibling must land on page 2.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="break-after: page">
+                <div style="height: 400px"></div>
+                <div style="height: 400px"></div>
+              </div>
+              <div id="after" style="height: 100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let after_id = find_by_id(doc.deref_mut(), "after").expect("div#after");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 600.0_f32.as_px(), &table);
+        let after_geom = geom.get(&after_id).expect("div#after must be in geometry");
+        assert_eq!(after_geom.fragments.len(), 1);
+        assert_eq!(
+            after_geom.fragments[0].page_index, 2,
+            "break-after: page after recursive split must push sibling to page 2; \
+             geom={geom:?}"
+        );
+    }
+
+    // ── break-after: page after oversized slice (lines 1059-1065) ────────────
+
+    /// A body-direct element taller than the page (slice path) with
+    /// `break-after: page` must advance the page cursor after the last slice
+    /// so the following sibling lands on a fresh page (lines 1059-1065).
+    #[test]
+    fn break_after_page_advances_after_oversized_slice() {
+        // 800px page; childless 900px div is sliced: first slice on page 0
+        // (800px), second slice on page 1 (100px), cursor=100.
+        // break-after fires: page=2, cursor=0.
+        // Trailing 100px sibling must land on page 2.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="break-after: page; height: 900px"></div>
+              <div id="after" style="height: 100px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let after_id = find_by_id(doc.deref_mut(), "after").expect("div#after");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 800.0_f32.as_px(), &table);
+        let after_geom = geom.get(&after_id).expect("div#after must be in geometry");
+        assert_eq!(after_geom.fragments.len(), 1);
+        assert_eq!(
+            after_geom.fragments[0].page_index, 2,
+            "break-after: page after slice must push sibling to page 2; geom={geom:?}"
+        );
+    }
+
+    // ── zero page height guard (line 412) ─────────────────────────────────────
+
+    /// `fragment_pagination_root` must return 0 immediately and leave the
+    /// geometry table empty when `page_height_px` is zero (line 412 guard).
+    /// `run_pass_with_break_styles` short-circuits before calling
+    /// `fragment_pagination_root`, so this test exercises the guard directly.
+    #[test]
+    fn zero_page_height_guard_returns_empty() {
+        let mut doc = parse(
+            "<html><body><div style=\"height: 100px\"></div></body></html>",
+            600.0,
+        );
+        let mut tree = PaginationLayoutTree::new(doc.deref_mut(), 0.0);
+        let emitted = tree.fragment_pagination_root();
+        assert_eq!(
+            emitted, 0,
+            "zero page height must trigger the early-return guard"
+        );
+        assert!(
+            tree.take_geometry().is_empty(),
+            "zero page height must leave geometry table empty"
+        );
+    }
 }
