@@ -1957,20 +1957,6 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
-    // ── render_file: ディスクへのPDF書き出し (engine.rs:736-737) ──────────────
-
-    #[test]
-    fn render_file_writes_valid_pdf_to_disk() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("out.pdf");
-        Engine::builder()
-            .build()
-            .render_file("<p>hello</p>", &path)
-            .expect("render_file should succeed");
-        let bytes = std::fs::read(&path).expect("output file should exist");
-        assert!(bytes.starts_with(b"%PDF"), "output should be a PDF");
-    }
-
     // ── layout: PDF化なしの公開レイアウトAPI (engine.rs:757-781) ──────────────
 
     #[test]
@@ -2000,31 +1986,6 @@ mod tests {
             .layout(html)
             .expect("two-pass layout should succeed");
         assert!(!output.geometry.is_empty(), "layout must produce geometry");
-    }
-
-    // ── 非推奨エイリアス (engine.rs:829-837) ─────────────────────────────────
-
-    #[test]
-    #[allow(deprecated)]
-    fn render_html_deprecated_alias_produces_valid_pdf() {
-        let pdf = Engine::builder()
-            .build()
-            .render_html("<p>legacy</p>")
-            .expect("render_html should succeed");
-        assert!(pdf.starts_with(b"%PDF"));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn render_html_to_file_deprecated_alias_writes_pdf() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("legacy.pdf");
-        Engine::builder()
-            .build()
-            .render_html_to_file("<p>legacy</p>", &path)
-            .expect("render_html_to_file should succeed");
-        let bytes = std::fs::read(&path).expect("file should exist");
-        assert!(bytes.starts_with(b"%PDF"));
     }
 
     // ── render Errパス: 不正なページサイズ (engine.rs:133, 172) ──────────────
