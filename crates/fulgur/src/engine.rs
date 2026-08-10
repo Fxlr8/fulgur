@@ -1956,4 +1956,139 @@ mod tests {
             .unwrap();
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // ── layout: PDF化なしの公開レイアウトAPI (engine.rs:757-781) ──────────────
+
+    #[test]
+    fn layout_returns_non_empty_output() {
+        let output = Engine::builder()
+            .build()
+            .layout("<p>hello world</p>")
+            .expect("layout should succeed");
+        assert!(
+            !output.drawables.is_empty() || !output.geometry.is_empty(),
+            "layout should produce drawables or geometry for a non-empty document"
+        );
+    }
+
+    #[test]
+    fn layout_two_pass_with_target_text() {
+        // target-text() triggers needs_pass_two, exercising the two-pass branch
+        // inside layout() (engine.rs:762-773).
+        let html = r##"<!doctype html><html><head><style>
+          .ref::after { content: target-text(attr(href), before); }
+        </style></head><body>
+          <p><a class="ref" href="#sec"></a></p>
+          <h2 id="sec">Section</h2>
+        </body></html>"##;
+        let output = Engine::builder()
+            .build()
+            .layout(html)
+            .expect("two-pass layout should succeed");
+        assert!(!output.geometry.is_empty(), "layout must produce geometry");
+    }
+
+    // ── render Errパス: 不正なページサイズ (engine.rs:133, 172) ──────────────
+
+    #[test]
+    fn render_returns_err_on_zero_page_width() {
+        let result = Engine::builder()
+            .page_size(PageSize {
+                width: 0.0,
+                height: 841.89,
+            })
+            .build()
+            .render("<p>test</p>");
+        assert!(result.is_err(), "zero-width page must produce an error");
+    }
+
+    #[test]
+    fn render_returns_err_on_nan_page_height() {
+        let result = Engine::builder()
+            .page_size(PageSize {
+                width: 595.28,
+                height: f32::NAN,
+            })
+            .build()
+            .render("<p>test</p>");
+        assert!(result.is_err(), "NaN page height must produce an error");
+    }
+
+    // ── Builder: base_path + assetsでset_base_urlが呼ばれる (engine.rs:1361) ─
+
+    #[test]
+    fn builder_with_assets_and_base_path_renders_successfully() {
+        let bundle = crate::AssetBundle::default();
+        let pdf = Engine::builder()
+            .assets(bundle)
+            .base_path(std::env::temp_dir())
+            .build()
+            .render("<p>hello</p>")
+            .expect("render with base_path + assets should succeed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── スナップショット記録: string-set + bookmarks (engine.rs:348-349) ──────
+
+    #[test]
+    fn render_with_string_set_and_bookmarks_enabled() {
+        // bookmarks(true) + string-set CSS の組み合わせで record_string_snapshots=true
+        // になり、StringSetPassがスナップショット記録付きで実行される (engine.rs:349)。
+        let mut assets = AssetBundle::new();
+        assets.add_css(
+            "h1 { string-set: chap content(text); }\
+             @page { @top-center { content: string(chap); } }",
+        );
+        let html = "<body><h1>Chapter One</h1><p>Body text.</p></body>";
+        let pdf = Engine::builder()
+            .assets(assets)
+            .bookmarks(true)
+            .build()
+            .render(html)
+            .expect("string-set + bookmarks render should succeed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── スナップショット記録: counter + bookmarks (engine.rs:376) ─────────────
+
+    #[test]
+    fn render_with_counter_css_and_bookmarks_enabled() {
+        // bookmarks(true) で record_counter_snapshots=true になり、
+        // CounterPassがスナップショット記録付きで実行される (engine.rs:376)。
+        let mut assets = AssetBundle::new();
+        assets.add_css(
+            "body { counter-reset: section; }\
+             h2::before { counter-increment: section; content: counter(section) \". \"; }",
+        );
+        let html = "<body><h2>Section A</h2><h2>Section B</h2></body>";
+        let pdf = Engine::builder()
+            .assets(assets)
+            .bookmarks(true)
+            .build()
+            .render(html)
+            .expect("counter + bookmarks render should succeed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── (true, true) matchケース: bookmarks AND target-refs同時有効 (engine.rs:427) ─
+
+    #[test]
+    fn render_with_bookmarks_and_target_refs_simultaneously() {
+        // bookmarks=true かつ target-counter() で has_target_refs=true になり、
+        // match (bookmark_active, target_refs_active) の (true, true) アームを通る
+        // (engine.rs:427)。
+        let mut assets = AssetBundle::new();
+        assets.add_css("@page { @bottom-center { content: target-counter(attr(href), page); } }");
+        let html = "<body>\
+            <p><a href=\"#sec\">go to section</a></p>\
+            <h2 id=\"sec\">Section</h2>\
+            </body>";
+        let pdf = Engine::builder()
+            .assets(assets)
+            .bookmarks(true)
+            .build()
+            .render(html)
+            .expect("bookmarks + target-refs render should succeed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
