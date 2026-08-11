@@ -2262,4 +2262,167 @@ mod tests {
         // A `+` with no preceding compound (current.parts empty) is invalid.
         assert!(parse_selector_list("+div").is_empty());
     }
+
+    // -------- parse_color: error paths --------
+
+    #[test]
+    fn parse_color_invalid_hash_drops_declaration() {
+        // `#xyz` is tokenised as IDHash("xyz") but parse_hash_color rejects it
+        // because 'x', 'y', 'z' are not valid hex digits. The failing map_err
+        // arm inside the IDHash | Hash branch fires and drops the declaration.
+        let props = parse_declaration_block("column-rule-color: #xyz;");
+        assert!(
+            props.rule.is_none(),
+            "invalid hash must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_color_unknown_function_drops_declaration() {
+        // An unrecognised CSS function (not rgb/rgba/hsl/hsla) hits the
+        // `_ => return Err(err())` arm in `parse_color`'s function branch.
+        let props = parse_declaration_block("column-rule-color: env(--foo);");
+        assert!(
+            props.rule.is_none(),
+            "unknown function must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_color_bare_number_drops_declaration() {
+        // A plain number is not a valid `<color>` — it hits the catch-all
+        // `_ => Err(err())` arm in `parse_color`.
+        let props = parse_declaration_block("column-rule-color: 42;");
+        assert!(
+            props.rule.is_none(),
+            "bare number must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_color_string_token_drops_declaration() {
+        // A CSS string literal is not a valid `<color>` — same catch-all arm.
+        let props = parse_declaration_block("column-rule-color: \"red\";");
+        assert!(
+            props.rule.is_none(),
+            "string literal must drop the declaration"
+        );
+    }
+
+    // -------- parse_rgb_channel / parse_rgb_args: error paths --------
+
+    #[test]
+    fn parse_rgb_ident_channel_drops_declaration() {
+        // `rgb(red, 0, 0)` — first channel is an ident, not a Number/Percentage.
+        // parse_rgb_channel hits its `_ => Err(...)` arm; parse_rgb_args
+        // propagates via `?`; the nested-block error propagates to parse_color.
+        let props = parse_declaration_block("column-rule-color: rgb(red, 0, 0);");
+        assert!(
+            props.rule.is_none(),
+            "ident channel must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_rgb_no_comma_between_channels_drops_declaration() {
+        // Space-separated `rgb(r g b)` (CSS Color 4 syntax) is not supported
+        // by this parser; missing comma triggers `input.expect_comma()? Err`.
+        let props = parse_declaration_block("column-rule-color: rgb(255 0 0);");
+        assert!(
+            props.rule.is_none(),
+            "space-separated rgb must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_rgb_extra_tokens_after_alpha_drops_declaration() {
+        // `rgb(255, 0, 0, 1, extra)` — after parsing alpha the input is not
+        // exhausted; `input.expect_exhausted()?` fires and the declaration drops.
+        let props = parse_declaration_block("column-rule-color: rgb(255, 0, 0, 1, 0);");
+        assert!(
+            props.rule.is_none(),
+            "trailing tokens after alpha must drop the declaration"
+        );
+    }
+
+    // -------- parse_alpha_value: error path --------
+
+    #[test]
+    fn parse_rgba_ident_alpha_drops_declaration() {
+        // `rgba(0, 0, 0, red)` — the alpha slot is an Ident, not a
+        // Number/Percentage. parse_alpha_value hits its `_ => Err(...)` arm.
+        let props = parse_declaration_block("column-rule-color: rgba(0, 0, 0, red);");
+        assert!(
+            props.rule.is_none(),
+            "ident alpha in rgba must drop the declaration"
+        );
+    }
+
+    // -------- parse_hsl_args: error paths --------
+
+    #[test]
+    fn parse_hsl_ident_hue_drops_declaration() {
+        // `hsl(red, 100%, 50%)` — hue must be a Number; an ident hits
+        // the `_ => return Err(...)` arm for the hue token.
+        let props = parse_declaration_block("column-rule-color: hsl(red, 100%, 50%);");
+        assert!(
+            props.rule.is_none(),
+            "ident hue in hsl must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_hsl_saturation_not_percentage_drops_declaration() {
+        // `hsl(120, 0.5, 50%)` — saturation is a plain number, not a
+        // Percentage. The `_ => return Err(...)` arm for saturation fires.
+        let props = parse_declaration_block("column-rule-color: hsl(120, 0.5, 50%);");
+        assert!(
+            props.rule.is_none(),
+            "number saturation in hsl must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_hsl_lightness_not_percentage_drops_declaration() {
+        // `hsl(120, 100%, 0.5)` — lightness is a plain number, not a Percentage.
+        let props = parse_declaration_block("column-rule-color: hsl(120, 100%, 0.5);");
+        assert!(
+            props.rule.is_none(),
+            "number lightness in hsl must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_hsla_ident_alpha_drops_declaration() {
+        // `hsla(120, 100%, 50%, red)` — the alpha slot is an Ident.
+        let props = parse_declaration_block("column-rule-color: hsla(120, 100%, 50%, red);");
+        assert!(
+            props.rule.is_none(),
+            "ident alpha in hsla must drop the declaration"
+        );
+    }
+
+    // -------- parse_length: error paths --------
+
+    #[test]
+    fn parse_length_ident_drops_declaration() {
+        // `auto` is an ident, not a dimension or zero-number.
+        // parse_length hits the `_ => Err(...)` catch-all arm.
+        let props = parse_declaration_block("column-rule-width: auto;");
+        assert!(
+            props.rule.is_none(),
+            "ident width must drop the declaration"
+        );
+    }
+
+    #[test]
+    fn parse_length_percentage_drops_declaration() {
+        // A percentage token also hits the `_ => Err(...)` arm — percentages
+        // require a containing-block basis not available here.
+        let props = parse_declaration_block("column-rule-width: 10%;");
+        assert!(
+            props.rule.is_none(),
+            "percentage width must drop the declaration"
+        );
+    }
 }
