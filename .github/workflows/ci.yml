@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: DavidAnson/markdownlint-cli2-action@6bf21b07787794f89a243495939cd651942aeabe # v24.1.0
+      - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
 
   scripts-release-tests:
     name: Release scripts (pytest)
@@ -245,7 +245,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: lcov
-      - uses: k1LoW/octocov-action@b3b6ee60482a667950f87553abf1df63217235d9 # v1
+      - uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1
 
   wpt:
     name: wpt / ${{ matrix.phase }}
