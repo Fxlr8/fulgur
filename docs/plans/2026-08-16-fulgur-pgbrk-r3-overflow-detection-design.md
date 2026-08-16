@@ -51,6 +51,9 @@ pub(crate) struct FragmentOverflow {
     pub page_index: u32,
     /// px by which the fragment's bottom exceeds the content strip.
     pub overshoot_px: f32,
+    /// The node has a further fragment on a later page, so this one is
+    /// a slice whose height should have been clipped to the strip.
+    pub continues_on_later_page: bool,
 }
 
 /// Every fragment whose bottom falls below the content strip, in
@@ -58,11 +61,31 @@ pub(crate) struct FragmentOverflow {
 pub(crate) fn find_overflowing_fragments(
     table: &PaginationGeometryTable,
     page_height_px: f32,
+    body_id: Option<usize>,
 ) -> Vec<FragmentOverflow>
 ```
 
 The test is `f.y + f.height > page_height_px + 0.5`, matching the epsilon
 convention already used inline in this file.
+
+### `body_id` and `continues_on_later_page`
+
+Both were added during implementation, from measurement, and neither was in the
+original sketch.
+
+**`body_id`** excludes body — the one box the fragmenter never fragments. Its
+entry records the whole document content height once, on page 0, as a
+document-level total rather than a per-page placement. Excluding it took the
+failing-test count from 60 to 23. Every *other* container is properly split (a
+wrapper spanning two pages gets one correctly clipped fragment per page), so this
+is a genuine one-off, not a carve-out for containers.
+
+**`continues_on_later_page`** separates two defect classes the raw predicate
+conflates. If an overflowing fragment is not the node's last, the node continues
+on a later page, so that fragment is a *slice* whose height should have been
+clipped — a bookkeeping bug, fixable immediately. If it is the last, the content
+genuinely had nowhere to go, and fixing it needs new fragmentation machinery.
+Both are defects; only the first was in scope here.
 
 `PaginationGeometryTable` is a `BTreeMap`, so iteration order is deterministic
 and the result needs no sort. That matters because the warn text reaches
@@ -88,23 +111,25 @@ test failures come from.
 
 ## Production behaviour
 
-At the end of `run_pass_inner`, one `tracing::warn!` per record:
+At the end of `run_pass_inner`, one `log::warn!` per record. The crate uses the
+`log` facade, not `tracing` (`asset.rs`, `blitz_adapter.rs`, `column_css.rs` all
+use `log::warn!`; `tracing` is not a dependency):
 
 ```rust
-for o in find_overflowing_fragments(&table, page_height_px) {
-    tracing::warn!(
-        node_id = o.node_id,
-        page = o.page_index,
-        overshoot_px = o.overshoot_px,
-        "fragment placed past the page content strip; content may be clipped",
+for o in find_overflowing_fragments(&table, page_height_px, body_id) {
+    log::warn!(
+        "node {}: fragment on page {} extends {:.2}px past the {:.2}px page \
+         content strip; content may be painted over the bottom margin or \
+         clipped away entirely",
+        o.node_id, o.page_index, o.overshoot_px, page_height_px,
     );
 }
 ```
 
-`tracing` writes to whatever subscriber the host installs and never touches fd 1
+`log` routes to whatever logger the host installs and never touches fd 1
 directly, satisfying CLAUDE.md's rule that `crates/fulgur` must not write to
-stdout under any circumstance. A library consumer with no subscriber gets
-silence; `fulgur-cli` already installs one.
+stdout under any circumstance. A library consumer with no logger gets silence;
+`fulgur-cli` already installs one.
 
 No public API change, no `Engine` result field, no CLI flag. Those were
 considered and deferred — see [Rejected alternatives](#rejected-alternatives).
@@ -128,21 +153,110 @@ fixtures join the `#[ignore]` convention already established by the
 `css_break3_*` block: an ignored test that fails under `--ignored` is a runnable
 statement of an open gap. No new mechanism is introduced.
 
-Known members of that set:
+One member needed more than an `#[ignore]`:
+`oversized_unbreakable_leading_leaf_at_page_top_emits_once` *asserted* that the
+overflowing output was correct — a 900px probe on a 400px page emitting one
+fragment at `y≈0` with `height=900`. Ignoring it as written would have pinned
+the defect under a new name. It is renamed to
+`..._is_sliced_per_strip` and now states the R7 target: three slices
+(400 + 400 + 100) on consecutive pages, each starting at its page top, summing to
+the box height, none extending past the strip. It keeps pinning the original
+concern — that the leading-child floor never becomes an infinite page advance —
+via the per-slice `y` assertions.
 
-- Any R1 / R2 repro, until those land.
-- `oversized_unbreakable_leading_leaf_at_page_top_emits_once` (`:7852`).
+---
 
-The second one needs more than an `#[ignore]`. It currently *asserts* that the
-overflowing output is correct — a 900px probe on a 400px page emitting one
-fragment at `y≈0` with `height=900`. Since R7 holds that the nested path should
-slice like the body-direct path (fulgur-sbw2), that test's expectations must be
-rewritten to expect slicing before being ignored. Ignoring it as-written would
-pin the defect under a new name.
+## Outcome: two defects the check found
 
-The size of the failing set is not measured here. It affects the size of the
-cleanup, not the shape of this design, and the resolution is `#[ignore]`
-regardless of the count.
+The check was expected to red-flag known gaps. It also surfaced two live
+rendering bugs that were in none of R1–R7. Both were fixed here.
+
+### Defect A: the outgoing-page height counted the splitting child in full
+
+`fragment_block_subtree`'s fulgur-oc51 block computed the parent's
+outgoing-page fragment as:
+
+```rust
+let logical_height = (pre_recursion_cursor_y + child_h - page_start_y).max(0.0);
+let prev_height = logical_height.max((page_height_px - page_start_y).max(0.0));
+```
+
+`logical_height` counts the *splitting* child at its full unfragmented height on
+the page it is leaving, though only the first slice landed there. For a parent
+starting mid-page (`page_start_y=200`, `child_h=400`, 400px page) it yields
+`h=400` at `y=200` — a fragment bottom of 600.
+
+That is not cosmetic. `render.rs:2793` feeds `frag.height` straight into
+`draw_background` / `draw_box_shadows` / border painting whenever `is_split()`,
+so the surplus painted the container's decorations through the bottom margin and
+over any running footer — precisely the failure `render.rs`'s own comment says
+the code exists to prevent.
+
+The fix is `prev_height = (page_height_px - page_start_y).max(0.0)`. The
+block's own comment already established the premise: the parent's content
+reached the page bottom, or the recursion would not have advanced past that
+page. Corroboration that this was a defect rather than a deliberate trade-off:
+the inline-root twin of this bookkeeping (`:2251`) already computed it exactly
+that way. The two sites simply disagreed.
+
+The superseded comment cited fixtures `mo-006/008` as expecting "margin-area
+paint". Those are not tests in this repo — they appear only in comments — so the
+claim could not be exercised. VRT is byte-identical with and without the change
+(see below), so nothing observable depended on it.
+
+**Result: 23 failing tests → 12.**
+
+### Defect B: parent slice heights carried a trailing margin past the page bottom
+
+The parent's `cursor_y` legitimately sits past the page bottom: it carries the
+trailing margin of the last child placed on the page. In the multicol fixture the
+last paragraph occupies `362..394` on a 400px strip, but `cursor_y` reaches 408
+— its ~13px bottom margin — and every parent push used
+`height: cursor_y - page_start_y` verbatim.
+
+css-break-3 §5.2 truncates margins adjoining an unforced break to zero, and a
+container's fragment can never legitimately paint below the page bottom. Both
+point to the same fix — a shared helper applied at all nine parent push sites:
+
+```rust
+fn parent_slice_height(cursor_y: f32, page_start_y: f32, page_height_px: f32) -> f32 {
+    let strip = (page_height_px - page_start_y).max(0.0);
+    (cursor_y - page_start_y).clamp(0.0, strip)
+}
+```
+
+This clamps the *container* only. A child that genuinely does not fit keeps its
+overflowing fragment, so unbreakable-content defects stay visible to
+`find_overflowing_fragments` rather than being masked.
+
+**Result: 12 failing tests → 11, and the CLIP-BUG class is fully eliminated.**
+
+### What remains: the NO-ROOM class
+
+All 11 remaining failures are content with nowhere to go, in two groups, now
+`#[ignore]`d with the gap each is blocked on:
+
+- **flex / grid (7 tests)** — flex and grid items are not class A break points
+  (§4.1), so fulgur co-splits rows in place and a row taller than the strip
+  overflows. Needs internal fragmentation of flex/grid rows.
+- **monolithic (4 tests)** — content taller than the fragmentainer emitted whole,
+  including `overflow: hidden` boxes. §4.1 permits overflow, but fulgur already
+  slices in the body-direct path, so this is the R7 asymmetry.
+
+### Final numbers
+
+| Check | Baseline | After |
+| --- | --- | --- |
+| `cargo test -p fulgur --lib` | 2027 passed / 0 failed / 4 ignored | 2029 passed / 0 failed / 15 ignored |
+| `cargo test -p fulgur-vrt` | 29 of 64 differ | 29 of 64 differ, byte-identical |
+
+The 13 new tests offset the 11 moved to `#[ignore]`.
+
+VRT was verified by the stash / re-run / diff protocol: the failing fixture list
+matches exactly, including byte sizes. That also means **no VRT fixture exercises
+a mid-page container split**, so neither fix is covered visually — the lib tests
+are the only regression barrier. A VRT fixture for a wrapper with a visible
+background splitting mid-page would be worth adding.
 
 ---
 
