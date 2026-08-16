@@ -6496,3 +6496,85 @@ fn render_unaffected_by_at_page_only_margin_without_builder_override() {
         .expect("no builder override means Config::validate must not reject @page-only CSS");
     assert!(!pdf.is_empty());
 }
+
+/// fulgur-pgbrk: end-to-end guard for the page-fragmentation defects
+/// reported against 0.40.0 (FULGUR_PAGINATION_BUG.md).
+///
+/// Two shapes used to destroy content, both because `fragment_block_subtree`
+/// had exactly one break opportunity — immediately before a child that has a
+/// placed preceding sibling:
+///
+/// 1. a block that must break but is the FIRST in-flow child of its parent
+///    was never broken at all (the break was not propagated to the parent's
+///    leading edge), and
+/// 2. a multi-line paragraph nested inside a recursed subtree was never split
+///    at line boundaries the way a body-direct one is.
+///
+/// Either way the content was laid out past the content area, through the
+/// bottom page margin and off the paper, where it is silently discarded —
+/// exit code 0, no diagnostic, a whole page of text gone from the middle of
+/// the document.
+///
+/// The filler height is swept because the original loss was *non-monotonic*:
+/// words vanished at some filler heights and were all present again a few
+/// pixels later, so a single-height check proves nothing.
+///
+/// ## Why this test hard-requires poppler
+///
+/// Most `extract_pdf_text` callers here skip when `pdftotext` is missing.
+/// This one must not, and it cannot fall back to `fulgur::inspect` either:
+/// the lost glyphs ARE still emitted into the content stream, just painted
+/// outside the page box, so `inspect` (which parses the raw stream) counts
+/// them and reports byte-identical output for a broken and a correct render.
+/// Only a MediaBox-respecting extractor sees the difference. Measured on the
+/// unfixed code: `inspect` reports 3614 glyphs either way, while `pdftotext`
+/// finds 147 of 300 probe words gone. A silent skip here would therefore be
+/// a green test that asserts nothing about the defect it exists to catch.
+///
+/// A lib-side test is required on top of the VRT reftests because the
+/// coverage job excludes `fulgur-vrt` (CLAUDE.md).
+#[test]
+fn leading_child_that_must_break_does_not_lose_content() {
+    const N: usize = 300;
+    let words: String = (0..N).map(|i| format!("W{i:04} ")).collect();
+
+    // 1190x1690px page with a 190/80px vertical margin leaves a 1420px
+    // content strip, so a filler at/near 1420px lands the probe's first
+    // line exactly on the page boundary — the reported trigger geometry.
+    for filler in [0u32, 1200, 1380, 1400, 1410, 1415, 1420, 1425, 1430] {
+        let html = format!(
+            r#"<!DOCTYPE html>
+<style>
+  @page {{ size: 1190px 1690px; margin: 190px 40px 80px 40px; }}
+  body {{ margin: 0; font-size: 20px; line-height: 1.4; }}
+</style>
+<body>
+  <div style="height:{filler}px"></div>
+  <div>HEAD<div><p>{words}</p><p>TAIL</p></div></div>
+</body>"#
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        assert!(!pdf.is_empty());
+
+        let text = extract_pdf_text(&pdf).expect(
+            "this test needs `pdftotext` (poppler-utils) — it is the only extractor that \
+             respects the page box, and skipping would make it assert nothing about the \
+             content loss it guards. CI preinstalls poppler-utils; on macOS: brew install poppler",
+        );
+        let missing: Vec<String> = (0..N)
+            .map(|i| format!("W{i:04}"))
+            .filter(|w| !text.contains(w.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "filler={filler}px: {} of {N} probe words are absent from the PDF — content \
+             laid out past the page edge is being discarded; first missing: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(8)]
+        );
+        assert!(
+            text.contains("TAIL"),
+            "filler={filler}px: the trailing sibling must survive too"
+        );
+    }
+}
