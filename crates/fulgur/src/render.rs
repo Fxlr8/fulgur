@@ -1106,7 +1106,7 @@ pub(crate) fn dispatch_fragment(
             x_pt,
             y_pt,
             frag,
-            &geom.fragments,
+            geom,
             page_index,
             is_split,
             drawables,
@@ -1165,7 +1165,7 @@ pub(crate) fn dispatch_fragment(
                 x_pt,
                 y_pt,
                 frag,
-                &geom.fragments,
+                geom,
                 page_index,
                 is_split,
                 drawables,
@@ -1227,7 +1227,7 @@ pub(crate) fn dispatch_fragment(
             para,
             x_pt,
             y_pt,
-            &geom.fragments,
+            geom,
             page_index,
             is_split,
             drawables,
@@ -1907,7 +1907,14 @@ fn draw_under_clip(
         // replaced image / svg) paints at the content-box top-left,
         // not the border-box. Mirrors `draw_block_with_inner_content`.
         let inner_x = x_pt + inner_inset.0;
-        let inner_y = y_pt + inner_inset.1;
+        // fulgur-pgbrk R1: continuation fragments carry no leading
+        // decoration (`box-decoration-break: slice`).
+        let inner_y = y_pt
+            + if fragment_is_continuation(geom, frag) {
+                0.0
+            } else {
+                inner_inset.1
+            };
         if let Some(p) = para_for_block {
             let run_tag_node_id = run_tag_target(drawables, node_id);
             let use_run_tagging = canvas.tag_collector.is_some()
@@ -1924,7 +1931,7 @@ fn draw_under_clip(
                 p,
                 inner_x,
                 inner_y,
-                &geom.fragments,
+                geom,
                 page_index,
                 is_split,
                 drawables,
@@ -2281,7 +2288,14 @@ fn draw_under_opacity(
             }
             let inner_inset = block.style.content_inset();
             let inner_x = x_pt + inner_inset.0;
-            let inner_y = y_pt + inner_inset.1;
+            // fulgur-pgbrk R1: continuation fragments carry no leading
+            // decoration (`box-decoration-break: slice`).
+            let inner_y = y_pt
+                + if fragment_is_continuation(geom, frag) {
+                    0.0
+                } else {
+                    inner_inset.1
+                };
             if let Some(p) = para_for_block {
                 let run_tag_node_id = run_tag_target(drawables, node_id);
                 let use_run_tagging = canvas.tag_collector.is_some()
@@ -2298,7 +2312,7 @@ fn draw_under_opacity(
                     p,
                     inner_x,
                     inner_y,
-                    &geom.fragments,
+                    geom,
                     page_index,
                     is_split,
                     drawables,
@@ -3128,7 +3142,7 @@ fn draw_block_with_inner_content(
     x: f32,
     y: f32,
     frag: &crate::pagination_layout::Fragment,
-    fragments: &[crate::pagination_layout::Fragment],
+    geom: &crate::pagination_layout::PaginationGeometry,
     page_index: u32,
     is_split: bool,
     drawables: &Drawables,
@@ -3148,7 +3162,13 @@ fn draw_block_with_inner_content(
     // BlockStyle and add it before recursing.
     let (ix, iy) = block.style.content_inset();
     let inner_x = x + ix;
-    let inner_y = y + iy;
+    // fulgur-pgbrk R1: continuation fragments carry no leading
+    // decoration (`box-decoration-break: slice`).
+    let inner_y = y + if fragment_is_continuation(geom, frag) {
+        0.0
+    } else {
+        iy
+    };
 
     draw_with_opacity(canvas, block.opacity, |canvas| {
         draw_block_inner_paint(canvas, block, x, y, frag, is_split);
@@ -3158,7 +3178,7 @@ fn draw_block_with_inner_content(
                 p,
                 inner_x,
                 inner_y,
-                fragments,
+                geom,
                 page_index,
                 is_split,
                 drawables,
@@ -3199,7 +3219,7 @@ fn draw_list_item_with_block(
     x: f32,
     y: f32,
     frag: &crate::pagination_layout::Fragment,
-    fragments: &[crate::pagination_layout::Fragment],
+    geom: &crate::pagination_layout::PaginationGeometry,
     page_index: u32,
     is_split: bool,
     drawables: &Drawables,
@@ -3215,7 +3235,13 @@ fn draw_list_item_with_block(
     // paint at the body block's content-box top-left.
     let inset = block.map(|b| b.style.content_inset()).unwrap_or((0.0, 0.0));
     let inner_x = x + inset.0;
-    let inner_y = y + inset.1;
+    // fulgur-pgbrk R1: continuation fragments carry no leading
+    // decoration (`box-decoration-break: slice`).
+    let inner_y = y + if fragment_is_continuation(geom, frag) {
+        0.0
+    } else {
+        inset.1
+    };
 
     draw_with_opacity(canvas, list_item.opacity, |canvas| {
         if list_item.visible {
@@ -3240,7 +3266,7 @@ fn draw_list_item_with_block(
                 p,
                 inner_x,
                 inner_y,
-                fragments,
+                geom,
                 page_index,
                 is_split,
                 drawables,
@@ -3343,7 +3369,7 @@ fn draw_paragraph_v2(
     entry: &crate::drawables::ParagraphEntry,
     x: f32,
     y: f32,
-    fragments: &[crate::pagination_layout::Fragment],
+    geom: &crate::pagination_layout::PaginationGeometry,
     page_index: u32,
     is_split: bool,
     drawables: &Drawables,
@@ -3358,7 +3384,7 @@ fn draw_paragraph_v2(
             entry,
             x,
             y,
-            fragments,
+            geom,
             page_index,
             is_split,
             drawables,
@@ -3380,7 +3406,7 @@ fn draw_paragraph_inner_paint(
     entry: &crate::drawables::ParagraphEntry,
     x: f32,
     y: f32,
-    fragments: &[crate::pagination_layout::Fragment],
+    geom: &crate::pagination_layout::PaginationGeometry,
     page_index: u32,
     is_split: bool,
     drawables: &Drawables,
@@ -3391,8 +3417,7 @@ fn draw_paragraph_inner_paint(
     if !entry.visible {
         return;
     }
-    let Some(slice) = paragraph_lines_for_page(&entry.lines, fragments, page_index, is_split)
-    else {
+    let Some(slice) = paragraph_lines_for_page(&entry.lines, geom, page_index, is_split) else {
         return;
     };
     // PR 8g: build an InlineBoxRenderCtx so `draw_shaped_lines` can
@@ -3412,6 +3437,32 @@ fn draw_paragraph_inner_paint(
     crate::paragraph::draw_shaped_lines(canvas, &slice, x.as_pt(), y.as_pt(), inline_box_ctx);
 }
 
+/// fulgur-pgbrk R1: whether `frag` is a *continuation* of a split node
+/// rather than the fragment carrying its leading edge.
+///
+/// `box-decoration-break: slice` (CSS Fragmentation 3 §5.4, the initial
+/// value) puts the box's `border-top` / `padding-top` on the first
+/// fragment only. Inner content (an inline-root paragraph or a replaced
+/// image / svg sharing the block's `node_id`) is drawn at the
+/// content-box top-left, so re-adding `content_inset()` on a
+/// continuation page would push every line down by `padding-top` again
+/// — measured before this fix as a padded paragraph starting at the
+/// *identical* y on page 1 and page 2.
+///
+/// `is_split()` is the right gate: it is `false` for per-page
+/// repetition (`is_repeat`), where every fragment carries the full
+/// content and therefore its own leading edge.
+fn fragment_is_continuation(
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+) -> bool {
+    geom.is_split()
+        && geom
+            .fragments
+            .first()
+            .is_some_and(|f| f.page_index != frag.page_index)
+}
+
 /// Phase 4 PR 3 follow-up (PR #302 Devin): mirror
 /// `ParagraphRender::slice_for_page` so multi-page paragraphs only
 /// emit the lines belonging to the requested page.
@@ -3424,22 +3475,43 @@ fn draw_paragraph_inner_paint(
 /// `true` triggers the cumulative-height slicing logic.
 fn paragraph_lines_for_page(
     all_lines: &[crate::paragraph::ShapedLine],
-    fragments: &[crate::pagination_layout::Fragment],
+    geom: &crate::pagination_layout::PaginationGeometry,
     page_index: u32,
     is_split: bool,
 ) -> Option<Vec<crate::paragraph::ShapedLine>> {
+    let fragments = &geom.fragments;
     let target_pos = fragments.iter().position(|f| f.page_index == page_index)?;
 
     if !is_split {
         return Some(all_lines.to_vec());
     }
 
-    let target_h = fragments[target_pos].height.in_pt();
+    // fulgur-pgbrk R1: fragment heights describe the BORDER box — the
+    // first carries `content_lead_in`, the last `content_lead_out`
+    // (`box-decoration-break: slice`). This partition is over line
+    // boxes (`ShapedLine::height`), so strip the decoration back out
+    // before accumulating, or every page after the first starts its
+    // slice `lead_in` too late and rebases its baselines by that much.
+    let lead_in = geom.content_lead_in.in_pt();
+    let lead_out = geom.content_lead_out.in_pt();
+    let last_pos = fragments.len() - 1;
+    let lines_only = |pos: usize, f: &crate::pagination_layout::Fragment| {
+        let mut h = f.height.in_pt();
+        if pos == 0 {
+            h -= lead_in;
+        }
+        if pos == last_pos {
+            h -= lead_out;
+        }
+        h.max(crate::units::Pt::ZERO)
+    };
+
+    let target_h = lines_only(target_pos, &fragments[target_pos]);
     let consumed: crate::units::Pt = fragments[..target_pos]
         .iter()
-        .map(|f| f.height)
-        .sum::<crate::units::Px>()
-        .in_pt();
+        .enumerate()
+        .map(|(pos, f)| lines_only(pos, f))
+        .sum();
 
     let eps = 0.01_f32.as_pt();
     let mut line_top = crate::units::Pt::ZERO;
@@ -4927,6 +4999,17 @@ mod tests {
         }
     }
 
+    /// Undecorated geometry (`content_lead_in` / `content_lead_out` both
+    /// zero) — the shape every non-padded inline root produces.
+    fn make_geom(
+        fragments: Vec<crate::pagination_layout::Fragment>,
+    ) -> crate::pagination_layout::PaginationGeometry {
+        crate::pagination_layout::PaginationGeometry {
+            fragments,
+            ..Default::default()
+        }
+    }
+
     fn make_line(height_pt: f32, baseline_pt: f32) -> crate::paragraph::ShapedLine {
         crate::paragraph::ShapedLine {
             height: height_pt.as_pt(),
@@ -4935,12 +5018,90 @@ mod tests {
         }
     }
 
+    /// fulgur-pgbrk R1: fragment heights describe the border box, but
+    /// this partition is over line boxes. A padded paragraph must slice
+    /// to exactly the same line sets as its unpadded twin — otherwise
+    /// the decoration is counted as if it were text and the wrong lines
+    /// land on each page.
+    #[test]
+    fn paragraph_lines_for_page_partitions_a_padded_paragraph_like_an_unpadded_one() {
+        // 4 lines of 16px (12pt each). Unpadded: 2 lines per page.
+        let lines = || {
+            vec![
+                make_line(12.0, 9.0),
+                make_line(12.0, 21.0),
+                make_line(12.0, 33.0),
+                make_line(12.0, 45.0),
+            ]
+        };
+        let plain = make_geom(vec![make_fragment(0, 32.0), make_fragment(1, 32.0)]);
+        // Same paragraph with 20px lead-in and 10px lead-out folded into
+        // the first and last fragments.
+        let padded = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![make_fragment(0, 52.0), make_fragment(1, 42.0)],
+            is_repeat: false,
+            content_lead_in: 20.0_f32.as_px(),
+            content_lead_out: 10.0_f32.as_px(),
+        };
+
+        for page in [0, 1] {
+            let a = paragraph_lines_for_page(&lines(), &plain, page, true).expect("plain");
+            let b = paragraph_lines_for_page(&lines(), &padded, page, true).expect("padded");
+            assert_eq!(
+                a.len(),
+                b.len(),
+                "page {page}: padded paragraph must slice to the same line count"
+            );
+            for (la, lb) in a.iter().zip(b.iter()) {
+                assert!(
+                    (la.baseline - lb.baseline).abs() < 0.01_f32.as_pt(),
+                    "page {page}: baselines must rebase identically; {:?} vs {:?}",
+                    la.baseline,
+                    lb.baseline
+                );
+            }
+        }
+    }
+
+    /// fulgur-pgbrk R1 + css-break-3 §5.4: the block's content-box inset
+    /// is re-applied on the fragment carrying the leading edge, and only
+    /// there. Before this fix a padded paragraph started at the same y
+    /// on page 1 and page 2, pushing continuation lines `padding-top`
+    /// too low.
+    #[test]
+    fn only_the_leading_fragment_carries_the_content_inset() {
+        let split = make_geom(vec![make_fragment(0, 32.0), make_fragment(1, 32.0)]);
+        assert!(
+            !fragment_is_continuation(&split, &split.fragments[0]),
+            "the first fragment carries the leading edge"
+        );
+        assert!(
+            fragment_is_continuation(&split, &split.fragments[1]),
+            "later fragments must not re-apply padding-top"
+        );
+
+        let single = make_geom(vec![make_fragment(0, 32.0)]);
+        assert!(!fragment_is_continuation(&single, &single.fragments[0]));
+
+        // Per-page repetition: every fragment is a full redraw and so
+        // carries its own leading edge.
+        let repeated = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![make_fragment(0, 32.0), make_fragment(1, 32.0)],
+            is_repeat: true,
+            ..Default::default()
+        };
+        assert!(
+            !fragment_is_continuation(&repeated, &repeated.fragments[1]),
+            "is_repeat fragments each carry the full box"
+        );
+    }
+
     #[test]
     fn paragraph_lines_for_page_no_matching_fragment_returns_none() {
         let lines = vec![make_line(16.0, 12.0)];
         let fragments = vec![make_fragment(0, 16.0)];
         // Ask for page 1, which has no fragment.
-        let result = paragraph_lines_for_page(&lines, &fragments, 1, false);
+        let result = paragraph_lines_for_page(&lines, &make_geom(fragments), 1, false);
         assert!(result.is_none());
     }
 
@@ -4954,7 +5115,7 @@ mod tests {
             make_line(16.0, 44.0),
         ];
         let fragments = vec![make_fragment(0, 64.0)];
-        let result = paragraph_lines_for_page(&lines, &fragments, 0, false);
+        let result = paragraph_lines_for_page(&lines, &make_geom(fragments), 0, false);
         assert!(result.is_some());
         let sliced = result.unwrap();
         assert_eq!(sliced.len(), 3);
@@ -4974,7 +5135,7 @@ mod tests {
             make_fragment(0, 16.0), // 16px = 12pt → first line
             make_fragment(1, 16.0),
         ];
-        let result = paragraph_lines_for_page(&lines, &fragments, 0, true);
+        let result = paragraph_lines_for_page(&lines, &make_geom(fragments), 0, true);
         assert!(result.is_some());
         let sliced = result.unwrap();
         assert_eq!(sliced.len(), 1, "page 0 should contain exactly one line");
@@ -4993,7 +5154,7 @@ mod tests {
             make_fragment(0, 16.0), // 16px = 12pt → first line
             make_fragment(1, 16.0),
         ];
-        let result = paragraph_lines_for_page(&lines, &fragments, 1, true);
+        let result = paragraph_lines_for_page(&lines, &make_geom(fragments), 1, true);
         assert!(result.is_some());
         let sliced = result.unwrap();
         assert_eq!(sliced.len(), 1, "page 1 should contain exactly one line");
@@ -5011,7 +5172,7 @@ mod tests {
             make_fragment(0, 100.0), // page 0 gets the line
             make_fragment(1, 0.0),   // page 1 has zero height
         ];
-        let result = paragraph_lines_for_page(&lines, &fragments, 1, true);
+        let result = paragraph_lines_for_page(&lines, &make_geom(fragments), 1, true);
         assert!(result.is_none());
     }
 
@@ -5559,7 +5720,7 @@ mod tests {
             make_fragment(0, 16.0), // 16px → 12pt
             make_fragment(1, 16.0),
         ];
-        let result = paragraph_lines_for_page(&[line0, line1], &fragments, 1, true);
+        let result = paragraph_lines_for_page(&[line0, line1], &make_geom(fragments), 1, true);
         assert!(result.is_some(), "page 1 should yield Some");
         let sliced = result.unwrap();
         assert_eq!(sliced.len(), 1, "one line on page 1");

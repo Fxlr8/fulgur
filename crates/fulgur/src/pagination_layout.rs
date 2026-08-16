@@ -105,10 +105,30 @@ pub struct Fragment {
 /// is a complete redraw at the same coordinates. Used by
 /// [`append_position_fixed_fragments`] for `position: fixed` elements
 /// that repeat on every page.
+///
+/// # Inline-root decoration (fulgur-pgbrk R1)
+///
+/// `content_lead_in` / `content_lead_out` are non-zero only for an
+/// inline root that the fragmenter split at line boundaries. Parley's
+/// line metrics are **content-box relative** (the first line's
+/// `min_coord` is `0.0` even under a `150px` `padding-top`), so the
+/// fragmenter has to fold the box's own decoration back in to describe
+/// the border box. Following `box-decoration-break: slice`
+/// (CSS Fragmentation 3 §5.4, the initial value), `content_lead_in` is
+/// carried by the **first** fragment only and `content_lead_out` by the
+/// **last** — which is why they live here and not on [`Fragment`].
+///
+/// Consumers that partition *line boxes* by accumulating `frag.height`
+/// (`render::paragraph_lines_for_page`) must subtract both back out
+/// first, since `ShapedLine::height` covers line boxes only.
 #[derive(Clone, Debug, Default)]
 pub struct PaginationGeometry {
     pub fragments: Vec<Fragment>,
     pub is_repeat: bool,
+    /// `border-top + padding-top`, included in the FIRST fragment's height.
+    pub content_lead_in: crate::units::Px,
+    /// `padding-bottom + border-bottom`, included in the LAST fragment's height.
+    pub content_lead_out: crate::units::Px,
 }
 
 impl PaginationGeometry {
@@ -886,9 +906,15 @@ impl<'a> PaginationLayoutTree<'a> {
             // the page edge where it is discarded, so an unfulfillable
             // `avoid` must fall back to line-level splitting.
             let all_line_metrics = collect_inline_line_metrics(child);
-            let avoid_is_fulfillable = match (all_line_metrics.first(), all_line_metrics.last()) {
-                (Some(first), Some(last)) => last.1 - first.0 <= self.page_height_px,
-                _ => true,
+            // fulgur-pgbrk R1: measure the BORDER box. Parley's metrics
+            // are content-box relative, so `last.1 - first.0` omits the
+            // box's own padding / border and under-reports it.
+            let (lead_in, lines_h, lead_out) = inline_root_box_metrics(child, &all_line_metrics);
+            let box_total_h = lead_in + lines_h + lead_out;
+            let avoid_is_fulfillable = if all_line_metrics.is_empty() {
+                true
+            } else {
+                box_total_h <= self.page_height_px
             };
             let line_metrics = if avoid_inside && avoid_is_fulfillable {
                 Vec::new()
@@ -904,11 +930,9 @@ impl<'a> PaginationLayoutTree<'a> {
                 // the child" fallback (CSS Fragmentation §4.2, class A
                 // break point) taken when the inline split path can't
                 // honour widow / orphan constraints within the strip.
-                let para_total_h = line_metrics
-                    .last()
-                    .map(|l| l.1 - line_metrics[0].0)
-                    .unwrap_or(child_h);
-                if cursor_y > 0.0 && cursor_y + para_total_h > self.page_height_px {
+                // fulgur-pgbrk R1: the push-whole test measures the
+                // border box (decoration included), not the line boxes.
+                if cursor_y > 0.0 && cursor_y + box_total_h > self.page_height_px {
                     page_index += 1;
                     cursor_y = 0.0;
                 }
@@ -922,6 +946,8 @@ impl<'a> PaginationLayoutTree<'a> {
                     page_index,
                     self.page_height_px,
                     &line_metrics,
+                    lead_in,
+                    lead_out,
                 );
                 page_index = new_page_index;
                 cursor_y = new_cursor_y;
@@ -2206,9 +2232,14 @@ fn fragment_block_subtree(
             Some(crate::draw_primitives::BreakInside::Avoid)
         );
         let all_line_metrics = collect_inline_line_metrics(child);
-        let avoid_is_fulfillable = match (all_line_metrics.first(), all_line_metrics.last()) {
-            (Some(first), Some(last)) => last.1 - first.0 <= page_height_px,
-            _ => true,
+        // fulgur-pgbrk R1: border-box measurement, mirroring the
+        // body-direct branch. See `inline_root_box_metrics`.
+        let (lead_in, lines_h, lead_out) = inline_root_box_metrics(child, &all_line_metrics);
+        let box_total_h = lead_in + lines_h + lead_out;
+        let avoid_is_fulfillable = if all_line_metrics.is_empty() {
+            true
+        } else {
+            box_total_h <= page_height_px
         };
         let line_metrics = if avoid_inside && avoid_is_fulfillable {
             Vec::new()
@@ -2216,10 +2247,6 @@ fn fragment_block_subtree(
             all_line_metrics
         };
         if line_metrics.len() > 1 {
-            let para_total_h = line_metrics
-                .last()
-                .map(|l| l.1 - line_metrics[0].0)
-                .unwrap_or(child_h);
             // Push the whole paragraph to the next page when it would
             // overflow the current strip and there is a strip to push it
             // to. Same `> 0.0` leading-edge propagation as the block
@@ -2229,8 +2256,7 @@ fn fragment_block_subtree(
             } else {
                 page_start_y
             };
-            if child_page_y > inline_overflow_floor && child_page_y + para_total_h > page_height_px
-            {
+            if child_page_y > inline_overflow_floor && child_page_y + box_total_h > page_height_px {
                 if cursor_y > page_start_y {
                     let should_emit = row_state
                         .as_mut()
@@ -2268,6 +2294,8 @@ fn fragment_block_subtree(
                 page_index,
                 page_height_px,
                 &line_metrics,
+                lead_in,
+                lead_out,
             );
             // The paragraph filled every page it crossed, so the parent
             // spans those pages too. Mirror the recursion branch's
@@ -2758,6 +2786,40 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// Border-box metrics for an inline root (fulgur-pgbrk R1).
+///
+/// Returns `(lead_in, lines_h, lead_out)`, all in CSS px:
+///
+/// - `lead_in` — `border-top + padding-top`, the decoration above the
+///   first line box.
+/// - `lines_h` — the line-box extent, `last.max_coord - first.min_coord`.
+/// - `lead_out` — `padding-bottom + border-bottom`, below the last line box.
+///
+/// The two decoration edges must come from Taffy, not from the line
+/// metrics: Parley lays an inline root out in **content-box** coordinates,
+/// so a `<p>` with `border-top: 7px; padding: 150px 0 90px` reports
+/// `line_metrics[0].0 == 0.0` while `final_layout` reports
+/// `border.top = 7`, `padding.top = 150`, `padding.bottom = 90`. Measuring
+/// the box as `last.1 - first.0` therefore under-reports it by
+/// `lead_in + lead_out` — the R1 defect: the push-whole decision never
+/// fires, and the tail runs off the paper.
+///
+/// Non-finite Taffy values are sanitized to `0.0` — same convention as
+/// the child-height sanitization in `fragment_block_subtree`.
+fn inline_root_box_metrics(node: &blitz_dom::Node, line_metrics: &[(f32, f32)]) -> (f32, f32, f32) {
+    fn finite(v: f32) -> f32 {
+        if v.is_finite() { v.max(0.0) } else { 0.0 }
+    }
+    let layout = &node.final_layout;
+    let lead_in = finite(layout.border.top) + finite(layout.padding.top);
+    let lead_out = finite(layout.padding.bottom) + finite(layout.border.bottom);
+    let lines_h = match (line_metrics.first(), line_metrics.last()) {
+        (Some(first), Some(last)) => (last.1 - first.0).max(0.0),
+        _ => 0.0,
+    };
+    (lead_in, lines_h, lead_out)
+}
+
 /// fulgur-p55h: split a multi-line inline root across page boundaries
 /// at line edges, append one Fragment per page span to the geometry
 /// table, and return the updated `(page_index, cursor_y, fragments_emitted)`.
@@ -2796,6 +2858,13 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// Edge case: if the very first line on a fresh page is taller than
 /// the page strip, the line is emitted as an oversized fragment (no
 /// further mid-line split) — same fallback as the block branch.
+///
+/// fulgur-pgbrk R1: `lead_in` / `lead_out` are the box's own decoration
+/// (see [`inline_root_box_metrics`]). Emitted fragments describe the
+/// **border box**, so `lead_in` is added to the first fragment and
+/// `lead_out` to the last, per `box-decoration-break: slice`
+/// (CSS Fragmentation 3 §5.4). Both are recorded on the geometry entry
+/// so line-partitioning consumers can subtract them back out.
 #[allow(clippy::too_many_arguments)]
 fn fragment_inline_root(
     geometry: &mut PaginationGeometryTable,
@@ -2806,6 +2875,8 @@ fn fragment_inline_root(
     initial_page_index: u32,
     page_height_px: f32,
     line_metrics: &[(f32, f32)],
+    lead_in: f32,
+    lead_out: f32,
 ) -> (u32, f32, usize) {
     /// CSS 3 Fragmentation default for `orphans`.
     const ORPHANS_MIN: usize = 2;
@@ -2824,7 +2895,16 @@ fn fragment_inline_root(
 
     for (i, &(_line_top_local, line_bottom_local)) in line_metrics.iter().enumerate() {
         let frag_top_local = line_metrics[fragment_start_idx].0;
-        let projected_bottom_in_body = paragraph_top_in_body + (line_bottom_local - frag_top_local);
+        // Only the first fragment carries the leading decoration
+        // (`box-decoration-break: slice`), so only it starts its lines
+        // `lead_in` below its own top edge.
+        let frag_lead_in = if fragment_start_idx == 0 {
+            lead_in
+        } else {
+            0.0
+        };
+        let projected_bottom_in_body =
+            paragraph_top_in_body + frag_lead_in + (line_bottom_local - frag_top_local);
 
         if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
             // fulgur-s67g Phase 2.1: honour widow / orphan minimums.
@@ -2846,7 +2926,7 @@ fn fragment_inline_root(
             // Emit them as one fragment, advance to the next page, and
             // start the next fragment at line i.
             let prev_line_bottom = line_metrics[i - 1].1;
-            let frag_h = prev_line_bottom - frag_top_local;
+            let frag_h = frag_lead_in + (prev_line_bottom - frag_top_local);
             let frag = Fragment {
                 page_index,
                 x: paragraph_x.as_px(),
@@ -2863,10 +2943,16 @@ fn fragment_inline_root(
         }
     }
 
-    // Final fragment covers lines [fragment_start_idx, end).
+    // Final fragment covers lines [fragment_start_idx, end), plus the
+    // box's trailing decoration (`box-decoration-break: slice`).
     let frag_top_local = line_metrics[fragment_start_idx].0;
     let last_bottom_local = line_metrics.last().expect("non-empty checked above").1;
-    let frag_h = last_bottom_local - frag_top_local;
+    let frag_lead_in = if fragment_start_idx == 0 {
+        lead_in
+    } else {
+        0.0
+    };
+    let frag_h = frag_lead_in + (last_bottom_local - frag_top_local) + lead_out;
     let frag = Fragment {
         page_index,
         x: paragraph_x.as_px(),
@@ -2874,7 +2960,10 @@ fn fragment_inline_root(
         width: width.as_px(),
         height: frag_h.as_px(),
     };
-    geometry.entry(child_id).or_default().fragments.push(frag);
+    let entry = geometry.entry(child_id).or_default();
+    entry.fragments.push(frag);
+    entry.content_lead_in = lead_in.as_px();
+    entry.content_lead_out = lead_out.as_px();
     emitted += 1;
 
     let cursor_y = paragraph_top_in_body + frag_h;
@@ -6528,7 +6617,7 @@ h2 { string-set: chapter-title content(text); }
         let (new_page, new_cursor, emitted) = super::fragment_inline_root(
             &mut geom, /*child_id=*/ 1, /*paragraph_x=*/ 0.0, /*width=*/ 100.0,
             /*initial_cursor_y=*/ 0.0, /*initial_page_index=*/ 0,
-            /*page_height_px=*/ 200.0, &lines,
+            /*page_height_px=*/ 200.0, &lines, /*lead_in=*/ 0.0, /*lead_out=*/ 0.0,
         );
         assert_eq!(emitted, 1, "widow violation → single oversized fragment");
         assert_eq!(new_page, 0);
@@ -6552,7 +6641,7 @@ h2 { string-set: chapter-title content(text); }
         // first_size = 2 ≥ orphans, remaining_size = 2 ≥ widows. Split OK.
         let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0), (225.0, 300.0)];
         let (new_page, new_cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 200.0, &lines);
+            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 200.0, &lines, 0.0, 0.0);
         assert_eq!(emitted, 2, "valid split → 2 fragments");
         assert_eq!(new_page, 1);
         let frags = &geom.get(&1).unwrap().fragments;
@@ -6579,13 +6668,137 @@ h2 { string-set: chapter-title content(text); }
         // first_size = 1 < orphans=2. Don't split.
         let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0)];
         let (new_page, _new_cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 100.0, &lines);
+            super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 100.0, &lines, 0.0, 0.0);
         assert_eq!(emitted, 1, "orphan violation → single oversized fragment");
         assert_eq!(new_page, 0);
         let frags = &geom.get(&1).unwrap().fragments;
         assert_eq!(frags.len(), 1);
         assert_eq!(frags[0].page_index, 0);
         assert!((frags[0].height.to_f32() - 225.0).abs() < 0.01);
+    }
+
+    /// fulgur-pgbrk R1: an unsplit inline root's single fragment covers
+    /// the whole border box — both decoration edges included.
+    #[test]
+    fn inline_root_single_fragment_carries_both_decoration_edges() {
+        let mut geom = PaginationGeometryTable::new();
+        let lines = vec![(0.0, 75.0), (75.0, 150.0)];
+        let (_page, cursor, emitted) = super::fragment_inline_root(
+            &mut geom, 1, 0.0, 100.0, 0.0, 0, 500.0, &lines, /*lead_in=*/ 20.0,
+            /*lead_out=*/ 10.0,
+        );
+        assert_eq!(emitted, 1);
+        let frags = &geom.get(&1).unwrap().fragments;
+        assert!(
+            (frags[0].height.to_f32() - 180.0).abs() < 0.01,
+            "lead_in 20 + lines 150 + lead_out 10 = 180; got {:?}",
+            frags[0].height
+        );
+        assert!(
+            (cursor - 180.0).abs() < 0.01,
+            "cursor must advance past the trailing decoration, got {cursor}"
+        );
+    }
+
+    /// fulgur-pgbrk R1 + css-break-3 §5.4 (`box-decoration-break: slice`):
+    /// across a split, the leading decoration belongs to the first
+    /// fragment and the trailing decoration to the last — never both to
+    /// both, and never to the middle.
+    #[test]
+    fn inline_root_split_slices_decoration_between_first_and_last_fragment() {
+        let mut geom = PaginationGeometryTable::new();
+        // Lines 75px; bottoms at 75, 150, 225, 300. Strip 200.
+        // With lead_in=20 the first two lines project to 170 (fits) and
+        // the third to 245 (overflows) → split after line 1.
+        let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0), (225.0, 300.0)];
+        let (page, cursor, emitted) = super::fragment_inline_root(
+            &mut geom, 1, 0.0, 100.0, 0.0, 0, 200.0, &lines, /*lead_in=*/ 20.0,
+            /*lead_out=*/ 10.0,
+        );
+        assert_eq!(emitted, 2);
+        assert_eq!(page, 1);
+        let entry = geom.get(&1).unwrap();
+        let frags = &entry.fragments;
+        assert!(
+            (frags[0].height.to_f32() - 170.0).abs() < 0.01,
+            "first fragment = lead_in 20 + 2 lines 150, no lead_out; got {:?}",
+            frags[0].height
+        );
+        assert!(
+            (frags[1].height.to_f32() - 160.0).abs() < 0.01,
+            "last fragment = 2 lines 150 + lead_out 10, no lead_in; got {:?}",
+            frags[1].height
+        );
+        assert!((cursor - 160.0).abs() < 0.01, "got {cursor}");
+        // Neither fragment may leave the strip — the whole point of
+        // measuring the border box.
+        for f in frags {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 200.5,
+                "fragment escapes the 200px strip: {f:?}"
+            );
+        }
+        // The leads are published so `render::paragraph_lines_for_page`
+        // can subtract them back out before partitioning line boxes.
+        assert!((entry.content_lead_in.to_f32() - 20.0).abs() < 0.01);
+        assert!((entry.content_lead_out.to_f32() - 10.0).abs() < 0.01);
+    }
+
+    /// fulgur-pgbrk R1: the whole point — a paragraph whose *decoration*
+    /// is what pushes it past the strip must break, not overflow.
+    ///
+    /// Reproduces the downstream bug report's padded shape: a `<p>` with
+    /// `padding: 150px 0` nested two `<div>`s deep, whose line boxes
+    /// alone fit the remaining strip but whose border box does not.
+    /// Before the fix the geometry recorded `y=100, height=160` for a
+    /// 460px-tall box, the overflow check never fired, and the tail was
+    /// painted off the paper and discarded.
+    #[test]
+    fn padded_inline_root_breaks_on_its_border_box_not_its_line_boxes() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:100px"></div>
+              <div><div>
+                <p id="probe" style="margin:0;padding:150px 0;line-height:20px;font-size:14px">
+                  alpha bravo charlie delta echo foxtrot golf hotel india
+                  juliett kilo lima mike november oscar papa quebec romeo
+                  sierra tango uniform victor whiskey xray yankee zulu
+                </p>
+              </div></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = run_pass(doc.deref_mut(), 400.0);
+        let entry = table.get(&probe).expect("probe geometry");
+
+        assert!(
+            (entry.content_lead_in.to_f32() - 150.0).abs() < 0.01,
+            "padding-top must be read from Taffy — Parley's line metrics are \
+             content-box relative and report 0.0 here; got {:?}",
+            entry.content_lead_in
+        );
+        assert!(
+            (entry.content_lead_out.to_f32() - 150.0).abs() < 0.01,
+            "got {:?}",
+            entry.content_lead_out
+        );
+        assert_eq!(
+            entry.fragments.first().map(|f| f.page_index),
+            Some(1),
+            "the box is 460px tall on a 400px strip starting at y=100, so it \
+             must move to a fresh page rather than overflow; frags={:?}",
+            entry.fragments
+        );
+        // The blanket R3 guard in `run_pass_inner` is blind to this shape
+        // until the fragment describes the border box, so assert it here
+        // explicitly as well.
+        for f in &entry.fragments {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "fragment escapes the 400px strip: {f:?}"
+            );
+        }
     }
 
     #[test]
@@ -8517,7 +8730,7 @@ h2 { string-set: chapter-title content(text); }
         // splitting anyway rather than emitting a 225px fragment on a
         // 200px strip.
         let lines = vec![(0.0, 75.0), (75.0, 150.0), (150.0, 225.0)];
-        super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 200.0, &lines);
+        super::fragment_inline_root(&mut geom, 1, 0.0, 100.0, 0.0, 0, 200.0, &lines, 0.0, 0.0);
         for f in &geom.get(&1).unwrap().fragments {
             assert!(
                 f.y.to_f32() + f.height.to_f32() <= 200.5,

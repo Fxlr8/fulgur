@@ -38,12 +38,19 @@ this shape.
 
 **3. The recorded fragment is anchored and measured from different edges.**
 `fragment_inline_root` writes `y = cursor` — the border-box top — but
-`height = last_bottom_local - frag_top_local`. Parley's line coordinates are
-already border-box relative (`line_metrics[0].0` is the leading
-`border-top + padding-top`), so subtracting `frag_top_local` discards exactly
-that lead-in. `padding-bottom` was never in the line metrics to begin with. The
-review's measurement — a `460px` box recorded as `y=100, height=160` — is this
-subtraction plus the missing trailing edge.
+`height = last_bottom_local - frag_top_local`, which covers line boxes only.
+Parley lays an inline root out in **content-box** coordinates, so neither edge
+of the box's decoration appears in its metrics. Probed directly on a `<p>` with
+`border-top: 7px; padding: 150px 0 90px`:
+
+```text
+final_layout: border.top=7  padding.top=150  padding.bottom=90  size.height=287
+line_metrics: [(0.0, 20.0), (20.0, 40.0)]        <- first min_coord is 0.0
+recorded:     Fragment { y: 0, height: 40 }      <- 287px box, 40px fragment
+```
+
+The review's measurement — a `460px` box recorded as `y=100, height=160` — is
+the same shape.
 
 **4. Continuation pages re-apply `padding-top`.** A padded paragraph forced to
 split by lines paints its first line at `yMin=84.375pt` on page 1 **and on page
@@ -51,11 +58,13 @@ split by lines paints its first line at `yMin=84.375pt` on page 1 **and on page
 The same render puts page 1's last line at `yMax=364.875pt` — `27.375pt` past
 the strip — so the split path overshoots even when it works.
 
-Symptoms 1, 2 and 4 are one root cause: the fragment height is short by
-`lead_in + lead_out`. Symptom 4 in particular is not an independent paint-side
-bug. `paragraph_lines_for_page` derives `consumed` from prior fragment heights,
-so a first fragment short by `lead_in` displaces every later page's baselines by
-that same amount.
+Symptoms 1 and 2 are one root cause: the fragment height is short by
+`lead_in + lead_out`. Symptom 4 is a second, independent site —
+`render.rs:3149` adds `block.style.content_inset()` to the inner content's
+origin on **every** fragment, so a continuation page re-applies `padding-top`.
+That inset is also where the paint offset in symptom 2 comes from: the
+fragmenter chooses a split in line space, and the painter then shifts the lines
+down by `lead_in`, which is why the split overshoots by exactly that much.
 
 ### Why the R3 guard is blind to this
 
@@ -85,16 +94,14 @@ The reverse reconciliation — moving the painter into line space — was reject
 backgrounds, borders and shadows genuinely need the border box, so it relocates
 the discrepancy rather than removing it.
 
-`lead_in` is read from `line_metrics[0].0`, which already carries it.
-`lead_out` has to come from Taffy (`final_layout.padding.bottom +
-final_layout.border.bottom`), because Parley's metrics stop at the last line
-box.
+Both edges come from Taffy — `final_layout.border` / `final_layout.padding`.
+Parley contributes only `lines_h`.
 
-> **Verify at implementation time:** that `line_metrics[0].0` equals
-> `border-top + padding-top` for a padded inline root. The paint measurements
-> above imply it, but they do not isolate it from the first line's ascent. If it
-> turns out not to hold, read both edges from Taffy instead — the rest of the
-> design is unchanged.
+> **Resolved during implementation.** An earlier revision of this document had
+> `lead_in` coming from `line_metrics[0].0`, on the theory that Parley's
+> coordinates were border-box relative. The probe above disproves it:
+> `line_metrics[0].0` is `0.0` under a `150px` `padding-top`. Both edges are
+> read from Taffy instead; nothing else in the design changed.
 
 ### Where the two values live
 
@@ -160,10 +167,17 @@ off the last. Its parameter changes from `fragments: &[Fragment]` to
 `&PaginationGeometry` rather than threading two more `f32`s through its six
 call sites.
 
-No other render change is needed. Symptom 4 resolves through `consumed`, and
-background/border painting already reads `frag.height` only when `is_split()`
-(`:1821`, `:2249`), falling back to `layout_size.height` otherwise — so
-single-fragment paragraphs are unaffected by the height change.
+Symptom 4 needs a second render edit: a `fragment_is_continuation(geom, frag)`
+predicate, applied at all four sites that add `content_inset()` to inner
+content (`draw_block_with_inner_content`, `draw_list_item_with_block`, and the
+transform and overflow-clip variants). A continuation fragment gets no vertical
+inset. `is_split()` is the right gate — it is `false` for `is_repeat`
+geometry, where each fragment is a full redraw and does carry its own leading
+edge.
+
+Background/border painting needs no change: it already reads `frag.height` only
+when `is_split()` (`:1821`, `:2249`), falling back to `layout_size.height`
+otherwise, so single-fragment paragraphs are unaffected by the height change.
 
 ---
 
@@ -185,24 +199,50 @@ Per CLAUDE.md's coverage rule, the fragmenter logic is lib-level and belongs in
 - A padded variant in `render_smoke.rs` alongside
   `leading_child_that_must_break_does_not_lose_content`.
 
-VRT is expected to move for any fixture containing a padded or bordered
-paragraph that splits across pages. Verify with the stash / re-run / diff
-protocol from the R3 design (compare the failing fixture list *including byte
-sizes*); do not regenerate goldens on macOS, where 29 of 64 differ for
-unrelated environment reasons.
+VRT was expected to move for any fixture containing a padded or bordered
+paragraph that splits across pages. It did not: the stash / re-run / diff
+protocol from the R3 design reports the same 29 of 64 fixtures with the same
+byte sizes, with and without this change. As with the R3 fixes, **no VRT
+fixture exercises this shape**, so the lib and `render_smoke` tests are the
+only regression barrier. Do not regenerate goldens on macOS, where those 29
+differ for unrelated environment reasons.
+
+## Outcome
+
+| Check | Before | After |
+| --- | --- | --- |
+| 120-word padded repro (downstream shape) | 110 / 120 words, 1 page, exit 0 | 120 / 120 words, 2 pages |
+| padded split paragraph, page 1 last line | `yMax=364.875pt` (strip ends `337.5`) | `yMax=334.875pt` |
+| padded split paragraph, page 2 first line | `yMin=84.375pt` (= page 1, `clone`) | `yMin=39.375pt` (`slice`) |
+| `cargo test -p fulgur --lib` | 2029 passed / 15 ignored | 2034 passed / 15 ignored |
+| `cargo test -p fulgur --test render_smoke` | 214 passed | 215 passed |
+| `cargo test -p fulgur` (all targets) | — | 2481 passed / 0 failed / 17 ignored |
+| `cargo test -p fulgur-vrt` | 29 of 64 differ | 29 of 64 differ, byte-identical |
+
+The `39.375pt` figure is the predicted one: `84.375 - 45`, where `45pt` is the
+fixture's `60px` `padding-top`.
+
+`padded_leading_child_that_must_break_does_not_lose_content` was confirmed to
+fail without the fix (13 of 30 probe words absent at `filler=1300px`) before
+being accepted. A first draft of it passed both with and without the fix — it
+reused the 300-word probe from its unpadded sibling, which is page-tall and
+therefore takes the line-splitting path instead of the under-measured
+push-whole path. The probe has to be **short**: its line boxes must fit the
+remaining strip while its border box does not.
 
 ---
 
 ## Out of scope
 
-**`fulgur-cli` installs no logger.** `crates/fulgur-cli/Cargo.toml` depends on
-`fulgur`, `clap`, `serde_json` and `which` — there is no `log` implementation,
-so every `log::warn!` in the library is dropped. That includes R3's overflow
-warning and the pre-existing warnings in `asset.rs`, `blitz_adapter.rs` and
-`column_css.rs`. The R3 design assumed otherwise ("`fulgur-cli` already installs
-one"), which makes the production half of R3 inert for CLI users — the exact
-audience that filed the original bug report. Tracked as a separate commit on
-this branch.
+**`fulgur-cli` installs no logger.** `crates/fulgur-cli/Cargo.toml` depended on
+`fulgur`, `clap`, `serde_json` and `which` — no `log` implementation, so every
+`log::warn!` in the library was dropped. That included R3's overflow warning and
+the pre-existing warnings in `asset.rs`, `blitz_adapter.rs` and `column_css.rs`.
+The R3 design assumed otherwise ("`fulgur-cli` already installs one"), which made
+the production half of R3 inert for CLI users — the exact audience that filed the
+original bug report. Fixed in a separate commit on this branch with a ~30-line
+stderr logger honouring `RUST_LOG` (default `warn`), rather than pulling in
+`env_logger`.
 
 **R2 / R6** (widow relaxation, author `orphans` / `widows` values) follow R1 and
 share `fragment_inline_root`'s signature. Landing R1 first means that signature

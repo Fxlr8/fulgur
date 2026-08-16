@@ -1627,6 +1627,7 @@ mod tests {
                 crate::pagination_layout::PaginationGeometry {
                     fragments: vec![frag_on_page(page_index)],
                     is_repeat: false,
+                    ..Default::default()
                 },
             );
         }
@@ -1744,6 +1745,7 @@ mod tests {
             crate::pagination_layout::PaginationGeometry {
                 fragments: vec![frag_on_page(2)],
                 is_repeat: false,
+                ..Default::default()
             },
         );
         let map = build_implicit_href_map(&doc, &geometry);

@@ -6578,3 +6578,71 @@ fn leading_child_that_must_break_does_not_lose_content() {
         );
     }
 }
+
+/// fulgur-pgbrk R1: the same sweep with the probe paragraph carrying its
+/// own `padding`, which the fragmenter used to exclude from every break
+/// decision.
+///
+/// Parley lays an inline root out in content-box coordinates, so the
+/// paragraph's `padding` / `border` appear nowhere in its line metrics.
+/// Measuring the box as `last_line.max_coord - first_line.min_coord`
+/// therefore under-reported it by `border+padding` top and bottom: the
+/// push-whole test never fired, and the tail ran through the bottom
+/// margin and off the paper. Measured on the unfixed code at the
+/// downstream-reported geometry: 10 of 120 probe words gone, exit 0.
+///
+/// Hard-requires poppler for the reason given on
+/// `leading_child_that_must_break_does_not_lose_content` — the lost
+/// glyphs are in the content stream either way, just painted outside the
+/// page box.
+#[test]
+fn padded_leading_child_that_must_break_does_not_lose_content() {
+    // A SHORT probe is essential. The defect needs a paragraph whose
+    // line boxes fit the remaining strip while its border box does not
+    // — a page-tall probe takes the line-splitting path instead and
+    // never exercises the under-measurement.
+    const N: usize = 30;
+    let words: String = (0..N).map(|i| format!("W{i:04} ")).collect();
+
+    // 1420px content strip. The probe's ~2 lines are ~56px; its border
+    // box adds 6px border-top + 120/90px padding = ~272px total. Sweep
+    // the filler across the band where the lines fit but the box does
+    // not (1420 - filler between those two numbers), plus controls at
+    // either end.
+    for filler in [0u32, 1160, 1200, 1250, 1300, 1350, 1430] {
+        let html = format!(
+            r#"<!DOCTYPE html>
+<style>
+  @page {{ size: 1190px 1690px; margin: 190px 40px 80px 40px; }}
+  body {{ margin: 0; font-size: 20px; line-height: 1.4; }}
+  p.padded {{ margin: 0; padding: 120px 0 90px; border-top: 6px solid #333; }}
+</style>
+<body>
+  <div style="height:{filler}px"></div>
+  <div>HEAD<div><p class="padded">{words}</p><p>TAIL</p></div></div>
+</body>"#
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        assert!(!pdf.is_empty());
+
+        let text = extract_pdf_text(&pdf).expect(
+            "this test needs `pdftotext` (poppler-utils) — see \
+             leading_child_that_must_break_does_not_lose_content for why it must not skip",
+        );
+        let missing: Vec<String> = (0..N)
+            .map(|i| format!("W{i:04}"))
+            .filter(|w| !text.contains(w.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "filler={filler}px: {} of {N} probe words are absent — the paragraph's own \
+             padding / border is being left out of the break measurement; first missing: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(8)]
+        );
+        assert!(
+            text.contains("TAIL"),
+            "filler={filler}px: the trailing sibling must survive too"
+        );
+    }
+}
