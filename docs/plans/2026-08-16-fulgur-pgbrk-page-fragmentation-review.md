@@ -137,10 +137,21 @@ an edge case.
 
 ## Remaining work
 
+> **Progress as of 2026-08-17.** R1, R2, R3 and R6 have shipped, along with the
+> Risk 1 extraction below and one defect it exposed (R8, new — see
+> [Shipped since this review](#shipped-since-this-review)). **R4, R5 and R7
+> remain.** The `--ignored` count in `pagination_layout.rs` is down from 16 to
+> 13: R4 (1), R5 (1), and R7's flex/grid (7) and monolithic (4) clusters.
+> Sections whose work has landed are kept below for the failure analysis, with
+> a status line at the top of each.
+
 Two of these still destroy content. Both have reproducible end-to-end cases
 measured against the current tree. Priority order is as listed.
 
 ### R1: paragraph padding and border are excluded from break measurement (P1, loses content)
+
+**Status: SHIPPED** (`a2e103ad`). See
+[the R1 design](./2026-08-16-fulgur-pgbrk-r1-border-box-design.md).
 
 `para_total_h` and `avoid_is_fulfillable` are computed from Parley line metrics
 (`last.1 - first.0`), which cover the line boxes only. A paragraph's own
@@ -194,6 +205,12 @@ variant.
 
 ### R2: widows/orphans restrictions are never relaxed (P1, loses content)
 
+**Status: SHIPPED** (`8c88e74d`). The scan is factored into
+`scan_split_points`, which returns a discardable plan; when the constrained
+plan escapes the fragmentainer it is re-run with the minimums dropped to
+1/1. Verified end to end: the repro below loses `LINETHREE` before the fix
+and renders all three lines across two pages after it.
+
 §4.4 rule 3 constrains where a line-level break may fall; the closing relaxation
 clause requires dropping the restrictions rather than losing content: *"the UA
 may break anywhere in order to avoid losing content off the edge."*
@@ -243,6 +260,10 @@ mechanical refactor that also makes the function unit-testable without a
 defective behaviour** and must be updated in the same change.
 
 ### R3: no diagnostic when content escapes the page box (P2)
+
+**Status: SHIPPED** (`28926fe4`, plus `a6d89aa5` for the CLI logger without
+which the warning was inert). See
+[the R3 design](./2026-08-16-fulgur-pgbrk-r3-overflow-detection-design.md).
 
 Priority 1 of the original bug report. Even after R1 and R2, §4.1 permits
 monolithic content to overflow, so silent loss remains possible for shapes not
@@ -304,6 +325,14 @@ handed up. Reuse the `RequestBreakBefore` channel from R4.
 
 ### R6: CSS `orphans` / `widows` property values are not parsed (P3)
 
+**Status: SHIPPED** (`d440a708`). Two things the sketch below did not
+anticipate. Both properties are *inherited* while `ColumnStyleTable` has no
+inheritance, so the value is resolved by an ancestor walk at the point of
+use (`resolved_line_constraints`) rather than by densifying the table. And
+honouring a large `widows` needs `scan_split_points` to back a split **up**:
+the scan only ever moved splits later, so R2's relaxation would otherwise
+fire and mask the author's value with the default answer.
+
 `ORPHANS_MIN` / `WIDOWS_MIN` (`:2652-2654`) hardcode the initial value 2. Authors
 cannot change them. Parse both into the existing break-style table
 (`extract_column_style_table`) and thread them into `fragment_inline_root`
@@ -347,8 +376,8 @@ lands.
 | §5.2 margins adjoining an unforced break truncate | `css_break3_s52_margin_adjoining_unforced_break_is_truncated` | passes |
 | §3.1.1 forced break on first child propagates to container | `css_break3_s31_forced_break_on_first_child_propagates_to_container` | ignored — R5 |
 | §4.4 rule 2: ancestor `break-inside: avoid` forbids class A break | `css_break3_s44_rule2_ancestor_break_inside_avoid_forbids_class_a_break` | ignored — R4 |
-| §4.4 relaxation: never lose lines off the edge | `css_break3_s44_widow_relaxation_prevents_lines_escaping_the_strip` | ignored — R2 |
-| §4.4 rule 3: author `orphans` / `widows` values | `css_break3_s44_rule3_author_widows_value_shifts_the_split` | ignored — R6 |
+| §4.4 relaxation: never lose lines off the edge | `css_break3_s44_widow_relaxation_prevents_lines_escaping_the_strip` | **passes** (R2) |
+| §4.4 rule 3: author `orphans` / `widows` values | `css_break3_s44_rule3_author_widows_value_shifts_the_split` | **passes** (R6) |
 
 Covered elsewhere, deliberately not duplicated:
 
@@ -360,6 +389,51 @@ Covered elsewhere, deliberately not duplicated:
   geometry table. Needs a VRT fixture, not a unit test.
 
 ---
+
+---
+
+## Shipped since this review
+
+Landed on `fix/fulgur-pgbrk-page-fragmentation` after the review was written.
+
+| Item | Commit | Note |
+| --- | --- | --- |
+| R3 page-overflow detection | `28926fe4` | plus `a6d89aa5`, the CLI stderr logger without which the warning was inert |
+| R1 border-box inline-root fragments | `a2e103ad` | |
+| Risk 1 extraction | `139666b7`, `0eef1585`, `034bed0a` | [design](./2026-08-17-fulgur-pgbrk-break-decision-extraction-design.md) / [plan](./2026-08-17-fulgur-pgbrk-break-decision-extraction-plan.md) |
+| R8 forced-break parent dedup | `1d0ea8da`, `d782ed1a` | found by the Risk 1 extraction; not in the original R1–R7 list |
+| R2 widows/orphans relaxation | `8c88e74d` | |
+| R6 author `orphans` / `widows` | `d440a708` | |
+
+### R8: forced breaks closed a flex/grid parent twice on one page
+
+Not in R1–R7 — surfaced by laying the nine parent-slice emission sites side by
+side during the Risk 1 extraction. Only the two unforced (overflow-driven) sites
+consulted `row_state.emitted_parent_pages`; the six forced `break-before` /
+`break-after: page` sites did not.
+
+Reaching it needs recursion, not merely two forced breaks: `page_index` is
+restored to the row start only when `crossed_by_recursion` is set, and a forced
+break does not set it. So it takes a first cell that crosses a page by recursion
+— closing the parent on page 0 through the deduped path — followed by a same-row
+cell whose forced break closes it again. The two fragments carried **different**
+heights (400 and 400-strip vs 60), so `render.rs` painted the container's
+background, border and shadow twice at two sizes on one page, and every
+fragment-counting walk saw a phantom third fragment.
+
+The dedup keys on "the parent is leaving this page", which a forced break
+satisfies exactly as an unforced one does, so all six now dedup. The function
+tail is deliberately excluded — it closes the parent's final fragment on a page
+it never leaves.
+
+**A note on how it was found.** The first probe written for this *passed*, and
+passed vacuously: a forced break advances the page before the next cell is
+processed, so two cells that merely both carry `break-after: page` never contend
+for one. Only after checking that the fixture actually reached the code under
+test did the real shape appear. This is the third time in this workstream a
+pagination test has passed for the wrong reason (see the R1 design's note on
+`padded_leading_child_...`, and gap 1 in the first-iteration review). **Confirm
+that a new pagination test can fail before trusting it.**
 
 ## Behaviour worth flagging to downstream
 
