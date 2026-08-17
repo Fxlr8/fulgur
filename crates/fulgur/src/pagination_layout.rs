@@ -201,6 +201,53 @@ fn parent_slice_height(cursor_y: f32, page_start_y: f32, page_height_px: f32) ->
     (cursor_y - page_start_y).clamp(0.0, strip)
 }
 
+/// Whether a child may break before itself on the current strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakDecision {
+    /// Place the child where the cursor is.
+    PlaceHere,
+    /// Close the parent on this page and place the child on the next.
+    PushToNextPage,
+}
+
+/// The single break decision, shared by the block strip-overflow cut, the
+/// nested inline-root push-whole, and the body-direct inline push-whole
+/// (fulgur-pgbrk Risk 1).
+///
+/// `floor` is the y below which a break is legal on this strip:
+///
+/// - `0.0` when an overflowing LEADING child may propagate its break up
+///   to the box's own leading edge (css-break-3 §3 — a break before a
+///   box's first child is also a break before the box). This is
+///   fulgur-pgbrk's fix; before it the gate was `page_start_y`, which a
+///   first in-flow child never exceeds, so such a child could never
+///   break and was laid out past the page bottom and discarded.
+/// - `page_start_y` inside a container that does not paginate its
+///   children independently — flex / grid (whose items are not class A
+///   break points, §4.1), atomic inline containers, orthogonal flow. See
+///   `suppress_page_check`.
+///
+/// `child_box_h` is the **border box** height (fulgur-pgbrk R1): the
+/// block path passes Taffy's `child_h`; the inline-root paths pass
+/// `lead_in + lines_h + lead_out`, because Parley's line metrics are
+/// content-box relative and omit the box's own padding and border.
+///
+/// At `child_top_on_page == floor` the answer is always `PlaceHere`: we
+/// are at the top of a fresh strip with nowhere to push to, and
+/// returning `PushToNextPage` there would advance pages forever.
+fn break_decision(
+    child_top_on_page: f32,
+    child_box_h: f32,
+    floor: f32,
+    page_height_px: f32,
+) -> BreakDecision {
+    if child_top_on_page > floor && child_top_on_page + child_box_h > page_height_px {
+        BreakDecision::PushToNextPage
+    } else {
+        BreakDecision::PlaceHere
+    }
+}
+
 /// Every fragment in `table` whose bottom edge falls below the content
 /// strip, in deterministic order (fulgur-pgbrk R3).
 ///
@@ -7907,6 +7954,69 @@ h2 { string-set: chapter-title content(text); }
         // height, which would corrupt downstream slicing.
         assert!(super::parent_slice_height(50.0, 100.0, 400.0).abs() < 0.01);
         assert!(super::parent_slice_height(100.0, 500.0, 400.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn break_decision_pushes_a_child_that_overflows_below_the_floor() {
+        // Child starts at 200 on a 400 strip and is 300 tall: bottom 500.
+        assert_eq!(
+            super::break_decision(200.0, 300.0, 0.0, 400.0),
+            super::BreakDecision::PushToNextPage
+        );
+    }
+
+    #[test]
+    fn break_decision_places_a_child_that_fits() {
+        assert_eq!(
+            super::break_decision(200.0, 100.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_floor_decides_a_leading_child() {
+        // A leading child sits exactly at its container's page start.
+        // With leading-edge propagation permitted the floor is 0, so the
+        // break is legal; with the container pinning its children the
+        // floor is page_start_y and the child stays put and overflows
+        // (fulgur-pgbrk).
+        assert_eq!(
+            super::break_decision(200.0, 300.0, 0.0, 400.0),
+            super::BreakDecision::PushToNextPage
+        );
+        assert_eq!(
+            super::break_decision(200.0, 300.0, 200.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_is_strict_at_the_floor() {
+        // `child_top > floor`, not `>=`.
+        assert_eq!(
+            super::break_decision(0.0, 500.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_places_a_child_ending_exactly_on_the_page_bottom() {
+        // `child_top + h > page_height_px`, not `>=` — a child whose
+        // bottom lands exactly on the boundary fits.
+        assert_eq!(
+            super::break_decision(100.0, 300.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+    }
+
+    #[test]
+    fn break_decision_keeps_an_oversized_child_at_the_page_top() {
+        // Nothing to push to. This is the gate that stops the
+        // leading-child floor from becoming an infinite page advance.
+        assert_eq!(
+            super::break_decision(0.0, 900.0, 0.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
     }
 
     #[test]
