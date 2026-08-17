@@ -201,6 +201,84 @@ fn parent_slice_height(cursor_y: f32, page_start_y: f32, page_height_px: f32) ->
     (cursor_y - page_start_y).clamp(0.0, strip)
 }
 
+/// The unchanging half of the "close the parent's fragment on the page
+/// it is leaving" idiom, which appears at nine sites in
+/// [`fragment_block_subtree`] (fulgur-pgbrk Risk 1).
+///
+/// Only the page and the two y values vary across those sites; the
+/// parent's identity, x and width do not, so they are captured once per
+/// call.
+///
+/// # Dedup policy
+///
+/// [`RowState::emitted_parent_pages`] exists so that N parallel flex /
+/// grid cells, each independently deciding to close the parent on the
+/// current page, emit only one parent fragment for it.
+///
+/// Today exactly two sites consult it — the unforced, overflow-driven
+/// ones — and the seven forced `break-before` / `break-after: page`
+/// sites do not. That asymmetry is a **defect**, pinned by the ignored
+/// test `forced_break_does_not_close_a_grid_parent_twice_on_one_page`
+/// (fulgur-pgbrk R8): a cell that crosses a page by recursion sets
+/// `crossed_by_recursion`, which restores a same-row sibling to the
+/// row-start page, and that sibling's forced break then closes the
+/// parent a second time on it — with a different height, so
+/// `render.rs` paints the container's decoration twice at two sizes.
+///
+/// The two methods below preserve today's behaviour exactly, so the
+/// defect stays reproducible rather than being accidentally masked.
+/// Fixing it means switching the forced sites to
+/// [`ParentSlice::close_unforced`] and un-ignoring R8 — deliberately not
+/// done in the extraction, which changes no output.
+struct ParentSlice {
+    id: usize,
+    x_in_body: f32,
+    width: f32,
+    page_height_px: f32,
+}
+
+impl ParentSlice {
+    /// Close the parent unconditionally. Used by the forced-break sites
+    /// and by the function tail. See the dedup note on the type.
+    fn close_forced(
+        &self,
+        geometry: &mut PaginationGeometryTable,
+        page_index: u32,
+        page_start_y: f32,
+        cursor_y: f32,
+    ) {
+        geometry
+            .entry(self.id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index,
+                x: self.x_in_body.as_px(),
+                y: page_start_y.as_px(),
+                width: self.width.as_px(),
+                height: parent_slice_height(cursor_y, page_start_y, self.page_height_px).as_px(),
+            });
+    }
+
+    /// Close the parent at most once per page across parallel flex /
+    /// grid cells. Used by the two overflow-driven sites.
+    fn close_unforced(
+        &self,
+        geometry: &mut PaginationGeometryTable,
+        row_state: Option<&mut RowState>,
+        page_index: u32,
+        page_start_y: f32,
+        cursor_y: f32,
+    ) {
+        let should_emit = row_state
+            .map(|rs| rs.emitted_parent_pages.insert(page_index))
+            .unwrap_or(true);
+        if should_emit {
+            self.close_forced(geometry, page_index, page_start_y, cursor_y);
+        }
+    }
+}
+
 /// Whether a child may break before itself on the current strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BreakDecision {
@@ -1962,6 +2040,15 @@ fn fragment_block_subtree(
     // thread the result into the recursion so the restriction covers the
     // entire subtree, not just the container's direct children.
     let propagate_leading_break = allow_leading_break && !suppress_page_check;
+    // fulgur-pgbrk Risk 1: the parent's identity, x and width never
+    // change across this walk, so the nine "close the parent on the page
+    // it is leaving" sites capture them once here.
+    let parent_slice = ParentSlice {
+        id: parent_id,
+        x_in_body: parent_x_in_body,
+        width: parent_w,
+        page_height_px,
+    };
 
     // fulgur-yb27: prefer `layout_children` over raw `children` —
     // same rationale as `record_subtree_descendants` and
@@ -2147,17 +2234,7 @@ fn fragment_block_subtree(
             // `continue` happens before the gap calc), so break-before
             // can fire here without first folding gap into cursor_y.
             if break_before_page && cursor_y > page_start_y {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: parent_slice_height(cursor_y, page_start_y, page_height_px).as_px(),
-                    });
+                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2183,17 +2260,7 @@ fn fragment_block_subtree(
             // too — same fulgur-p3uf (Phase 3.1.5a) fix as
             // `fragment_pagination_root`'s zero-height branch.
             if break_after_page {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: parent_slice_height(cursor_y, page_start_y, page_height_px).as_px(),
-                    });
+                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2228,17 +2295,7 @@ fn fragment_block_subtree(
         // gated by `cursor_y > page_start_y` (mirrors body-level's
         // `cursor_y > 0.0` since body's implicit page_start is 0).
         if break_before_page && cursor_y > page_start_y {
-            geometry
-                .entry(parent_id)
-                .or_default()
-                .fragments
-                .push(Fragment {
-                    page_index,
-                    x: parent_x_in_body.as_px(),
-                    y: page_start_y.as_px(),
-                    width: parent_w.as_px(),
-                    height: parent_slice_height(cursor_y, page_start_y, page_height_px).as_px(),
-                });
+            parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
@@ -2315,24 +2372,13 @@ fn fragment_block_subtree(
             ) == BreakDecision::PushToNextPage
             {
                 if cursor_y > page_start_y {
-                    let should_emit = row_state
-                        .as_mut()
-                        .map(|rs| rs.emitted_parent_pages.insert(page_index))
-                        .unwrap_or(true);
-                    if should_emit {
-                        geometry
-                            .entry(parent_id)
-                            .or_default()
-                            .fragments
-                            .push(Fragment {
-                                page_index,
-                                x: parent_x_in_body.as_px(),
-                                y: page_start_y.as_px(),
-                                width: parent_w.as_px(),
-                                height: parent_slice_height(cursor_y, page_start_y, page_height_px)
-                                    .as_px(),
-                            });
-                    }
+                    parent_slice.close_unforced(
+                        geometry,
+                        row_state.as_mut(),
+                        page_index,
+                        page_start_y,
+                        cursor_y,
+                    );
                 }
                 page_index += 1;
                 cursor_y = 0.0;
@@ -2411,17 +2457,7 @@ fn fragment_block_subtree(
             }
 
             if break_after_page {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: parent_slice_height(cursor_y, page_start_y, page_height_px).as_px(),
-                    });
+                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2623,17 +2659,7 @@ fn fragment_block_subtree(
 
             // Honour `break-after: page` after recursion.
             if break_after_page {
-                geometry
-                    .entry(parent_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: parent_x_in_body.as_px(),
-                        y: page_start_y.as_px(),
-                        width: parent_w.as_px(),
-                        height: parent_slice_height(cursor_y, page_start_y, page_height_px).as_px(),
-                    });
+                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2693,24 +2719,13 @@ fn fragment_block_subtree(
             // would additionally flip `is_split()` on and corrupt
             // downstream slicing.
             if cursor_y > page_start_y {
-                let should_emit = row_state
-                    .as_mut()
-                    .map(|rs| rs.emitted_parent_pages.insert(page_index))
-                    .unwrap_or(true);
-                if should_emit {
-                    geometry
-                        .entry(parent_id)
-                        .or_default()
-                        .fragments
-                        .push(Fragment {
-                            page_index,
-                            x: parent_x_in_body.as_px(),
-                            y: page_start_y.as_px(),
-                            width: parent_w.as_px(),
-                            height: parent_slice_height(cursor_y, page_start_y, page_height_px)
-                                .as_px(),
-                        });
-                }
+                parent_slice.close_unforced(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                    cursor_y,
+                );
             }
             page_index += 1;
             cursor_y = 0.0;
@@ -2757,17 +2772,7 @@ fn fragment_block_subtree(
         // Honour `break-after: page` after the child fragment lands
         // (and the descendant walk records same-page entries).
         if break_after_page {
-            geometry
-                .entry(parent_id)
-                .or_default()
-                .fragments
-                .push(Fragment {
-                    page_index,
-                    x: parent_x_in_body.as_px(),
-                    y: page_start_y.as_px(),
-                    width: parent_w.as_px(),
-                    height: parent_slice_height(cursor_y, page_start_y, page_height_px).as_px(),
-                });
+            parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
@@ -2804,17 +2809,7 @@ fn fragment_block_subtree(
     // `render.rs`. Height may be 0 when every child was skipped
     // (whitespace / OOF / running) — that's intentional and
     // matches `fragment_pagination_root`'s zero-height-element path.
-    geometry
-        .entry(parent_id)
-        .or_default()
-        .fragments
-        .push(Fragment {
-            page_index,
-            x: parent_x_in_body.as_px(),
-            y: page_start_y.as_px(),
-            width: parent_w.as_px(),
-            height: parent_slice_height(cursor_y, page_start_y, page_height_px).as_px(),
-        });
+    parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
 
     (page_index, cursor_y)
 }
