@@ -2189,6 +2189,41 @@ fn fragment_block_subtree(
         page_height_px,
     };
 
+    // fulgur-pgbrk R4 (css-break-3 §4.4 rule 2): breaking at a class A
+    // point is forbidden when a common ancestor of the adjoining
+    // siblings has `break-inside: avoid`. fulgur read `break-inside`
+    // only on inline roots, so a block wrapper's `avoid` was never
+    // consulted and the wrapper split between its children anyway.
+    //
+    // The box moves whole to the next page when it does not fit the
+    // strip it is standing on but WOULD fit a fresh one. If it fits
+    // neither, `avoid` is unfulfillable and §4.4's relaxation clause
+    // applies — honouring it would only push the tail off the page,
+    // so we fall through and split as before. This mirrors
+    // `avoid_is_fulfillable` on the inline-root path.
+    //
+    // `cursor_in > 0.0` excludes a box already at a page top: there is
+    // no earlier page to move to, and requesting one would bounce.
+    if cursor_in > 0.0
+        && propagate_leading_break
+        && column_styles
+            .and_then(|t| t.get(&parent_id))
+            .is_some_and(|p| {
+                matches!(
+                    p.break_inside,
+                    Some(crate::draw_primitives::BreakInside::Avoid)
+                )
+            })
+    {
+        let strip_here = (page_height_px - cursor_in).max(0.0);
+        let splits_here = would_split_block_subtree(doc, parent_id, strip_here, page_height_px, 0);
+        let splits_on_a_fresh_page =
+            would_split_block_subtree(doc, parent_id, page_height_px, page_height_px, 0);
+        if splits_here && !splits_on_a_fresh_page {
+            return SubtreeResult::RequestBreakBefore;
+        }
+    }
+
     // fulgur-yb27: prefer `layout_children` over raw `children` —
     // same rationale as `record_subtree_descendants` and
     // `fragment_pagination_root`. When a block container has mixed
@@ -9338,12 +9373,67 @@ h2 { string-set: chapter-title content(text); }
     /// `break-inside: avoid`. The wrapper must instead move whole to
     /// the next page (its own class A point).
     ///
-    /// GAP: fulgur reads `break-inside` only on inline roots; a block
-    /// wrapper's `avoid` is never consulted, so the wrapper splits
-    /// between its children. (This is the "no-op: break-inside /
-    /// page-break-inside: avoid" row in FULGUR_PAGINATION_BUG.md §1.)
+    /// fulgur-pgbrk R4, css-break-3 §4.4 relaxation: `break-inside:
+    /// avoid` is a preference, not a guarantee. A wrapper taller than a
+    /// whole page cannot be honoured by moving it — there is no page it
+    /// fits — so obeying `avoid` would only push its tail off the paper
+    /// and destroy it. The restriction is dropped and the wrapper splits.
     #[test]
-    #[ignore = "css-break-3 §4.4 rule 2: break-inside:avoid on block containers not implemented"]
+    fn block_break_inside_avoid_is_relaxed_when_the_box_exceeds_a_page() {
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div style="height:100px"></div>
+              <div id="wrap" style="break-inside:avoid">
+                <div style="height:300px"></div>
+                <div style="height:300px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let wrap = find_by_id(doc.deref_mut(), "wrap").expect("wrap");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        // 600px of content on a 400px page: no page can hold it whole.
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let g = geom.get(&wrap).expect("wrap");
+        assert!(
+            g.is_split(),
+            "an unfulfillable avoid is relaxed rather than losing the tail; frags={:?}",
+            g.fragments
+        );
+        // The load-bearing assertion. Splitting alone does not
+        // distinguish the relaxation from a broken guard: an R4 that
+        // requested a break unconditionally would push the wrapper to
+        // page 1, where `cursor_in == 0` disables the request, and it
+        // would split there instead — still split, still inside the
+        // strip. Staying on page 0 is what proves the box was never
+        // pushed, because moving it cannot help.
+        assert_eq!(
+            g.fragments.first().map(|f| f.page_index),
+            Some(0),
+            "a box that fits no page is not moved; frags={:?}",
+            g.fragments
+        );
+        for f in &g.fragments {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 400.5,
+                "no fragment escapes the strip; frags={:?}",
+                g.fragments
+            );
+        }
+    }
+
+    /// Implemented by fulgur-pgbrk R4. fulgur used to read
+    /// `break-inside` only on inline roots, so a block wrapper's `avoid`
+    /// was never consulted and the wrapper split between its children —
+    /// the "no-op: break-inside / page-break-inside: avoid" row in
+    /// FULGUR_PAGINATION_BUG.md §1.
+    ///
+    /// The wrapper now hands a `SubtreeResult::RequestBreakBefore` up
+    /// when it does not fit the strip it stands on but would fit a fresh
+    /// page. If it fits neither, `avoid` is unfulfillable and §4.4's
+    /// relaxation clause applies — see
+    /// `block_break_inside_avoid_is_relaxed_when_the_box_exceeds_a_page`.
+    #[test]
     fn css_break3_s44_rule2_ancestor_break_inside_avoid_forbids_class_a_break() {
         let html = r#"
             <html><body style="margin:0; padding:0">
