@@ -182,6 +182,58 @@ const ORPHANS_INITIAL: usize = 2;
 /// CSS 3 Fragmentation initial value for `widows`.
 const WIDOWS_INITIAL: usize = 2;
 
+/// Resolve the `orphans` / `widows` in effect at `node_id`, falling back
+/// to the CSS initial value `2` for each (fulgur-pgbrk R6).
+///
+/// Both are **inherited** properties (CSS Fragmentation 3 §4.4), but
+/// `ColumnStyleTable` is a sparse side-table with no inheritance: it
+/// records only the elements an author actually wrote a declaration on.
+/// Rather than densify the table — every descendant of a `<body>` with
+/// `widows: 3` would need an entry — inheritance is resolved here, at the
+/// one place that consumes these values, by walking up the ancestor
+/// chain for the nearest declaration.
+///
+/// The walk costs O(depth) and runs only for inline roots that actually
+/// reach the line-splitting path, so it is off the hot path for every
+/// document that sets neither property. It bails at
+/// [`crate::MAX_DOM_DEPTH`], matching `has_forced_break_below`.
+fn resolved_line_constraints(
+    doc: &BaseDocument,
+    node_id: usize,
+    column_styles: Option<&crate::column_css::ColumnStyleTable>,
+) -> (usize, usize) {
+    let Some(table) = column_styles else {
+        return (ORPHANS_INITIAL, WIDOWS_INITIAL);
+    };
+    let mut orphans: Option<u32> = None;
+    let mut widows: Option<u32> = None;
+    let mut cur = Some(node_id);
+    let mut depth = 0usize;
+    while let Some(id) = cur {
+        if depth >= crate::MAX_DOM_DEPTH {
+            break;
+        }
+        if let Some(props) = table.get(&id) {
+            // Nearest declaration wins: only fill a slot still empty.
+            if orphans.is_none() {
+                orphans = props.orphans;
+            }
+            if widows.is_none() {
+                widows = props.widows;
+            }
+            if orphans.is_some() && widows.is_some() {
+                break;
+            }
+        }
+        cur = doc.get_node(id).and_then(|n| n.parent);
+        depth += 1;
+    }
+    (
+        orphans.map_or(ORPHANS_INITIAL, |v| v as usize),
+        widows.map_or(WIDOWS_INITIAL, |v| v as usize),
+    )
+}
+
 /// Height of a container's fragment on the page it is leaving
 /// (fulgur-pgbrk R3).
 ///
@@ -1077,6 +1129,8 @@ impl<'a> PaginationLayoutTree<'a> {
                     cursor_y = 0.0;
                 }
                 let para_x = layout.location.x;
+                let (orphans, widows) =
+                    resolved_line_constraints(self.doc, child_id, self.column_styles);
                 let (new_page_index, new_cursor_y, frag_count) = fragment_inline_root(
                     &mut self.geometry,
                     child_id,
@@ -1088,8 +1142,8 @@ impl<'a> PaginationLayoutTree<'a> {
                     &line_metrics,
                     lead_in,
                     lead_out,
-                    ORPHANS_INITIAL,
-                    WIDOWS_INITIAL,
+                    orphans,
+                    widows,
                 );
                 page_index = new_page_index;
                 cursor_y = new_cursor_y;
@@ -2418,6 +2472,7 @@ fn fragment_block_subtree(
                 child_page_y = 0.0;
             }
 
+            let (orphans, widows) = resolved_line_constraints(doc, child_id, column_styles);
             let pre_inline_page = page_index;
             let (np, nc, _emitted) = fragment_inline_root(
                 geometry,
@@ -2430,8 +2485,8 @@ fn fragment_block_subtree(
                 &line_metrics,
                 lead_in,
                 lead_out,
-                ORPHANS_INITIAL,
-                WIDOWS_INITIAL,
+                orphans,
+                widows,
             );
             // The paragraph filled every page it crossed, so the parent
             // spans those pages too. Mirror the recursion branch's
@@ -3108,15 +3163,36 @@ fn scan_split_points(
         if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
             let first_size = i - fragment_start_idx;
             let remaining_size = total_lines - i;
-            if first_size < orphans || remaining_size < widows {
-                // Not a legal split point under these constraints. Keep
-                // accumulating; the caller relaxes and re-scans if the
-                // resulting plan escapes the fragmentainer.
-                continue;
-            }
 
-            // Lines [fragment_start_idx, i) fit on the current page.
-            let prev_line_bottom = line_metrics[i - 1].1;
+            // `i` is the natural split: the last line that fits. It may
+            // not be a legal one.
+            let split_at = if remaining_size < widows {
+                // The tail would be short of `widows`, and splitting
+                // LATER only makes the tail shorter — so back up to the
+                // latest split that leaves exactly `widows` lines. This
+                // is the only direction that can satisfy widows, and
+                // lines `[start, j)` are a subset of `[start, i)`, which
+                // already fits, so the earlier fragment fits too.
+                let j = total_lines.saturating_sub(widows);
+                if j > fragment_start_idx && j - fragment_start_idx >= orphans {
+                    j
+                } else {
+                    // Backing up far enough would starve `orphans`.
+                    // Both minimums cannot hold at once; keep
+                    // accumulating and let the caller relax and re-scan.
+                    continue;
+                }
+            } else if first_size < orphans {
+                // Too few lines to leave behind. Splitting earlier makes
+                // that worse and splitting later overflows, so there is
+                // no legal point here.
+                continue;
+            } else {
+                i
+            };
+
+            // Lines [fragment_start_idx, split_at) fit on the current page.
+            let prev_line_bottom = line_metrics[split_at - 1].1;
             plan.push(InlineFragmentPlan {
                 page_index,
                 y: paragraph_top_in_body,
@@ -3125,7 +3201,7 @@ fn scan_split_points(
 
             page_index += 1;
             paragraph_top_in_body = 0.0;
-            fragment_start_idx = i;
+            fragment_start_idx = split_at;
         }
     }
 
@@ -6780,6 +6856,101 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(super::implied_page_count(&geom), 3);
     }
 
+    /// fulgur-pgbrk R6: `orphans` / `widows` are inherited, but the
+    /// column-style side-table records only elements the author wrote a
+    /// declaration on, so the value is resolved by walking up.
+    #[test]
+    fn resolved_line_constraints_inherits_from_an_ancestor() {
+        let html = r#"
+            <html><body style="widows:4; orphans:3">
+              <div><p id="probe">x</p></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let (orphans, widows) =
+            super::resolved_line_constraints(doc.deref_mut(), probe, Some(&table));
+        assert_eq!((orphans, widows), (3, 4));
+    }
+
+    #[test]
+    fn resolved_line_constraints_prefers_the_nearest_declaration() {
+        let html = r#"
+            <html><body style="widows:4">
+              <div style="widows:6"><p id="probe" style="orphans:5">x</p></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let (orphans, widows) =
+            super::resolved_line_constraints(doc.deref_mut(), probe, Some(&table));
+        assert_eq!(orphans, 5, "declared on the element itself");
+        assert_eq!(widows, 6, "nearest ancestor wins over <body>");
+    }
+
+    #[test]
+    fn resolved_line_constraints_falls_back_to_the_css_initial_values() {
+        let html = r#"<html><body><p id="probe">x</p></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        assert_eq!(
+            super::resolved_line_constraints(doc.deref_mut(), probe, Some(&table)),
+            (2, 2)
+        );
+        assert_eq!(
+            super::resolved_line_constraints(doc.deref_mut(), probe, None),
+            (2, 2),
+            "no table at all still yields the initial values"
+        );
+    }
+
+    /// fulgur-pgbrk R6: the widow minimum is the one constraint that can
+    /// only be satisfied by splitting EARLIER than the natural overflow
+    /// point, so `scan_split_points` has to back up rather than skip.
+    #[test]
+    fn scan_backs_the_split_up_to_honour_a_large_widows_value() {
+        // Six 100px lines, 450px strip. The natural split is after line
+        // 4 (bottom 500 > 450), which leaves a 2-line tail. widows=4
+        // forces the split back to line 2, leaving 4 lines in the tail.
+        let lines: Vec<(f32, f32)> = (0..6)
+            .map(|i| (i as f32 * 100.0, (i + 1) as f32 * 100.0))
+            .collect();
+        let plan = super::scan_split_points(&lines, 0.0, 0, 450.0, 0.0, 0.0, 2, 4);
+        assert_eq!(plan.len(), 2, "plan={plan:?}");
+        assert!(
+            (plan[0].height - 200.0).abs() < 0.01,
+            "head keeps 2 lines; plan={plan:?}"
+        );
+        assert!(
+            (plan[1].height - 400.0).abs() < 0.01,
+            "tail keeps the 4 lines widows demands; plan={plan:?}"
+        );
+        for f in &plan {
+            assert!(f.y + f.height <= 450.5, "plan={plan:?}");
+        }
+    }
+
+    #[test]
+    fn scan_will_not_back_up_past_the_orphan_minimum() {
+        // Same six lines, but orphans=3 and widows=5 cannot both hold:
+        // leaving 5 in the tail leaves only 1 in the head. The scan
+        // refuses the split rather than violating orphans, so the plan
+        // overflows — which is exactly the signal `fragment_inline_root`
+        // uses to relax and re-scan.
+        let lines: Vec<(f32, f32)> = (0..6)
+            .map(|i| (i as f32 * 100.0, (i + 1) as f32 * 100.0))
+            .collect();
+        let plan = super::scan_split_points(&lines, 0.0, 0, 450.0, 0.0, 0.0, 3, 5);
+        assert_eq!(plan.len(), 1, "no legal split; plan={plan:?}");
+        assert!(
+            plan[0].height > 450.0,
+            "the unsplit plan overflows, triggering relaxation; plan={plan:?}"
+        );
+    }
+
     /// fulgur-pgbrk R2: a 3-line paragraph whose only natural split
     /// leaves a 1-line tail violates widows = 2, so the constrained scan
     /// finds no legal split and returns a 225px plan on a 200px strip.
@@ -9089,12 +9260,15 @@ h2 { string-set: chapter-title content(text); }
     /// specified values; fulgur hardcodes the initial value 2 for both
     /// and never reads the CSS properties.
     ///
-    /// GAP: with `widows: 4`, a 6-line paragraph on a page fitting 4
-    /// lines must split 2/4 (tail keeps 4 lines); fulgur splits 4/2
-    /// using the built-in default. `<br>`-forced lines with a fixed
+    /// Implemented by fulgur-pgbrk R6. With `widows: 4`, a 6-line
+    /// paragraph on a page fitting 4 lines splits 2/4 (the tail keeps 4
+    /// lines) rather than 4/2. `<br>`-forced lines with a fixed
     /// `line-height` make the line count and heights font-independent.
+    ///
+    /// Honouring the value needs `scan_split_points` to back the split
+    /// UP from the natural overflow point — the widow minimum is the one
+    /// constraint that can only be satisfied by splitting earlier.
     #[test]
-    #[ignore = "css-break-3 §4.4 rule 3: CSS orphans/widows property values not parsed (defaults hardcoded)"]
     fn css_break3_s44_rule3_author_widows_value_shifts_the_split() {
         let html = r#"
             <html><body style="margin:0; padding:0">
