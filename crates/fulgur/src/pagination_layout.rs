@@ -979,7 +979,11 @@ impl<'a> PaginationLayoutTree<'a> {
                 // honour widow / orphan constraints within the strip.
                 // fulgur-pgbrk R1: the push-whole test measures the
                 // border box (decoration included), not the line boxes.
-                if cursor_y > 0.0 && cursor_y + box_total_h > self.page_height_px {
+                // Body level: `page_start_y` is always 0 and leading-edge
+                // propagation is always permitted, so the floor is 0.
+                if break_decision(cursor_y, box_total_h, 0.0, self.page_height_px)
+                    == BreakDecision::PushToNextPage
+                {
                     page_index += 1;
                     cursor_y = 0.0;
                 }
@@ -2303,7 +2307,13 @@ fn fragment_block_subtree(
             } else {
                 page_start_y
             };
-            if child_page_y > inline_overflow_floor && child_page_y + box_total_h > page_height_px {
+            if break_decision(
+                child_page_y,
+                box_total_h,
+                inline_overflow_floor,
+                page_height_px,
+            ) == BreakDecision::PushToNextPage
+            {
                 if cursor_y > page_start_y {
                     let should_emit = row_state
                         .as_mut()
@@ -2672,7 +2682,9 @@ fn fragment_block_subtree(
         } else {
             page_start_y
         };
-        if child_page_y > overflow_floor && child_page_y + child_h > page_height_px {
+        if break_decision(child_page_y, child_h, overflow_floor, page_height_px)
+            == BreakDecision::PushToNextPage
+        {
             // Only claim a fragment on the page we are leaving when the
             // parent actually placed content there. When the break is
             // propagated from the parent's leading edge (nothing emitted
