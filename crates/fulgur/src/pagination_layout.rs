@@ -342,6 +342,37 @@ impl ParentSlice {
     }
 }
 
+/// Outcome of fragmenting one block subtree (fulgur-pgbrk R4 / R5).
+///
+/// `RequestBreakBefore` is the channel by which a box hands a break
+/// decision **up** to its container, which css-break-3 requires in two
+/// places fulgur previously dropped it:
+///
+/// - §3.1.1 — "A `break-before` value on a first in-flow child box is
+///   propagated to its container." The child's own break point does not
+///   exist (there is no gap between a container's content edge and its
+///   first child, §4.1), so the nearest legal break is the class A point
+///   before the container.
+/// - §4.4 rule 2 — a container with `break-inside: avoid` that does not
+///   fit the current strip but would fit a fresh one must move whole
+///   rather than split between its children.
+///
+/// **Invariant:** a call returning `RequestBreakBefore` has pushed
+/// nothing into the geometry table, so the caller can advance the page
+/// and re-invoke without first having to undo a partial emission. Both
+/// producers below check `emitted_anything` to guarantee it.
+///
+/// Re-invocation terminates because both producers require `cursor_in >
+/// 0.0`: after the caller advances, the subtree starts at the top of a
+/// fresh page and neither condition can fire again. A break before a box
+/// already at a page top is a no-op anyway (§3.1.1 collapses it), so this
+/// is the spec-correct stopping rule rather than a retry counter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SubtreeResult {
+    Placed { page: u32, cursor_y: f32 },
+    RequestBreakBefore,
+}
+
 /// Whether a child may break before itself on the current strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BreakDecision {
@@ -1236,7 +1267,11 @@ impl<'a> PaginationLayoutTree<'a> {
                     ));
             if needs_recursion {
                 let child_x_in_body = body_x + layout.location.x;
-                let (new_page, new_cursor) = fragment_block_subtree(
+                // fulgur-pgbrk R4 / R5: the subtree may hand a break
+                // back up instead of placing itself. Advance the page
+                // and re-enter; the retry cannot request again because
+                // it now starts at `cursor_y == 0`.
+                let mut result = fragment_block_subtree(
                     &mut self.geometry,
                     self.doc,
                     self.column_styles,
@@ -1253,6 +1288,31 @@ impl<'a> PaginationLayoutTree<'a> {
                     // break before the child itself.
                     true,
                 );
+                if result == SubtreeResult::RequestBreakBefore {
+                    page_index += 1;
+                    cursor_y = 0.0;
+                    result = fragment_block_subtree(
+                        &mut self.geometry,
+                        self.doc,
+                        self.column_styles,
+                        self.used_page_names.as_ref(),
+                        child_id,
+                        child_w,
+                        child_x_in_body,
+                        page_index,
+                        cursor_y,
+                        self.page_height_px,
+                        0,
+                        true,
+                    );
+                }
+                let SubtreeResult::Placed {
+                    page: new_page,
+                    cursor_y: new_cursor,
+                } = result
+                else {
+                    unreachable!("a retry entered at cursor_y == 0 always places")
+                };
                 page_index = new_page;
                 cursor_y = new_cursor;
                 emitted += 1;
@@ -2031,7 +2091,7 @@ fn fragment_block_subtree(
     // overflows must stay put and be clipped rather than dragging a box
     // it cannot actually move onto the next page.
     allow_leading_break: bool,
-) -> (u32, f32) {
+) -> SubtreeResult {
     if depth >= crate::MAX_DOM_DEPTH {
         // Bailed: emit a single whole-fragment for the parent at its
         // entry coordinates so geometry still has an entry for it.
@@ -2050,10 +2110,16 @@ fn fragment_block_subtree(
                 width: parent_w.as_px(),
                 height: h.as_px(),
             });
-        return (page_in, cursor_in + h);
+        return SubtreeResult::Placed {
+            page: page_in,
+            cursor_y: cursor_in + h,
+        };
     }
     let Some(parent) = doc.get_node(parent_id) else {
-        return (page_in, cursor_in);
+        return SubtreeResult::Placed {
+            page: page_in,
+            cursor_y: cursor_in,
+        };
     };
 
     let mut page_index = page_in;
@@ -2080,6 +2146,12 @@ fn fragment_block_subtree(
     // for the rationale and the outer-Option semantics.
     let mut prev_used_page: Option<Option<String>> = None;
     let mut row_state: Option<RowState> = None;
+    // fulgur-pgbrk R4 / R5: has this call pushed anything into `geometry`
+    // yet? `SubtreeResult::RequestBreakBefore` promises the caller an
+    // untouched table, so both producers refuse to fire once this is set.
+    // Tracked explicitly rather than inferred from `cursor_y ==
+    // page_start_y`, which a zero-height child leaves true after emitting.
+    let mut emitted_anything = false;
     // fulgur-uebl: flex / grid containers establish a flex/grid
     // formatting context where children are not class A break points
     // (CSS Fragmentation 3 §3.2). The `page` property doesn't apply to
@@ -2317,6 +2389,7 @@ fn fragment_block_subtree(
                 (origin_pending_target_y, origin_pending_same_row) = (None, None);
             }
             if child.element_data().is_some() {
+                emitted_anything = true;
                 geometry
                     .entry(child_id)
                     .or_default()
@@ -2368,6 +2441,27 @@ fn fragment_block_subtree(
         // tracks the row's max bottom (so break-before / overflow
         // checks see the full row height).
         cursor_y = cursor_y.max(child_page_y);
+
+        // fulgur-pgbrk R5 (css-break-3 §3.1.1): "A break-before value on
+        // a first in-flow child box is propagated to its container."
+        // Reaching here with nothing emitted means this IS the leading
+        // in-flow child, so its own break point does not exist (§4.1: no
+        // class C point without a gap) and the break belongs to the
+        // container. Hand it up rather than dropping it, which is what
+        // the `cursor_y > page_start_y` gate below did on its own.
+        //
+        // `cursor_in > 0.0` keeps this from firing when the container
+        // already starts at a page top: a break before it would be a
+        // no-op, and requesting one would bounce between caller and
+        // callee forever.
+        if break_before_page
+            && !emitted_anything
+            && cursor_y <= page_start_y
+            && cursor_in > 0.0
+            && propagate_leading_break
+        {
+            return SubtreeResult::RequestBreakBefore;
+        }
 
         // Honour `break-before: page`. Leading collapse: only fires
         // when some content has already been placed on this page —
@@ -2473,6 +2567,7 @@ fn fragment_block_subtree(
             }
 
             let (orphans, widows) = resolved_line_constraints(doc, child_id, column_styles);
+            emitted_anything = true;
             let pre_inline_page = page_index;
             let (np, nc, _emitted) = fragment_inline_root(
                 geometry,
@@ -2594,6 +2689,8 @@ fn fragment_block_subtree(
                 || has_page_name_change_below(doc, child_id, used_page_names, 0)
                 || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
         if needs_recursion {
+            let parent_had_content = emitted_anything;
+            emitted_anything = true;
             let pre_recursion_page = page_index;
             let pre_recursion_cursor_y = cursor_y;
             // fulgur-u0p0: enter recursion from `child_page_y` (the rebased
@@ -2606,7 +2703,7 @@ fn fragment_block_subtree(
             // below the previous one instead of beside it. Using
             // `child_page_y` keeps each cell's recursion strip aligned to
             // the row's y on the current page.
-            let (np, nc) = fragment_block_subtree(
+            let mut result = fragment_block_subtree(
                 geometry,
                 doc,
                 column_styles,
@@ -2623,6 +2720,54 @@ fn fragment_block_subtree(
                 // below it is pinned and must not hand breaks upward.
                 propagate_leading_break,
             );
+            // fulgur-pgbrk R4 / R5: the child wants a break before
+            // itself. If it is OUR leading child too, and we may still
+            // hand breaks up, the request keeps travelling — a break
+            // before a box's first child is a break before the box,
+            // recursively (css-break-3 §3.1.1). Otherwise we are the
+            // container that owns the break: advance a page and re-enter
+            // the child, which then starts at a page top and cannot ask
+            // again.
+            if result == SubtreeResult::RequestBreakBefore {
+                if !parent_had_content && cursor_in > 0.0 && propagate_leading_break {
+                    return SubtreeResult::RequestBreakBefore;
+                }
+                if cursor_y > page_start_y {
+                    parent_slice.close_unforced(
+                        geometry,
+                        row_state.as_mut(),
+                        page_index,
+                        page_start_y,
+                        cursor_y,
+                    );
+                }
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
+                page_taffy_origin = this_top_in_parent;
+                child_page_y = 0.0;
+                result = fragment_block_subtree(
+                    geometry,
+                    doc,
+                    column_styles,
+                    used_page_names,
+                    child_id,
+                    child_w,
+                    child_x_in_body,
+                    page_index,
+                    child_page_y,
+                    page_height_px,
+                    depth + 1,
+                    propagate_leading_break,
+                );
+            }
+            let SubtreeResult::Placed {
+                page: np,
+                cursor_y: nc,
+            } = result
+            else {
+                unreachable!("a retry entered at a page top always places")
+            };
             page_index = np;
             // fulgur-u0p0: when the recursion stayed on the same page,
             // keep the larger of the parent's existing `cursor_y` (row max
@@ -2842,6 +2987,7 @@ fn fragment_block_subtree(
         // in-flow child there is no valid interior split point, so
         // the leaf emits whole). Emit its fragment and recurse into
         // descendants on the same page.
+        emitted_anything = true;
         geometry
             .entry(child_id)
             .or_default()
@@ -2917,7 +3063,10 @@ fn fragment_block_subtree(
     // matches `fragment_pagination_root`'s zero-height-element path.
     parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
 
-    (page_index, cursor_y)
+    SubtreeResult::Placed {
+        page: page_index,
+        cursor_y,
+    }
 }
 
 /// fulgur-p55h: read per-line `(min_coord, max_coord)` pairs from a
@@ -4745,7 +4894,7 @@ mod tests {
         );
 
         let mut geom = PaginationGeometryTable::new();
-        let (page_out, cursor_out) = fragment_block_subtree(
+        let result = fragment_block_subtree(
             &mut geom,
             &doc, // &BaseDocument via deref coercion
             None, // column_styles
@@ -4759,6 +4908,13 @@ mod tests {
             crate::MAX_DOM_DEPTH, // depth → trips the guard immediately
             true,                 // allow_leading_break
         );
+        let SubtreeResult::Placed {
+            page: page_out,
+            cursor_y: cursor_out,
+        } = result
+        else {
+            panic!("the depth bail always places, never requests a break")
+        };
 
         // The bail pushes exactly ONE whole fragment for parent_id at its
         // entry coordinates, then returns (page_in, cursor_in + height).
@@ -9148,13 +9304,14 @@ h2 { string-set: chapter-title content(text); }
     /// wrapper's first child must therefore break before the WRAPPER
     /// when content already sits on the page.
     ///
-    /// GAP: fulgur's nested walk suppresses a leading child's
-    /// break-before whenever the parent has placed nothing on the
-    /// current page (`cursor_y > page_start_y` gate), and never hands
-    /// the forced value up to the container, so the break is dropped
-    /// entirely.
+    /// Implemented by fulgur-pgbrk R5. The nested walk used to suppress
+    /// a leading child's break-before whenever the parent had placed
+    /// nothing on the current page (the `cursor_y > page_start_y` gate)
+    /// and never handed the forced value up, so the break was dropped
+    /// entirely. `fragment_block_subtree` now returns
+    /// `SubtreeResult::RequestBreakBefore` in that case and the caller
+    /// advances a page and re-enters.
     #[test]
-    #[ignore = "css-break-3 §3.1 child→parent forced-break propagation not implemented"]
     fn css_break3_s31_forced_break_on_first_child_propagates_to_container() {
         let html = r#"
             <html><body style="margin:0; padding:0">
