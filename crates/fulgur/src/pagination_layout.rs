@@ -8460,6 +8460,69 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    /// fulgur-pgbrk R8: a forced break on a flex / grid cell closes the
+    /// parent on a page a sibling cell already closed.
+    ///
+    /// `row_state.emitted_parent_pages` exists so that N parallel
+    /// flex / grid cells, each independently deciding to close the
+    /// parent on the current page, emit only one parent fragment for
+    /// it. Of the nine parent-slice emission sites, only the two
+    /// unforced (overflow-driven) ones consult it; the seven forced
+    /// `break-before` / `break-after: page` sites do not.
+    ///
+    /// GAP: the parent is emitted twice on page 0 with DIFFERENT
+    /// heights — `400` from the recursion's full-strip close and `60`
+    /// from the forced break. `render.rs` reads `frag.height` for
+    /// background / border / box-shadow painting whenever `is_split()`,
+    /// so the container's decoration is painted twice at two different
+    /// sizes on one page, and every fragment-counting walk
+    /// (`paragraph_lines_for_page`, `find_overflowing_fragments`) sees a
+    /// phantom third fragment.
+    #[test]
+    #[ignore = "fulgur-pgbrk R8: forced-break parent-slice emission does not consult row_state.emitted_parent_pages, so a flex/grid parent is closed twice on one page"]
+    fn forced_break_does_not_close_a_grid_parent_twice_on_one_page() {
+        // Cell 1 crosses a page via RECURSION, which is what sets
+        // `crossed_by_recursion` and therefore what makes the same-row
+        // rebase at `:2033` restore `page_index` to the row start for
+        // cell 2. A forced break alone does not set that flag, so two
+        // cells that merely both carry `break-after: page` end up on
+        // consecutive pages and never contend for one.
+        //
+        // Cell 1's recursion emits the parent's page-0 fragment through
+        // the DEDUPED path; cell 2 is then restored to page 0 and its
+        // `break-after: page` emits through a NON-deduped site.
+        let html = r#"
+            <html><body style="margin:0; padding:0">
+              <div id="grid" style="display:grid; grid-template-columns:100px 100px; width:200px;">
+                <div style="width:100px">
+                  <div style="height:250px"></div>
+                  <div style="height:250px"></div>
+                </div>
+                <div style="height:60px; width:100px; break-after:page"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let grid = find_by_id(doc.deref_mut(), "grid").expect("grid");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+        let frags = &geom.get(&grid).expect("grid").fragments;
+        let mut seen: BTreeMap<u32, usize> = BTreeMap::new();
+        for f in frags {
+            *seen.entry(f.page_index).or_default() += 1;
+        }
+        let dupes: Vec<(u32, usize)> = seen
+            .iter()
+            .filter(|&(_, &n)| n > 1)
+            .map(|(&p, &n)| (p, n))
+            .collect();
+        assert!(
+            dupes.is_empty(),
+            "the parent must be closed at most once per page; \
+             duplicated pages={dupes:?}, frags={frags:?}"
+        );
+    }
+
     // ---------------------------------------------------------------
     // CSS Fragmentation Module Level 3 conformance map
     // (https://www.w3.org/TR/css-break-3/)
