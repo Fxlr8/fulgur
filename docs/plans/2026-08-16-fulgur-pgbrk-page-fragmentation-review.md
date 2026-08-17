@@ -137,13 +137,14 @@ an edge case.
 
 ## Remaining work
 
-> **Progress as of 2026-08-17.** R1, R2, R3 and R6 have shipped, along with the
-> Risk 1 extraction below and one defect it exposed (R8, new — see
-> [Shipped since this review](#shipped-since-this-review)). **R4, R5 and R7
-> remain.** The `--ignored` count in `pagination_layout.rs` is down from 16 to
-> 13: R4 (1), R5 (1), and R7's flex/grid (7) and monolithic (4) clusters.
-> Sections whose work has landed are kept below for the failure analysis, with
-> a status line at the top of each.
+> **Progress as of 2026-08-17.** R1–R6 have all shipped, along with the Risk 1
+> extraction below and one defect it exposed (R8, new — see
+> [Shipped since this review](#shipped-since-this-review)). **Only R7 remains.**
+> The `--ignored` count in `pagination_layout.rs` is down from 16 to 11, now
+> entirely R7: the flex/grid co-split cluster (7) and the monolithic-overflow
+> cluster (4). Every css-break-3 rule in the conformance map below now passes.
+> Sections whose work has landed are kept for the failure analysis, with a
+> status line at the top of each.
 
 Two of these still destroy content. Both have reproducible end-to-end cases
 measured against the current tree. Priority order is as listed.
@@ -281,6 +282,12 @@ be promoted to a non-test function.
 
 ### R4: `break-inside: avoid` on block containers is ignored (P2, correctness)
 
+**Status: SHIPPED** (`5784b4cb`). The `SubtreeResult` sketch below was
+adopted as written. The one addition: the request fires only when the box
+would fit a *fresh* page. A box that fits no page at all cannot be helped by
+moving it — `avoid` is unfulfillable, §4.4's relaxation clause applies, and
+pushing it would waste a page before splitting anyway.
+
 §4.4 rule 2: breaking at a class A point is forbidden when a common ancestor of
 the adjoining siblings has `break-inside: avoid`. fulgur reads `break_inside`
 only on inline roots (`:720`, `:2058`); a block wrapper's `avoid` is never
@@ -314,6 +321,12 @@ repaginate on upgrade. R4 will move them again. Coordinate both with downstream
 snapshot refreshes rather than shipping them separately.
 
 ### R5: forced breaks do not propagate from a first child to its container (P3)
+
+**Status: SHIPPED** (`cd24af40`). Landed first and introduced
+`SubtreeResult`, so R4 added a second producer with no signature churn.
+Termination comes from the spec rather than a retry counter: a producer
+requires `cursor_in > 0.0`, so after the caller advances, the subtree starts
+at a page top where a break before it is a no-op (§3.1.1 collapses it).
 
 §3.1.1: *"A break-before value on a first in-flow child box is propagated to its
 container."* fulgur gates a nested `break-before: page` on
@@ -374,8 +387,8 @@ lands.
 | §4.1 class B: break between line boxes | `css_break3_class_b_break_between_line_boxes` | passes |
 | §4.1 monolithic content sliced per strip (body-direct) | `css_break3_monolithic_body_direct_box_is_sliced_per_strip` | passes |
 | §5.2 margins adjoining an unforced break truncate | `css_break3_s52_margin_adjoining_unforced_break_is_truncated` | passes |
-| §3.1.1 forced break on first child propagates to container | `css_break3_s31_forced_break_on_first_child_propagates_to_container` | ignored — R5 |
-| §4.4 rule 2: ancestor `break-inside: avoid` forbids class A break | `css_break3_s44_rule2_ancestor_break_inside_avoid_forbids_class_a_break` | ignored — R4 |
+| §3.1.1 forced break on first child propagates to container | `css_break3_s31_forced_break_on_first_child_propagates_to_container` | **passes** (R5) |
+| §4.4 rule 2: ancestor `break-inside: avoid` forbids class A break | `css_break3_s44_rule2_ancestor_break_inside_avoid_forbids_class_a_break` | **passes** (R4) |
 | §4.4 relaxation: never lose lines off the edge | `css_break3_s44_widow_relaxation_prevents_lines_escaping_the_strip` | **passes** (R2) |
 | §4.4 rule 3: author `orphans` / `widows` values | `css_break3_s44_rule3_author_widows_value_shifts_the_split` | **passes** (R6) |
 
@@ -404,6 +417,8 @@ Landed on `fix/fulgur-pgbrk-page-fragmentation` after the review was written.
 | R8 forced-break parent dedup | `1d0ea8da`, `d782ed1a` | found by the Risk 1 extraction; not in the original R1–R7 list |
 | R2 widows/orphans relaxation | `8c88e74d` | |
 | R6 author `orphans` / `widows` | `d440a708` | |
+| R5 forced-break propagation | `cd24af40` | introduced `SubtreeResult` |
+| R4 `break-inside: avoid` on blocks | `5784b4cb` | second producer on R5's channel |
 
 ### R8: forced breaks closed a flex/grid parent twice on one page
 
