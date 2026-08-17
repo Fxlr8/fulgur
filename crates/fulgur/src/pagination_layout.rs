@@ -215,21 +215,27 @@ fn parent_slice_height(cursor_y: f32, page_start_y: f32, page_height_px: f32) ->
 /// grid cells, each independently deciding to close the parent on the
 /// current page, emit only one parent fragment for it.
 ///
-/// Today exactly two sites consult it — the unforced, overflow-driven
-/// ones — and the seven forced `break-before` / `break-after: page`
-/// sites do not. That asymmetry is a **defect**, pinned by the ignored
-/// test `forced_break_does_not_close_a_grid_parent_twice_on_one_page`
-/// (fulgur-pgbrk R8): a cell that crosses a page by recursion sets
-/// `crossed_by_recursion`, which restores a same-row sibling to the
-/// row-start page, and that sibling's forced break then closes the
-/// parent a second time on it — with a different height, so
-/// `render.rs` paints the container's decoration twice at two sizes.
+/// Eight of the nine sites consult it via [`Self::close_unforced`] —
+/// every site that closes the parent because it is **leaving** a page,
+/// whether the break was forced (`break-before` / `break-after: page`)
+/// or unforced (strip overflow). Being about to leave a page is the
+/// property the dedup keys on, and a forced break satisfies it exactly
+/// as an unforced one does.
 ///
-/// The two methods below preserve today's behaviour exactly, so the
-/// defect stays reproducible rather than being accidentally masked.
-/// Fixing it means switching the forced sites to
-/// [`ParentSlice::close_unforced`] and un-ignoring R8 — deliberately not
-/// done in the extraction, which changes no output.
+/// Originally only the two unforced sites deduped, which was
+/// fulgur-pgbrk R8: a cell that crosses a page by recursion sets
+/// `crossed_by_recursion`, which restores a same-row sibling to the
+/// row-start page, and that sibling's forced break then closed the
+/// parent a second time on it — with a different height, so `render.rs`
+/// painted the container's decoration twice at two sizes on one page.
+/// Pinned by `forced_break_does_not_close_a_grid_parent_twice_on_one_page`.
+///
+/// [`Self::close_forced`] survives for the **one** site that is not a
+/// page departure: the function tail, which emits the parent's final
+/// fragment on a page it never leaves and so has no sibling to contend
+/// with. Deduping there would be wrong — a same-row cell that already
+/// closed an earlier page would suppress the parent's last fragment
+/// entirely.
 struct ParentSlice {
     id: usize,
     x_in_body: f32,
@@ -2234,7 +2240,13 @@ fn fragment_block_subtree(
             // `continue` happens before the gap calc), so break-before
             // can fire here without first folding gap into cursor_y.
             if break_before_page && cursor_y > page_start_y {
-                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
+                parent_slice.close_unforced(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                    cursor_y,
+                );
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2260,7 +2272,13 @@ fn fragment_block_subtree(
             // too — same fulgur-p3uf (Phase 3.1.5a) fix as
             // `fragment_pagination_root`'s zero-height branch.
             if break_after_page {
-                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
+                parent_slice.close_unforced(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                    cursor_y,
+                );
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2295,7 +2313,13 @@ fn fragment_block_subtree(
         // gated by `cursor_y > page_start_y` (mirrors body-level's
         // `cursor_y > 0.0` since body's implicit page_start is 0).
         if break_before_page && cursor_y > page_start_y {
-            parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
+            parent_slice.close_unforced(
+                geometry,
+                row_state.as_mut(),
+                page_index,
+                page_start_y,
+                cursor_y,
+            );
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
@@ -2457,7 +2481,13 @@ fn fragment_block_subtree(
             }
 
             if break_after_page {
-                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
+                parent_slice.close_unforced(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                    cursor_y,
+                );
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2659,7 +2689,13 @@ fn fragment_block_subtree(
 
             // Honour `break-after: page` after recursion.
             if break_after_page {
-                parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
+                parent_slice.close_unforced(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                    cursor_y,
+                );
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
@@ -2772,7 +2808,13 @@ fn fragment_block_subtree(
         // Honour `break-after: page` after the child fragment lands
         // (and the descendant walk records same-page entries).
         if break_after_page {
-            parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
+            parent_slice.close_unforced(
+                geometry,
+                row_state.as_mut(),
+                page_index,
+                page_start_y,
+                cursor_y,
+            );
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
@@ -8577,26 +8619,32 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
-    /// fulgur-pgbrk R8: a forced break on a flex / grid cell closes the
-    /// parent on a page a sibling cell already closed.
+    /// fulgur-pgbrk R8: a forced break on a flex / grid cell must not
+    /// close the parent on a page a sibling cell already closed.
     ///
     /// `row_state.emitted_parent_pages` exists so that N parallel
     /// flex / grid cells, each independently deciding to close the
     /// parent on the current page, emit only one parent fragment for
-    /// it. Of the nine parent-slice emission sites, only the two
-    /// unforced (overflow-driven) ones consult it; the seven forced
-    /// `break-before` / `break-after: page` sites do not.
+    /// it. Originally only the two unforced (overflow-driven) emission
+    /// sites consulted it; the six forced `break-before` /
+    /// `break-after: page` sites did not, and the parent came out twice
+    /// on page 0 with DIFFERENT heights — `400` from the recursion's
+    /// full-strip close and `60` from the forced break.
     ///
-    /// GAP: the parent is emitted twice on page 0 with DIFFERENT
-    /// heights — `400` from the recursion's full-strip close and `60`
-    /// from the forced break. `render.rs` reads `frag.height` for
+    /// That was not cosmetic: `render.rs` reads `frag.height` for
     /// background / border / box-shadow painting whenever `is_split()`,
-    /// so the container's decoration is painted twice at two different
+    /// so the container's decoration was painted twice at two different
     /// sizes on one page, and every fragment-counting walk
-    /// (`paragraph_lines_for_page`, `find_overflowing_fragments`) sees a
+    /// (`paragraph_lines_for_page`, `find_overflowing_fragments`) saw a
     /// phantom third fragment.
+    ///
+    /// The dedup is a property of "the parent is leaving this page",
+    /// which is equally true of a forced and an unforced break, so all
+    /// six forced sites now take [`ParentSlice::close_unforced`]. The
+    /// function tail is deliberately excluded: it closes the parent's
+    /// FINAL fragment, on a page the parent never leaves, so it has no
+    /// sibling to contend with.
     #[test]
-    #[ignore = "fulgur-pgbrk R8: forced-break parent-slice emission does not consult row_state.emitted_parent_pages, so a flex/grid parent is closed twice on one page"]
     fn forced_break_does_not_close_a_grid_parent_twice_on_one_page() {
         // Cell 1 crosses a page via RECURSION, which is what sets
         // `crossed_by_recursion` and therefore what makes the same-row
