@@ -461,6 +461,232 @@ fn fragment_zero_height_child(
     emitted_here
 }
 
+/// Multi-line inline-root handling shared by the body walk
+/// ([`PaginationLayoutTree::fragment_pagination_root`]) and the nested
+/// walk ([`fragment_block_subtree`]) — fulgur-pgbrk
+/// walker-convergence phase 3b.
+///
+/// Routes a multi-line inline root through [`fragment_inline_root`]:
+/// probes Parley's line metrics, applies the `break-inside: avoid`
+/// suppression (relaxed when `avoid` is unfulfillable — CSS
+/// Fragmentation 3 §4.4), takes the "push whole to next page"
+/// class A break when the paragraph can't honour widow / orphan
+/// constraints in the remaining strip, then splits at line
+/// boundaries.
+///
+/// The two call shapes differ in exactly four parameterized ways; the
+/// gates keep each difference explicit rather than silently unifying
+/// it:
+///
+/// 1. **Child top on page.** Body measures the child at the body
+///    cursor (inter-child gaps already advanced it); nested measures
+///    `page_start_y + (this_top_in_parent - page_taffy_origin)`, the
+///    Taffy-origin rebase that keeps flex / grid row siblings aligned
+///    (fulgur-kv0r). Gate: `frame.kind`.
+/// 2. **Push-whole floor.** Body's floor is fixed at 0 — a break
+///    before the leading child is always a break before body (CSS
+///    Fragmentation §3). Nested computes
+///    `allow_leading_break && !suppress_page_check` and falls back to
+///    `page_start_y` when propagation is disallowed (flex / grid /
+///    atomic-inline / orthogonal containers). Gate: the
+///    `suppress_page_check` argument, same convention as
+///    [`fragment_zero_height_child`].
+/// 3. **Nested-only parent bookkeeping (fulgur-oc51).** When the
+///    paragraph crosses pages, the nested walk emits the parent's
+///    fragment on every crossed page (via [`emit_parent_page_spans`])
+///    and marks the row co-split (`crossed_by_recursion`), so
+///    parallel flex / grid siblings restore. Body has no parent to
+///    close. Gate: `frame.kind` / `frame.parent_slice` presence.
+/// 4. **`row_state` max-end tracking.** Nested updates the row's
+///    `max_end_page` / `max_end_cursor_y` after `break-after`;
+///    body carries `row_state: None`, making the update a no-op.
+///
+/// Both shapes set `prev_used_page` (skipping floats, CSS 2.1 §9.5)
+/// and honour `break-after: page`; nested additionally closes the
+/// parent slice and defers its origin rebase via
+/// `origin_pending_target_y` (kind-gated), mirroring
+/// [`fragment_zero_height_child`].
+///
+/// Returns `Some(fragments_emitted)` when the inline split path ran
+/// (`line_metrics.len() > 1`); `None` when the child has ≤ 1 line and
+/// the caller must fall through to the block path. Body adds the count
+/// to its emitted tally; nested sets `emitted_anything`.
+fn fragment_inline_child(
+    cx: &FragmentationCtx<'_>,
+    frame: &mut ContainerFrame,
+    geometry: &mut PaginationGeometryTable,
+    child: &blitz_dom::Node,
+    child_id: usize,
+    this_top_in_parent: f32,
+    suppress_page_check: bool,
+) -> Option<usize> {
+    let layout = child.final_layout;
+    let child_w = if layout.size.width > 0.0 {
+        layout.size.width
+    } else {
+        frame.width
+    };
+    let break_props = cx
+        .styles
+        .and_then(|t| t.get(&child_id))
+        .cloned()
+        .unwrap_or_default();
+    let all_line_metrics = collect_inline_line_metrics(child);
+    // fulgur-pgbrk R1: measure the BORDER box. Parley's metrics are
+    // content-box relative, so `last.1 - first.0` omits the box's own
+    // padding / border and under-reports it. See `inline_root_box_metrics`.
+    let (lead_in, lines_h, lead_out) = inline_root_box_metrics(child, &all_line_metrics);
+    let box_total_h = lead_in + lines_h + lead_out;
+    let avoid_is_fulfillable = if all_line_metrics.is_empty() {
+        true
+    } else {
+        box_total_h <= cx.page_h
+    };
+    let avoid_inside = matches!(
+        break_props.break_inside,
+        Some(crate::draw_primitives::BreakInside::Avoid)
+    );
+    let line_metrics = if avoid_inside && avoid_is_fulfillable {
+        Vec::new()
+    } else {
+        all_line_metrics
+    };
+    if line_metrics.len() <= 1 {
+        return None;
+    }
+
+    // Difference 1: child top on page (see the doc comment).
+    let mut child_top_on_page = if frame.kind == ContainerKind::Nested {
+        frame.page_start_y + (this_top_in_parent - frame.page_taffy_origin)
+    } else {
+        frame.cursor_y
+    };
+    // Difference 2: push-whole floor.
+    let overflow_floor = if frame.allow_leading_break && !suppress_page_check {
+        0.0
+    } else {
+        frame.page_start_y
+    };
+    if break_decision(child_top_on_page, box_total_h, overflow_floor, cx.page_h)
+        == BreakDecision::PushToNextPage
+    {
+        if let Some(slice) = frame.parent_slice {
+            // Nested only: close the parent on the outgoing page
+            // (the `cursor > start` guard skips the fresh-strip
+            // close). Body has no parent to close.
+            if frame.cursor_y > frame.page_start_y {
+                slice.close_unforced(
+                    geometry,
+                    frame.row_state.as_mut(),
+                    frame.page,
+                    frame.page_start_y,
+                    frame.cursor_y,
+                );
+            }
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        child_top_on_page = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            frame.page_taffy_origin = this_top_in_parent;
+        }
+    }
+
+    let (orphans, widows) = resolved_line_constraints(cx.doc, child_id, cx.styles);
+    let input = InlineSplitInput {
+        line_metrics: &line_metrics,
+        lead_in,
+        lead_out,
+        orphans,
+        widows,
+    };
+    let placement = InlinePlacement {
+        id: child_id,
+        x: frame.x_in_body + layout.location.x,
+        width: child_w,
+        cursor_y: child_top_on_page,
+        page: frame.page,
+    };
+    let pre_page = frame.page;
+    let (new_page, new_cursor, frag_count) =
+        fragment_inline_root(geometry, cx.page_h, placement, &input);
+    match frame.kind {
+        ContainerKind::RootBody => {
+            frame.page = new_page;
+            frame.cursor_y = new_cursor;
+        }
+        ContainerKind::Nested => {
+            if new_page > pre_page {
+                // Difference 3: the paragraph filled every page it
+                // crossed, so the parent spans those pages too
+                // (fulgur-oc51 via `emit_parent_page_spans`).
+                if let Some(slice) = frame.parent_slice {
+                    emit_parent_page_spans(
+                        geometry,
+                        frame.row_state.as_mut(),
+                        &slice,
+                        pre_page,
+                        new_page,
+                        frame.page_start_y,
+                        true,
+                    );
+                }
+                frame.page = new_page;
+                frame.cursor_y = new_cursor;
+                frame.page_start_y = 0.0;
+                frame.origin_pending_target_y = Some(frame.cursor_y);
+                frame.origin_pending_same_row = None;
+                if let Some(ref mut rs) = frame.row_state {
+                    rs.crossed_by_recursion = true;
+                }
+            } else {
+                frame.cursor_y = frame.cursor_y.max(new_cursor);
+            }
+        }
+    }
+
+    if matches!(
+        break_props.break_after,
+        Some(crate::draw_primitives::BreakAfter::Page)
+    ) {
+        if let Some(slice) = frame.parent_slice {
+            slice.close_unforced(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+                frame.cursor_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The NEXT child is the first on the new page — defer the
+            // origin rebase via the pending slot.
+            frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_same_row = None;
+        }
+    }
+    let is_float = crate::blitz_adapter::node_is_floating(child);
+    if !is_float {
+        let (_, used_end) = cx.used_page_endpoints_of(child_id);
+        frame.prev_used_page = Some(used_end);
+    }
+    // Difference 4: row max-end tracking (`row_state` is None for
+    // body, so this is a no-op there).
+    if let Some(ref mut rs) = frame.row_state {
+        if frame.page > rs.max_end_page
+            || (frame.page == rs.max_end_page && frame.cursor_y > rs.max_end_cursor_y)
+        {
+            rs.max_end_page = frame.page;
+            rs.max_end_cursor_y = frame.cursor_y;
+        }
+    }
+    Some(frag_count)
+}
+
 /// The unchanging half of the "close the parent's fragment on the page
 /// it is leaving" idiom, which appears at nine sites in
 /// [`fragment_block_subtree`] (fulgur-pgbrk Risk 1).
@@ -1338,11 +1564,6 @@ impl<'a> PaginationLayoutTree<'a> {
                 };
             }
 
-            let avoid_inside = matches!(
-                break_props.break_inside,
-                Some(crate::draw_primitives::BreakInside::Avoid)
-            );
-
             // fulgur-p55h: if the child carries a Parley inline layout,
             // probe its line metrics and split at line boundaries —
             // mirrors the v1 paragraph-pageable split path (removed in
@@ -1360,73 +1581,22 @@ impl<'a> PaginationLayoutTree<'a> {
             // not keep the paragraph whole, it just pushes the tail past
             // the page edge where it is discarded, so an unfulfillable
             // `avoid` must fall back to line-level splitting.
-            let all_line_metrics = collect_inline_line_metrics(child);
-            // fulgur-pgbrk R1: measure the BORDER box. Parley's metrics
-            // are content-box relative, so `last.1 - first.0` omits the
-            // box's own padding / border and under-reports it.
-            let (lead_in, lines_h, lead_out) = inline_root_box_metrics(child, &all_line_metrics);
-            let box_total_h = lead_in + lines_h + lead_out;
-            let avoid_is_fulfillable = if all_line_metrics.is_empty() {
-                true
-            } else {
-                box_total_h <= cx.page_h
-            };
-            let line_metrics = if avoid_inside && avoid_is_fulfillable {
-                Vec::new()
-            } else {
-                all_line_metrics
-            };
-            if line_metrics.len() > 1 {
-                // fulgur-s67g Phase 2.2: if the paragraph cannot fit
-                // the remaining space on the current page strip but
-                // would fit (or at least start fresh) on a new page,
-                // advance the page boundary before calling
-                // `fragment_inline_root`. This is the "split before
-                // the child" fallback (CSS Fragmentation §4.2, class A
-                // break point) taken when the inline split path can't
-                // honour widow / orphan constraints within the strip.
-                // fulgur-pgbrk R1: the push-whole test measures the
-                // border box (decoration included), not the line boxes.
-                // Body level: `page_start_y` is always 0 and leading-edge
-                // propagation is always permitted, so the floor is 0.
-                if break_decision(frame.cursor_y, box_total_h, 0.0, cx.page_h)
-                    == BreakDecision::PushToNextPage
-                {
-                    frame.page += 1;
-                    frame.cursor_y = 0.0;
-                }
-                let para_x = layout.location.x;
-                let (orphans, widows) = resolved_line_constraints(cx.doc, child_id, cx.styles);
-                let input = InlineSplitInput {
-                    line_metrics: &line_metrics,
-                    lead_in,
-                    lead_out,
-                    orphans,
-                    widows,
-                };
-                let placement = InlinePlacement {
-                    id: child_id,
-                    x: frame.x_in_body + para_x,
-                    width: child_w,
-                    cursor_y: frame.cursor_y,
-                    page: frame.page,
-                };
-                let (new_page_index, new_cursor_y, frag_count) =
-                    fragment_inline_root(&mut self.geometry, cx.page_h, placement, &input);
-                frame.page = new_page_index;
-                frame.cursor_y = new_cursor_y;
+            //
+            // Shared inline-root branch (see `fragment_inline_child`).
+            // Body frames pass `false` for `suppress_page_check`; the
+            // push-whole floor is the fixed 0.0 (leading-edge
+            // propagation is always permitted at body level).
+            if let Some(frag_count) = fragment_inline_child(
+                &cx,
+                &mut frame,
+                &mut self.geometry,
+                child,
+                child_id,
+                this_top_in_body,
+                false,
+            ) {
                 emitted += frag_count;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
-                if !is_float {
-                    frame.prev_used_page = Some(used_end.clone());
-                }
-                if matches!(
-                    break_props.break_after,
-                    Some(crate::draw_primitives::BreakAfter::Page)
-                ) {
-                    frame.page += 1;
-                    frame.cursor_y = 0.0;
-                }
                 continue;
             }
 
@@ -1551,9 +1721,9 @@ impl<'a> PaginationLayoutTree<'a> {
             // No recursion needed — apply the existing strip-overflow
             // page advance for non-splittable / fits-fine children.
             // `break-inside: avoid` collapses to this path via
-            // `avoid_inside` above (it just suppresses the inline
-            // split branch; remaining-strip overflow handling is
-            // identical).
+            // `fragment_inline_child`'s `avoid` suppression (it just
+            // suppresses the inline split branch; remaining-strip
+            // overflow handling is identical).
             if frame.cursor_y > 0.0 && frame.cursor_y + child_h > cx.page_h {
                 frame.page += 1;
                 frame.cursor_y = 0.0;
@@ -2773,157 +2943,41 @@ fn fragment_block_subtree(
         // a preference and must be ignored when the box cannot fit a
         // single fragmentainer, where obeying it would only push the tail
         // off the page and destroy it). Mirrors the body-direct branch.
-        let avoid_inside = matches!(
-            break_props.break_inside,
-            Some(crate::draw_primitives::BreakInside::Avoid)
+        //
+        // Shared inline-root branch (see `fragment_inline_child`). The
+        // helper reads / writes the frame; the in-loop locals shadow its
+        // fields, so flush them into the frame before the call and rebind
+        // them out afterwards — same convention as the zero-height
+        // branch. The nested-only parent-fragment emission (fulgur-oc51)
+        // and `row_state` bookkeeping live inside the helper behind
+        // `frame.kind == ContainerKind::Nested` / `frame.parent_slice`.
+        frame.page = page_index;
+        frame.cursor_y = cursor_y;
+        frame.page_start_y = page_start_y;
+        frame.page_taffy_origin = page_taffy_origin;
+        frame.origin_pending_target_y = origin_pending_target_y;
+        frame.origin_pending_same_row = origin_pending_same_row;
+        frame.prev_used_page = prev_used_page.clone();
+        frame.row_state = row_state.take();
+        let inline_split = fragment_inline_child(
+            cx,
+            frame,
+            geometry,
+            child,
+            child_id,
+            this_top_in_parent,
+            suppress_page_check,
         );
-        let all_line_metrics = collect_inline_line_metrics(child);
-        // fulgur-pgbrk R1: border-box measurement, mirroring the
-        // body-direct branch. See `inline_root_box_metrics`.
-        let (lead_in, lines_h, lead_out) = inline_root_box_metrics(child, &all_line_metrics);
-        let box_total_h = lead_in + lines_h + lead_out;
-        let avoid_is_fulfillable = if all_line_metrics.is_empty() {
-            true
-        } else {
-            box_total_h <= page_height_px
-        };
-        let line_metrics = if avoid_inside && avoid_is_fulfillable {
-            Vec::new()
-        } else {
-            all_line_metrics
-        };
-        if line_metrics.len() > 1 {
-            // Push the whole paragraph to the next page when it would
-            // overflow the current strip and there is a strip to push it
-            // to. Same `> 0.0` leading-edge propagation as the block
-            // strip-overflow cut below.
-            let inline_overflow_floor = if propagate_leading_break {
-                0.0
-            } else {
-                page_start_y
-            };
-            if break_decision(
-                child_page_y,
-                box_total_h,
-                inline_overflow_floor,
-                page_height_px,
-            ) == BreakDecision::PushToNextPage
-            {
-                if cursor_y > page_start_y {
-                    parent_slice.close_unforced(
-                        geometry,
-                        row_state.as_mut(),
-                        page_index,
-                        page_start_y,
-                        cursor_y,
-                    );
-                }
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                page_taffy_origin = this_top_in_parent;
-                child_page_y = 0.0;
-            }
-
-            let (orphans, widows) = resolved_line_constraints(doc, child_id, column_styles);
+        page_index = frame.page;
+        cursor_y = frame.cursor_y;
+        page_start_y = frame.page_start_y;
+        page_taffy_origin = frame.page_taffy_origin;
+        origin_pending_target_y = frame.origin_pending_target_y;
+        origin_pending_same_row = frame.origin_pending_same_row;
+        prev_used_page = frame.prev_used_page.clone();
+        row_state = frame.row_state.take();
+        if inline_split.is_some() {
             emitted_anything = true;
-            let pre_inline_page = page_index;
-            let input = InlineSplitInput {
-                line_metrics: &line_metrics,
-                lead_in,
-                lead_out,
-                orphans,
-                widows,
-            };
-            let placement = InlinePlacement {
-                id: child_id,
-                x: child_x_in_body,
-                width: child_w,
-                cursor_y: child_page_y,
-                page: page_index,
-            };
-            let (np, nc, _emitted) =
-                fragment_inline_root(geometry, page_height_px, placement, &input);
-            // The paragraph filled every page it crossed, so the parent
-            // spans those pages too. Mirror the recursion branch's
-            // fulgur-oc51 bookkeeping so the parent's background /
-            // borders do not vanish from the pages in between.
-            if np > pre_inline_page {
-                let prev_height = (page_height_px - page_start_y).max(0.0);
-                if prev_height > 0.0 {
-                    let should_emit = row_state
-                        .as_mut()
-                        .map(|rs| rs.emitted_parent_pages.insert(pre_inline_page))
-                        .unwrap_or(true);
-                    if should_emit {
-                        geometry
-                            .entry(parent_id)
-                            .or_default()
-                            .fragments
-                            .push(Fragment {
-                                page_index: pre_inline_page,
-                                x: parent_x_in_body.as_px(),
-                                y: page_start_y.as_px(),
-                                width: parent_w.as_px(),
-                                height: prev_height.as_px(),
-                            });
-                    }
-                }
-                for p in (pre_inline_page + 1)..np {
-                    let should_emit = row_state
-                        .as_mut()
-                        .map(|rs| rs.emitted_parent_pages.insert(p))
-                        .unwrap_or(true);
-                    if should_emit {
-                        geometry
-                            .entry(parent_id)
-                            .or_default()
-                            .fragments
-                            .push(Fragment {
-                                page_index: p,
-                                x: parent_x_in_body.as_px(),
-                                y: 0.0_f32.as_px(),
-                                width: parent_w.as_px(),
-                                height: page_height_px.as_px(),
-                            });
-                    }
-                }
-                page_index = np;
-                cursor_y = nc;
-                page_start_y = 0.0;
-                origin_pending_target_y = Some(cursor_y);
-                origin_pending_same_row = None;
-                if let Some(ref mut rs) = row_state {
-                    rs.crossed_by_recursion = true;
-                }
-            } else {
-                cursor_y = cursor_y.max(nc);
-            }
-
-            if break_after_page {
-                parent_slice.close_unforced(
-                    geometry,
-                    row_state.as_mut(),
-                    page_index,
-                    page_start_y,
-                    cursor_y,
-                );
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
-            }
-            if !is_float {
-                prev_used_page = Some(used_end.clone());
-            }
-            if let Some(ref mut rs) = row_state {
-                if page_index > rs.max_end_page
-                    || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
-                {
-                    rs.max_end_page = page_index;
-                    rs.max_end_cursor_y = cursor_y;
-                }
-            }
             continue;
         }
 
