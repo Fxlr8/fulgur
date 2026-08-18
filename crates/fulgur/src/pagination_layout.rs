@@ -258,6 +258,80 @@ fn parent_slice_height(cursor_y: f32, page_start_y: f32, page_height_px: f32) ->
     (cursor_y - page_start_y).clamp(0.0, strip)
 }
 
+/// The single child-enumeration policy for every paginating walk
+/// (fulgur-pgbrk walker-convergence Phase 2): prefer Blitz's
+/// `layout_children` over the raw DOM `children` when it has been
+/// computed and is non-empty.
+///
+/// When a block container has mixed block-level and inline-level
+/// children, Stylo synthesizes anonymous block wrappers around the
+/// inline-level siblings (CSS 2.1 §9.2.1.1). Those wrappers carry
+/// their own `node_id` and Taffy layout, but they live ONLY in
+/// `layout_children` — the original `children` list still points at
+/// the underlying inline elements (e.g. a `<span
+/// display:inline-block>`, or a body containing `<label>` followed by
+/// `<fieldset>` followed by `<select><option>…</option></select>`,
+/// whose inline-level siblings get wrapped in an anonymous block
+/// visible only in `layout_children`).
+///
+/// Without this preference the walkers silently drop the inline-level
+/// group's paint: extract assigns the inner paragraph's `node_id` to
+/// the synthesized wrapper, but a raw-`children` walk never visits the
+/// wrapper, so geometry has no fragment for that node_id and
+/// `dispatch_fragment` skips the paragraph entirely (fulgur-bq6i:
+/// examples/wasm-demo lost label / legend / option text content and
+/// review_card_inline_block.html lost its "OK Approved" badge for this
+/// exact reason; fulgur-yb27 extended the same policy to the nested
+/// walk and the split simulator).
+///
+/// Returns an empty vec when `id` does not resolve to a node — every
+/// caller treats a missing node as "no children to visit", matching
+/// the previous per-site `get_node` guards.
+fn layout_children_of(doc: &BaseDocument, id: usize) -> Vec<usize> {
+    let Some(node) = doc.get_node(id) else {
+        return Vec::new();
+    };
+    let layout_borrow = node.layout_children.borrow();
+    if let Some(lc) = layout_borrow.as_deref()
+        && !lc.is_empty()
+    {
+        lc.to_vec()
+    } else {
+        node.children.clone()
+    }
+}
+
+/// The shared child skip filter for the paginating walks
+/// (fulgur-pgbrk walker-convergence Phase 2): a child is not walked
+/// when it
+///
+/// - does not resolve to a node in `doc` (dangling id), or
+/// - is a pure-whitespace text node (same convention as
+///   `multicol_layout::partition_children_into_segments`), or
+/// - is out-of-flow positioned (`position: absolute` / `fixed` —
+///   CSS 2.1 §10.6.4 / §9.6: such elements do not contribute to their
+///   containing block's normal-flow height and are handled by separate
+///   passes, `append_position_fixed_fragments` and the abs positioning
+///   pipeline in `render`).
+///
+/// Callers with a *different* out-of-flow policy must NOT use this
+/// helper: `record_subtree_fragments_at_offset` recurses into nested
+/// absolutes (only `fixed` is skipped there), so it keeps its own
+/// inline filter.
+fn is_walkable_skip(doc: &BaseDocument, id: usize) -> bool {
+    let Some(node) = doc.get_node(id) else {
+        return true;
+    };
+    if let Some(text) = node.text_data()
+        && text.content.chars().all(char::is_whitespace)
+    {
+        return true;
+    }
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+    node.primary_styles()
+        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed))
+}
+
 /// The unchanging half of the "close the parent's fragment on the page
 /// it is leaving" idiom, which appears at nine sites in
 /// [`fragment_block_subtree`] (fulgur-pgbrk Risk 1).
@@ -980,41 +1054,11 @@ impl<'a> PaginationLayoutTree<'a> {
                 });
         }
 
-        // Prefer body's `layout_children` — same rationale as
-        // `record_subtree_descendants`. When a block container has
-        // mixed block-level and inline-level children, Stylo
-        // synthesizes anonymous block wrappers around the inline-
-        // level siblings (CSS 2.1 §9.2.1.1). Those wrappers carry
-        // their own `node_id` and Taffy layout, but they live ONLY
-        // in `layout_children` — `children` still points at the
-        // underlying inline elements (e.g. a body containing
-        // `<label>` followed by `<fieldset>` followed by
-        // `<select><option>...</option></select>` produces an
-        // anonymous block wrapping the `<select>` siblings, visible
-        // only in `layout_children`).
-        //
-        // Without this preference v2 silently drops the inline-level
-        // group's paint: extract assigns the inner paragraph's
-        // `node_id` to the synthesized wrapper, but the body iteration
-        // walks raw `children` and never visits the wrapper, so
-        // geometry has no fragment for that node_id and
-        // `dispatch_fragment` skips the paragraph entirely
-        // (fulgur-bq6i: examples/wasm-demo lost label / legend / option
-        // text content for this exact reason).
-        let children = cx
-            .doc
-            .get_node(frame.id)
-            .map(|n| {
-                let layout_borrow = n.layout_children.borrow();
-                if let Some(lc) = layout_borrow.as_deref()
-                    && !lc.is_empty()
-                {
-                    lc.to_vec()
-                } else {
-                    n.children.clone()
-                }
-            })
-            .unwrap_or_default();
+        // fulgur-bq6i / fulgur-yb27: anonymous block wrappers Stylo
+        // synthesizes around inline-level siblings live ONLY in
+        // `layout_children` (CSS 2.1 §9.2.1.1) — the shared
+        // enumeration policy is `layout_children_of`.
+        let children = layout_children_of(cx.doc, frame.id);
 
         let mut emitted = 0usize;
         // Tracks the bottom edge of the previously emitted in-flow child
@@ -1027,32 +1071,15 @@ impl<'a> PaginationLayoutTree<'a> {
         let mut prev_bottom_y_in_body: f32 = 0.0;
 
         for child_id in children {
+            // Shared skip: dangling id / whitespace-only text /
+            // out-of-flow (`position: absolute` / `fixed`) — see
+            // `is_walkable_skip`.
+            if is_walkable_skip(cx.doc, child_id) {
+                continue;
+            }
             let Some(child) = cx.doc.get_node(child_id) else {
                 continue;
             };
-            // Skip pure-whitespace text nodes — same convention as
-            // multicol_layout's `partition_children_into_segments`.
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
-                continue;
-            }
-            // CSS 2.1 §10.6.4 / §9.6: out-of-flow elements
-            // (`position: absolute` / `position: fixed`) do not
-            // contribute to their containing block's normal-flow
-            // height, so the fragmenter must not advance cursors for
-            // them. Abs/fixed children are handled by separate passes
-            // (`append_position_fixed_fragments` and the abs positioning
-            // pipeline in `render`).
-            {
-                use ::style::properties::longhands::position::computed_value::T as Pos;
-                let is_out_of_flow = child.primary_styles().is_some_and(|s| {
-                    matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-                });
-                if is_out_of_flow {
-                    continue;
-                }
-            }
             // fulgur-s67g Phase 2.2: skip `position: running()` named
             // children from the body cursor. They are removed from
             // body flow and placed into `@page` margin boxes per page;
@@ -1605,15 +1632,7 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
-        return false;
-    };
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: &[usize] = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(&parent.children);
-    for &child_id in walk_children {
+    for child_id in layout_children_of(doc, parent_id) {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
@@ -1675,33 +1694,10 @@ fn record_subtree_descendants(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
-        return;
-    };
-    // Prefer Blitz's `layout_children` over the raw DOM `children` when
-    // it's been computed: when a block container has mixed
-    // block-level and inline-level children, Stylo synthesizes
-    // anonymous block wrappers around inline-level siblings (CSS 2.1
-    // §9.2.1.1). Those wrappers are real `Node` instances with their
-    // own `node_id` and Taffy layout, but they live ONLY in
-    // `layout_children` — the original `children` list still points
-    // at the underlying inline elements (e.g. a `<span
-    // display:inline-block>`).
-    //
-    // Without this preference v2 silently drops the inline-level
-    // span: extract assigns the inner paragraph's `node_id` to the
-    // anonymous wrapper (because Blitz's `is_inline_root()` flag sits
-    // on the wrapper), but the fragmenter — walking `children` —
-    // never visits the wrapper, so geometry has no fragment for that
-    // node_id and `dispatch_fragment` skips the paragraph entirely.
-    // (fulgur-bq6i: review_card_inline_block.html lost its
-    // "OK Approved" rounded badge for this exact reason.)
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: &[usize] = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(&parent.children);
-    for &child_id in walk_children {
+    // fulgur-bq6i: anonymous block wrappers live only in
+    // `layout_children` — the shared enumeration policy is
+    // `layout_children_of`.
+    for child_id in layout_children_of(doc, parent_id) {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
@@ -1925,44 +1921,24 @@ fn would_split_block_subtree(
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
-        return false;
-    };
     let mut cursor: f32 = 0.0;
     let mut prev_bottom: f32 = 0.0;
     // fulgur-yb27: walk `layout_children` so anonymous block wrappers
     // Stylo synthesizes around inline-level siblings (CSS 2.1
-    // §9.2.1.1) participate in the cumulative-overflow simulation.
-    // Mirrors the `fragment_block_subtree` walker switch above —
-    // without this, a block whose tail anon block wrapper would
+    // §9.2.1.1) participate in the cumulative-overflow simulation —
+    // the shared enumeration policy is `layout_children_of`, the
+    // shared gap / OOF / whitespace skip is `is_walkable_skip`.
+    // Without this, a block whose tail anon block wrapper would
     // overflow is missed by the preflight, the recursion gate
     // returns false, and the parent falls back to a single
     // oversize fragment.
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: Vec<usize> = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_vec())
-        .unwrap_or_else(|| parent.children.clone());
-    drop(layout_children_borrow);
-    for &child_id in &walk_children {
+    for child_id in layout_children_of(doc, parent_id) {
+        if is_walkable_skip(doc, child_id) {
+            continue;
+        }
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
-            continue;
-        }
-        {
-            use ::style::properties::longhands::position::computed_value::T as Pos;
-            let is_oof = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-            });
-            if is_oof {
-                continue;
-            }
-        }
         let layout = child.final_layout;
         let h = layout.size.height;
         if h <= 0.0 {
@@ -2458,51 +2434,24 @@ fn fragment_block_subtree(
     }
 
     // fulgur-yb27: prefer `layout_children` over raw `children` —
-    // same rationale as `record_subtree_descendants` and
-    // `fragment_pagination_root`. When a block container has mixed
-    // block-level and inline-level children, Stylo synthesizes
-    // anonymous block wrappers around the inline-level siblings (CSS
-    // 2.1 §9.2.1.1). Those wrappers carry their own Taffy layout and
-    // `node_id`, but they live ONLY in `layout_children`. Walking
-    // raw `children` would re-visit the underlying inline runs
-    // without their Taffy layout (so they'd land at the parent's
-    // origin instead of after their predecessor block) and skip the
-    // per-anon-block break decision the body-level walker honours
-    // since fulgur-bq6i.
+    // anonymous block wrappers Stylo synthesizes around inline-level
+    // siblings (CSS 2.1 §9.2.1.1) carry their own Taffy layout and
+    // `node_id` but live ONLY in `layout_children`. The shared
+    // enumeration policy is `layout_children_of`; the shared
+    // whitespace / out-of-flow skip is `is_walkable_skip`.
     //
     // Cross-page recursion correctness depends on fulgur-oc51's
     // parent-fragment push above — flipping this walk to
     // `layout_children` without that fix would lose the parent's
     // pre-recursion-page fragment in mo-006/008 (flex/grid + tall
     // monolithic + trailing inline text).
-    let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: Vec<usize> = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_vec())
-        .unwrap_or_else(|| parent.children.clone());
-    drop(layout_children_borrow);
-    for &child_id in &walk_children {
+    for child_id in layout_children_of(doc, parent_id) {
+        if is_walkable_skip(doc, child_id) {
+            continue;
+        }
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
-        // Whitespace-only text — same skip as `fragment_pagination_root`.
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
-            continue;
-        }
-        // CSS 2.1 §10.6.4: out-of-flow children do not contribute to
-        // their containing block's normal-flow height.
-        {
-            use ::style::properties::longhands::position::computed_value::T as Pos;
-            let is_out_of_flow = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-            });
-            if is_out_of_flow {
-                continue;
-            }
-        }
         let layout = child.final_layout;
         // fulgur-2m6w: same non-finite guard as `fragment_pagination_root`.
         // A nested child with a non-finite Taffy height (`+inf` / `NaN`, or
@@ -4031,8 +3980,6 @@ fn record_fixed_subtree_descendants(
     pages: u32,
     emitted: &mut usize,
 ) {
-    use ::style::properties::longhands::position::computed_value::T as Pos;
-
     #[allow(clippy::too_many_arguments)]
     fn walk(
         geometry: &mut PaginationGeometryTable,
@@ -4080,31 +4027,17 @@ fn record_fixed_subtree_descendants(
             *emitted += 1;
         }
 
-        let children: Vec<usize> = {
-            let layout_borrow = node.layout_children.borrow();
-            if let Some(lc) = layout_borrow.as_deref()
-                && !lc.is_empty()
-            {
-                lc.to_vec()
-            } else {
-                node.children.clone()
-            }
-        };
+        let children: Vec<usize> = layout_children_of(doc, node_id);
         for child_id in children {
+            // Shared skip: dangling id / out-of-flow (handled by their
+            // own passes) / whitespace-only text — see
+            // `is_walkable_skip`.
+            if is_walkable_skip(doc, child_id) {
+                continue;
+            }
             let Some(child) = doc.get_node(child_id) else {
                 continue;
             };
-            let is_oof = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
-            });
-            if is_oof {
-                continue;
-            }
-            if let Some(text) = child.text_data()
-                && text.content.chars().all(char::is_whitespace)
-            {
-                continue;
-            }
             let child_offset = (
                 offset_in_subtree.0 + child.final_layout.location.x,
                 offset_in_subtree.1 + child.final_layout.location.y,
@@ -4122,34 +4055,13 @@ fn record_fixed_subtree_descendants(
         }
     }
 
-    let Some(root) = doc.get_node(fixed_root_id) else {
-        return;
-    };
-    let children: Vec<usize> = {
-        let layout_borrow = root.layout_children.borrow();
-        if let Some(lc) = layout_borrow.as_deref()
-            && !lc.is_empty()
-        {
-            lc.to_vec()
-        } else {
-            root.children.clone()
+    for child_id in layout_children_of(doc, fixed_root_id) {
+        if is_walkable_skip(doc, child_id) {
+            continue;
         }
-    };
-    for child_id in children {
         let Some(child) = doc.get_node(child_id) else {
             continue;
         };
-        let is_oof = child
-            .primary_styles()
-            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed));
-        if is_oof {
-            continue;
-        }
-        if let Some(text) = child.text_data()
-            && text.content.chars().all(char::is_whitespace)
-        {
-            continue;
-        }
         let child_offset = (child.final_layout.location.x, child.final_layout.location.y);
         walk(
             geometry,
@@ -4334,20 +4246,12 @@ fn record_subtree_fragments_at_offset(
         let Some(node) = doc.get_node(node_id) else {
             return;
         };
-        // Prefer `layout_children` so anonymous block wrappers Stylo
-        // synthesizes around mixed inline/block content are visited
-        // (CSS 2.1 §9.2.1.1 — see `fragment_pagination_root` for the
-        // same idiom).
-        let children: Vec<usize> = {
-            let layout_borrow = node.layout_children.borrow();
-            if let Some(lc) = layout_borrow.as_deref()
-                && !lc.is_empty()
-            {
-                lc.to_vec()
-            } else {
-                node.children.clone()
-            }
-        };
+        // fulgur-yb27: anonymous block wrappers live only in
+        // `layout_children` — the shared enumeration policy is
+        // `layout_children_of`. (The skip filter below intentionally
+        // does NOT use `is_walkable_skip`: nested absolutes are
+        // recursed into here, only `fixed` is skipped.)
+        let children: Vec<usize> = layout_children_of(doc, node_id);
         // The containing block for THIS node's out-of-flow children is
         // `node` itself when `node` is positioned (non-static), otherwise the
         // inherited nearest-positioned ancestor (`cb_anchor`/`cb_size`). A
