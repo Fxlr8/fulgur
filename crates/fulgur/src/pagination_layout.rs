@@ -332,6 +332,135 @@ fn is_walkable_skip(doc: &BaseDocument, id: usize) -> bool {
         .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed))
 }
 
+/// Zero-height child handling shared by the body walk
+/// ([`PaginationLayoutTree::fragment_pagination_root`]) and the nested
+/// walk ([`fragment_block_subtree`]) — fulgur-pgbrk
+/// walker-convergence phase 3a.
+///
+/// Zero-height **element** nodes still enter geometry so their
+/// counter / string-set / bookmark markers participate in the per-page
+/// metadata walks (Phase 2.3 fix; the fragment carries `height == 0`
+/// and does not advance the cursor — only the NodeId matters to the
+/// collectors). `break-before` / `break-after` and the CSS Page 3 §5.3
+/// implicit page-name break fire even on such elements (fulgur-p3uf
+/// Phase 3.1.5a): pseudo-only divs and dimension-less images collapse
+/// to `child_h == 0` but still need the directive honoured (see
+/// `tests/pseudo_only_break_before.rs`). Floats stay out of the
+/// page-name comparison and the `prev_used_page` update (CSS 2.1 §9.5)
+/// — they do not establish class A break points.
+///
+/// `frame.kind` decides what "advance a page" does: a nested container
+/// closes its parent fragment on the page being left through
+/// `frame.parent_slice` and rebases its Taffy origin
+/// (`page_taffy_origin` eagerly on break-before; deferred via
+/// `origin_pending_target_y` on break-after); a body frame just
+/// advances `(page, cursor_y)`. The nested walk's `suppress_page_check`
+/// gate (flex / grid / atomic-inline / orthogonal containers) is
+/// threaded in by the caller; the body walk passes `false`.
+///
+/// Returns `true` when the child is an element node and a fragment was
+/// emitted — the body walk increments its emitted count; the nested
+/// walk sets `emitted_anything`.
+fn fragment_zero_height_child(
+    cx: &FragmentationCtx<'_>,
+    frame: &mut ContainerFrame,
+    geometry: &mut PaginationGeometryTable,
+    child: &blitz_dom::Node,
+    child_id: usize,
+    this_top_in_parent: f32,
+    suppress_page_check: bool,
+) -> bool {
+    let layout = child.final_layout;
+    let child_w = if layout.size.width > 0.0 {
+        layout.size.width
+    } else {
+        frame.width
+    };
+    let break_props = cx
+        .styles
+        .and_then(|t| t.get(&child_id))
+        .cloned()
+        .unwrap_or_default();
+    let is_float = crate::blitz_adapter::node_is_floating(child);
+    let (used_start, used_end) = cx.used_page_endpoints_of(child_id);
+    let page_name_changed = !suppress_page_check
+        && !is_float
+        && frame
+            .prev_used_page
+            .as_ref()
+            .is_some_and(|p| *p != used_start);
+    let break_before_page = matches!(
+        break_props.break_before,
+        Some(crate::draw_primitives::BreakBefore::Page)
+    ) || page_name_changed;
+
+    if break_before_page && frame.cursor_y > frame.page_start_y {
+        if let Some(slice) = frame.parent_slice {
+            slice.close_unforced(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+                frame.cursor_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The zero-height breaking child IS the first on the new
+            // page — rebase the origin eagerly.
+            frame.page_taffy_origin = this_top_in_parent;
+            frame.origin_pending_target_y = None;
+            frame.origin_pending_same_row = None;
+        }
+    }
+
+    let mut emitted_here = false;
+    if child.element_data().is_some() {
+        emitted_here = true;
+        geometry
+            .entry(child_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index: frame.page,
+                x: (frame.x_in_body + layout.location.x).as_px(),
+                y: frame.cursor_y.as_px(),
+                width: child_w.as_px(),
+                height: 0.0_f32.as_px(),
+            });
+    }
+
+    if matches!(
+        break_props.break_after,
+        Some(crate::draw_primitives::BreakAfter::Page)
+    ) {
+        if let Some(slice) = frame.parent_slice {
+            slice.close_unforced(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+                frame.cursor_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The NEXT child is the first on the new page — defer the
+            // origin rebase via the pending slot.
+            frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_same_row = None;
+        }
+    }
+    if !is_float {
+        frame.prev_used_page = Some(used_end);
+    }
+    emitted_here
+}
+
 /// The unchanging half of the "close the parent's fragment on the page
 /// it is leaving" idiom, which appears at nine sites in
 /// [`fragment_block_subtree`] (fulgur-pgbrk Risk 1).
@@ -1134,80 +1263,20 @@ impl<'a> PaginationLayoutTree<'a> {
                 frame.width
             };
             if child_h <= 0.0 {
-                // Phase 2.3 fix: zero-height **element** nodes still
-                // need to enter geometry so their counter /
-                // string-set / bookmark markers participate in the
-                // per-page metadata walks (e.g.
-                // `<div class="reset" style="..."></div>` carrying a
-                // `counter-set` declaration). The fragment carries
-                // height 0 so it does not advance the cursor — only
-                // the NodeId matters for the per-page metadata walks.
-                // Whitespace-only text nodes are already filtered
-                // above; running and abs/fixed elements are filtered
-                // before this branch.
-                //
-                // fulgur-p3uf (Phase 3.1.5a): honour `break-before`
-                // / `break-after` on zero-height element nodes too.
-                // Bare `<img>` with no explicit dimensions and
-                // pseudo-only `<div>` (rendering only `::before`
-                // content) both arrive here with `child_h == 0` after
-                // Blitz's intrinsic-size collapse, but their
-                // `break-before: page` directive must still take
-                // effect (CSS Fragmentation §3, forced breaks apply
-                // regardless of the element's own height — see
-                // `tests/pseudo_only_break_before.rs`). An earlier
-                // fragmenter `continue`'d before reading break
-                // properties at all, silently dropping the directive.
-                let zero_break_props = cx
-                    .styles
-                    .and_then(|t| t.get(&child_id))
-                    .cloned()
-                    .unwrap_or_default();
-                // fulgur-uebl: floats are out of normal flow for the
-                // sibling page-name comparison (CSS Page 3 / CSS 2.1
-                // §9.5). Skip the comparison and the `prev_used_page`
-                // update entirely for floated zero-height children;
-                // they do not establish class A break points and should
-                // not influence break decisions on adjacent in-flow
-                // boxes.
-                let zero_is_float = crate::blitz_adapter::node_is_floating(child);
-                let (zero_used_start, zero_used_end) = cx.used_page_endpoints_of(child_id);
-                let zero_page_name_changed = !zero_is_float
-                    && frame
-                        .prev_used_page
-                        .as_ref()
-                        .is_some_and(|p| *p != zero_used_start);
-                let zero_force_break = matches!(
-                    zero_break_props.break_before,
-                    Some(crate::draw_primitives::BreakBefore::Page)
-                ) || zero_page_name_changed;
-                if zero_force_break && frame.cursor_y > 0.0 {
-                    frame.page += 1;
-                    frame.cursor_y = 0.0;
-                }
-                if child.element_data().is_some() {
-                    self.geometry
-                        .entry(child_id)
-                        .or_default()
-                        .fragments
-                        .push(Fragment {
-                            page_index: frame.page,
-                            x: (frame.x_in_body + layout.location.x).as_px(),
-                            y: frame.cursor_y.as_px(),
-                            width: child_w.as_px(),
-                            height: 0.0_f32.as_px(),
-                        });
-                    emitted += 1;
-                }
-                if !zero_is_float {
-                    frame.prev_used_page = Some(zero_used_end);
-                }
-                if matches!(
-                    zero_break_props.break_after,
-                    Some(crate::draw_primitives::BreakAfter::Page)
+                // Shared zero-height child branch (see
+                // `fragment_zero_height_child`). Body frames advance
+                // the page only; the page-name break comparison is
+                // unrestricted here (no `suppress_page_check`).
+                if fragment_zero_height_child(
+                    &cx,
+                    &mut frame,
+                    &mut self.geometry,
+                    child,
+                    child_id,
+                    layout.location.y,
+                    false,
                 ) {
-                    frame.page += 1;
-                    frame.cursor_y = 0.0;
+                    emitted += 1;
                 }
                 continue;
             }
@@ -2581,65 +2650,38 @@ fn fragment_block_subtree(
         }
 
         if child_h <= 0.0 {
-            // Phase 2.3 fix: zero-height **element** nodes still
-            // need to enter geometry so their counter / string-set
-            // / bookmark markers participate in the parity walks.
-            //
-            // Zero-height children skip the inter-child gap (matching
-            // `fragment_pagination_root`'s zero-height branch where
-            // `continue` happens before the gap calc), so break-before
-            // can fire here without first folding gap into cursor_y.
-            if break_before_page && cursor_y > page_start_y {
-                parent_slice.close_unforced(
-                    geometry,
-                    row_state.as_mut(),
-                    page_index,
-                    page_start_y,
-                    cursor_y,
-                );
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                // Zero-height break-before: this child IS the first
-                // on the new page — apply origin rebase eagerly.
-                page_taffy_origin = this_top_in_parent;
-                (origin_pending_target_y, origin_pending_same_row) = (None, None);
-            }
-            if child.element_data().is_some() {
+            // Run the shared zero-height branch (see
+            // `fragment_zero_height_child`). The helper reads /
+            // writes the frame; the in-loop locals shadow its
+            // fields, so flush them into the frame before the call
+            // and rebind them out afterwards.
+            frame.page = page_index;
+            frame.cursor_y = cursor_y;
+            frame.page_start_y = page_start_y;
+            frame.page_taffy_origin = page_taffy_origin;
+            frame.origin_pending_target_y = origin_pending_target_y;
+            frame.origin_pending_same_row = origin_pending_same_row;
+            frame.prev_used_page = prev_used_page.clone();
+            frame.row_state = row_state.take();
+            if fragment_zero_height_child(
+                cx,
+                frame,
+                geometry,
+                child,
+                child_id,
+                this_top_in_parent,
+                suppress_page_check,
+            ) {
                 emitted_anything = true;
-                geometry
-                    .entry(child_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: (parent_x_in_body + layout.location.x).as_px(),
-                        y: cursor_y.as_px(),
-                        width: child_w.as_px(),
-                        height: 0.0_f32.as_px(),
-                    });
             }
-            // Honour `break-after: page` for zero-height elements
-            // too — same fulgur-p3uf (Phase 3.1.5a) fix as
-            // `fragment_pagination_root`'s zero-height branch.
-            if break_after_page {
-                parent_slice.close_unforced(
-                    geometry,
-                    row_state.as_mut(),
-                    page_index,
-                    page_start_y,
-                    cursor_y,
-                );
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                // Zero-height break-after: NEXT child is the first
-                // on the new page — defer origin rebase.
-                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
-            }
-            if !is_float {
-                prev_used_page = Some(used_end.clone());
-            }
+            page_index = frame.page;
+            cursor_y = frame.cursor_y;
+            page_start_y = frame.page_start_y;
+            page_taffy_origin = frame.page_taffy_origin;
+            origin_pending_target_y = frame.origin_pending_target_y;
+            origin_pending_same_row = frame.origin_pending_same_row;
+            prev_used_page = frame.prev_used_page.clone();
+            row_state = frame.row_state.take();
             continue;
         }
 
