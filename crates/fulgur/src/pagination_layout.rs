@@ -282,7 +282,7 @@ fn parent_slice_height(cursor_y: f32, page_start_y: f32, page_height_px: f32) ->
 /// examples/wasm-demo lost label / legend / option text content and
 /// review_card_inline_block.html lost its "OK Approved" badge for this
 /// exact reason; fulgur-yb27 extended the same policy to the nested
-/// walk and the split simulator).
+/// walk and the recursion-gate probe `subtree_requires_recursion`).
 ///
 /// Returns an empty vec when `id` does not resolve to a node — every
 /// caller treats a missing node as "no children to visit", matching
@@ -714,9 +714,11 @@ enum RecursionOutcome {
 /// (grandchild overflow), in-place mid-element split, or a forced
 /// break / page-name change declared below — by composing the three
 /// pure probes [`has_forced_break_below`],
-/// [`has_page_name_change_below`] and [`would_split_block_subtree`].
-/// `would_split_block_subtree` returns `false` when the grandchildren
-/// all fit the available strip, so the "parent CSS height > children
+/// [`has_page_name_change_below`] and [`subtree_requires_recursion`].
+/// `subtree_requires_recursion` evaluates the walk's own
+/// `break_decision` with the walk's own floor (walker-convergence
+/// phase 5) and returns `false` when the grandchildren all fit the
+/// available strip, so the "parent CSS height > children
 /// sum" case falls through to the caller's whole-emit path. The
 /// recursion enters from the child's current page-local position so an
 /// in-place split produces a fragment on the current page and a tail
@@ -816,15 +818,17 @@ fn fragment_recursion_child(
         frame.width
     };
 
-    // The gate. `would_split_block_subtree` is a cheap simulator that
-    // walks the DOM children once with the same gap / OOF / whitespace
-    // skips `fragment_block_subtree` uses; it returns `false` when the
-    // children all fit the available strip.
+    // The gate. `subtree_requires_recursion` probes the child with the
+    // walk's own enumeration (`layout_children_of` + `is_walkable_skip`)
+    // and the walk's own break predicate (`break_decision`) evaluated
+    // at the floor the recursion would actually use — no separate
+    // floor-blind simulator anymore (walker-convergence phase 5). It
+    // returns `false` when the children all fit the available strip.
     let has_splittable_children = !child.children.is_empty();
     // fulgur-7hf5: multicol containers (`column-count > 1` /
     // `column-width: <len>`) distribute children across columns; their
     // DOM children's flow does not match the visual flow
-    // `would_split_block_subtree` simulates. Difference 1: the
+    // `subtree_requires_recursion` probes. Difference 1: the
     // fulgur-916y `column-span: all` exception is body-only.
     let is_multicol = crate::blitz_adapter::is_multicol_container(child);
     let multicol_span_all_exception = frame.kind == ContainerKind::RootBody
@@ -833,12 +837,19 @@ fn fragment_recursion_child(
                 .get_node(id)
                 .is_some_and(crate::blitz_adapter::has_column_span_all)
         });
+    // Difference 4: propagate the permission, not a bare `true` — once
+    // inside a flex / grid / atomic container the whole subtree below
+    // is pinned and must not hand breaks upward. For body frames this
+    // is `true && !false == true`, the body's historical literal. The
+    // gate evaluates its floor from the same value, so gate and walk
+    // agree on the leading-child floor by construction.
+    let allow_leading_break = frame.allow_leading_break && !suppress_page_check;
     let available_strip = (cx.page_h - frame.cursor_y).max(0.0);
     let needs_recursion = has_splittable_children
         && (!is_multicol || multicol_span_all_exception)
         && (has_forced_break_below(cx.doc, child_id, cx.styles, 0)
             || has_page_name_change_below(cx.doc, child_id, cx.used_page_names, 0)
-            || would_split_block_subtree(cx.doc, child_id, available_strip, cx.page_h, 0));
+            || subtree_requires_recursion(cx, child_id, available_strip, allow_leading_break));
     if !needs_recursion {
         return None;
     }
@@ -856,11 +867,6 @@ fn fragment_recursion_child(
     } else {
         frame.depth
     };
-    // Difference 4: propagate the permission, not a bare `true` — once
-    // inside a flex / grid / atomic container the whole subtree below
-    // is pinned and must not hand breaks upward. For body frames this
-    // is `true && !false == true`, the body's historical literal.
-    let allow_leading_break = frame.allow_leading_break && !suppress_page_check;
     let pre_recursion_page = frame.page;
     let pre_recursion_cursor_y = frame.cursor_y;
     let mut child_frame = ContainerFrame::child(
@@ -1164,8 +1170,14 @@ enum BreakDecision {
 }
 
 /// The single break decision, shared by the block strip-overflow cut, the
-/// nested inline-root push-whole, and the body-direct inline push-whole
-/// (fulgur-pgbrk Risk 1).
+/// nested inline-root push-whole, the body-direct inline push-whole,
+/// and the recursion-gate probe [`subtree_requires_recursion`]
+/// (fulgur-pgbrk Risk 1). The gate's adoption (walker-convergence
+/// phase 5) closed the divergence deferred at extraction time: the
+/// probe used to be a floor-blind simulator with its own overflow
+/// check, so its leading-child answer could disagree with the walk;
+/// now gate and walk evaluate this same predicate on the same
+/// enumeration with the same floor.
 ///
 /// `floor` is the y below which a break is legal on this strip:
 ///
@@ -2392,48 +2404,79 @@ fn slice_oversized_leaf(
     }
 }
 
-/// fulgur-7hf5 (Phase 3.1.5c): pre-flight check for the recursion
-/// gate — true if walking `parent_id`'s direct children would cross
-/// a page boundary at `available_h`.
+/// fulgur-7hf5 (Phase 3.1.5c) + fulgur-pgbrk walker-convergence
+/// phase 5: pre-flight check for the recursion gate — true if walking
+/// `node_id`'s direct children would cross a page boundary at
+/// `available_strip`.
 ///
-/// Cheaper-than-real `fragment_block_subtree` simulator: same gap /
-/// OOF / whitespace skips, but no fragment emission. Returns `true`
-/// on the first overflow detected. Lets the caller decide "should I
-/// recurse here?" without paying the cost of recursion when recursion
-/// would not actually split — distinguishing "recurse and split"
-/// (within-child) from "push child whole / emit whole" (at-index or
-/// no split).
+/// This was `would_split_block_subtree`, a cheaper-than-real
+/// `fragment_block_subtree` simulator with its own overflow check —
+/// and it was **floor-blind**: it accumulated a cursor from 0 in
+/// available-strip space with no `overflow_floor` concept, so for a
+/// LEADING child it reported "would split" where the real walk with
+/// `allow_leading_break == false` (flex / grid / atomic-inline /
+/// orthogonal subtrees) pins the child at `page_start_y` and places
+/// it overflowing instead. That divergence (deferred during the
+/// fulgur-pgbrk Risk-1 `break_decision` extraction) cost a wasted
+/// recursion both paths eventually resolved identically.
 ///
-/// `available_h` is the strip height left below the parent's entry
-/// cursor on the current page. `page_h_px` lets the simulator detect
-/// grandchildren taller than a full page (which would themselves
-/// recurse and therefore split, regardless of `available_h`).
-fn would_split_block_subtree(
-    doc: &BaseDocument,
-    parent_id: usize,
-    available_h: f32,
-    page_h_px: f32,
-    depth: usize,
+/// The probe is now assimilated into the walk: it composes the walk's
+/// OWN child enumeration ([`layout_children_of`] +
+/// [`is_walkable_skip`], fulgur-yb27 — anonymous block wrappers Stylo
+/// synthesizes around inline-level siblings participate, CSS 2.1
+/// §9.2.1.1) with the walk's OWN break predicate ([`break_decision`])
+/// evaluated at the walk's floor: `0.0` iff `allow_leading_break` (a
+/// leading child's break may propagate to the container's own leading
+/// edge, css-break-3 §3), else `page_start_y`. Same predicate, same
+/// floor, same enumeration — the gate cannot disagree with the walk
+/// about the leading-child floor again.
+///
+/// `available_strip` is the strip height left below the container's
+/// entry cursor on the current page; the walk seeds the container
+/// frame's `page_start_y` from that cursor, so the page-local entry y
+/// is recovered as `page_h - available_strip` and child tops
+/// accumulate from it in page space. `allow_leading_break` is the
+/// would-be child frame's inherited permission
+/// (`frame.allow_leading_break && !suppress_page_check` at the call
+/// site); when it is false the walk's `propagate_leading_break` is
+/// false too, so the floor derived here is the walk's exact floor.
+/// (When the probed node ITSELF establishes a suppressed context the
+/// gate stays conservative: floor `0.0` may still report a split the
+/// pinned walk would place — the wasted-recursion direction, never an
+/// output divergence.)
+///
+/// Returns `false` when the children all fit the available strip, so
+/// the "parent CSS height > children sum" case falls through to the
+/// caller's whole-emit path. A child taller than a full page reports
+/// `true` regardless of the floor: the walk slices such a child
+/// (`slice_oversized_leaf`) after placing it, which is a split.
+fn subtree_requires_recursion(
+    cx: &FragmentationCtx<'_>,
+    node_id: usize,
+    available_strip: f32,
+    allow_leading_break: bool,
 ) -> bool {
-    if depth >= crate::MAX_DOM_DEPTH {
-        return false;
-    }
-    let mut cursor: f32 = 0.0;
+    let page_h = cx.page_h;
+    let page_start_y = (page_h - available_strip).max(0.0);
+    let floor = if allow_leading_break {
+        0.0
+    } else {
+        page_start_y
+    };
+    // Page-local top of the child under consideration; accumulates the
+    // same inter-child gaps the walk picks up from Taffy's
+    // `layout.location.y` (collapsed margins, padding — CSS 2.1
+    // §10.6.3). Without the anon-wrapper enumeration a block whose tail
+    // anonymous wrapper would overflow is missed by the preflight, the
+    // recursion gate returns false, and the parent falls back to a
+    // single oversize fragment (fulgur-yb27).
+    let mut top: f32 = page_start_y;
     let mut prev_bottom: f32 = 0.0;
-    // fulgur-yb27: walk `layout_children` so anonymous block wrappers
-    // Stylo synthesizes around inline-level siblings (CSS 2.1
-    // §9.2.1.1) participate in the cumulative-overflow simulation —
-    // the shared enumeration policy is `layout_children_of`, the
-    // shared gap / OOF / whitespace skip is `is_walkable_skip`.
-    // Without this, a block whose tail anon block wrapper would
-    // overflow is missed by the preflight, the recursion gate
-    // returns false, and the parent falls back to a single
-    // oversize fragment.
-    for child_id in layout_children_of(doc, parent_id) {
-        if is_walkable_skip(doc, child_id) {
+    for child_id in layout_children_of(cx.doc, node_id) {
+        if is_walkable_skip(cx.doc, child_id) {
             continue;
         }
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = cx.doc.get_node(child_id) else {
             continue;
         };
         let layout = child.final_layout;
@@ -2443,16 +2486,19 @@ fn would_split_block_subtree(
         }
         let this_top = layout.location.y;
         let gap = (this_top - prev_bottom).max(0.0);
-        cursor += gap;
-        if cursor + h > available_h {
+        top += gap;
+        if break_decision(top, h, floor, page_h) == BreakDecision::PushToNextPage {
             return true;
         }
-        if h > page_h_px {
-            // Grandchild itself oversized → would recurse → would
-            // split, regardless of `available_h` budget.
+        if h > page_h {
+            // Child itself oversized → the walk slices it → a split,
+            // regardless of the floor (placement precedes slicing, and
+            // `break_decision` is strict at the floor so the push
+            // branch above can never fire for a leading oversized
+            // child — no infinite page advance).
             return true;
         }
-        cursor += h;
+        top += h;
         prev_bottom = this_top + h;
     }
     false
@@ -2922,9 +2968,14 @@ fn fragment_block_subtree(
             })
     {
         let strip_here = (page_height_px - cursor_in).max(0.0);
-        let splits_here = would_split_block_subtree(doc, parent_id, strip_here, page_height_px, 0);
+        // The floor here is this frame's own: the branch above already
+        // required `propagate_leading_break`, so the probe evaluates
+        // `break_decision` at floor 0.0 — the same answer the old
+        // floor-blind simulator gave on this path.
+        let splits_here =
+            subtree_requires_recursion(cx, parent_id, strip_here, propagate_leading_break);
         let splits_on_a_fresh_page =
-            would_split_block_subtree(doc, parent_id, page_height_px, page_height_px, 0);
+            subtree_requires_recursion(cx, parent_id, page_height_px, propagate_leading_break);
         if splits_here && !splits_on_a_fresh_page {
             return SubtreeResult::RequestBreakBefore;
         }
@@ -9106,6 +9157,115 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(
             super::break_decision(0.0, 900.0, 0.0, 400.0),
             super::BreakDecision::PlaceHere
+        );
+    }
+
+    /// Walker-convergence phase 5: the recursion-gate probe is
+    /// floor-aware. A leading child that overflows the remaining strip
+    /// but fits a fresh page is PINNED at `page_start_y` when
+    /// `allow_leading_break == false` (flex / grid / atomic-inline /
+    /// orthogonal subtrees): the walk places it whole, so the gate
+    /// must answer "no recursion". Setup: container entered mid-page
+    /// (available_strip 200 of a 400px page ⟹ page_start_y = 200) with
+    /// a single 300px leading child at offset 0.
+    #[test]
+    fn subtree_requires_recursion_pins_leading_child_at_page_start_floor() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="probe">
+                <div style="height: 300px"></div>
+              </div>
+            </body></html>
+        "#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "probe").expect("probe div should exist");
+        let cx = super::FragmentationCtx {
+            doc: &doc,
+            styles: None,
+            used_page_names: None,
+            running: None,
+            page_h: 400.0,
+        };
+        assert!(
+            !super::subtree_requires_recursion(&cx, probe, 200.0, false),
+            "leading child pinned at the page_start_y floor must not \
+             trigger recursion — the walk places it whole"
+        );
+    }
+
+    /// Same geometry as the pinned case, but with leading-break
+    /// propagation permitted (`allow_leading_break == true`) the floor
+    /// is 0.0: the leading child's break propagates to the container's
+    /// own leading edge (css-break-3 §3), so the gate must answer
+    /// "recurse".
+    #[test]
+    fn subtree_requires_recursion_recurses_leading_child_at_zero_floor() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="probe">
+                <div style="height: 300px"></div>
+              </div>
+            </body></html>
+        "#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "probe").expect("probe div should exist");
+        let cx = super::FragmentationCtx {
+            doc: &doc,
+            styles: None,
+            used_page_names: None,
+            running: None,
+            page_h: 400.0,
+        };
+        assert!(
+            super::subtree_requires_recursion(&cx, probe, 200.0, true),
+            "leading child overflowing below floor 0.0 must trigger \
+             recursion — the walk pushes/splits it"
+        );
+    }
+
+    /// An oversized (taller-than-a-page) leading child sitting exactly
+    /// on the `page_start_y` floor: `break_decision` is strict at the
+    /// floor, so the push branch can never fire there — no infinite
+    /// page advance — yet the gate must still answer "recurse" because
+    /// the walk slices the child (`slice_oversized_leaf`), which is a
+    /// split. Pinning both sides keeps the gate's terminating decision
+    /// from regressing to the floor-blind push interpretation.
+    #[test]
+    fn subtree_requires_recursion_oversized_child_at_floor_decides_slice_not_loop() {
+        let html = r#"
+            <html><body style="margin: 0">
+              <div id="probe">
+                <div style="height: 900px"></div>
+              </div>
+            </body></html>
+        "#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "probe").expect("probe div should exist");
+        let cx = super::FragmentationCtx {
+            doc: &doc,
+            styles: None,
+            used_page_names: None,
+            running: None,
+            page_h: 400.0,
+        };
+        // The paired walk predicate at the floor: PlaceHere, strictly —
+        // a child on the floor has nowhere to push to.
+        assert_eq!(
+            super::break_decision(200.0, 900.0, 200.0, 400.0),
+            super::BreakDecision::PlaceHere
+        );
+        // available_strip 200 of a 400px page ⟹ page_start_y = 200,
+        // so the oversized leading child sits exactly on the floor.
+        assert!(
+            super::subtree_requires_recursion(&cx, probe, 200.0, false),
+            "oversized leading child at the floor must still recurse — \
+             the walk slices it in place rather than advancing pages \
+             forever"
+        );
+        assert!(
+            super::subtree_requires_recursion(&cx, probe, 200.0, true),
+            "oversized leading child below floor 0.0 must recurse — \
+             pushed, then sliced on the next strip"
         );
     }
 
