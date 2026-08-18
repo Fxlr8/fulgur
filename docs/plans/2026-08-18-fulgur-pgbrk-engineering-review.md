@@ -138,20 +138,19 @@ SKIPPED by `classify()` — css-break promotion inherits that limitation.
 > byte-determinism; upstream crates.io deps. The roadmap is closed under all
 > three.
 
-- **P0 — Finish R7.** Two bounded clusters above; the established
-  design-doc → implement → doc-update workflow. Closes the remaining
-  content-loss classes.
-- **P1 — WPT `css/css-break` phase.** Seed `expectations/css-break.txt`;
-  corral promotions into the upstream corpus; demote hand-written `css_break3_*`
-  to supplement. See the design doc.
-- **P2 — Converge the walker fork.** One walker algorithm (root treated as a
-  container like any other); the simulator assimilated or eliminated; state
-  threading via a context struct. Behavior-preserving; the 2481-test suite is
-  the test, with no re-blessing.
-- **P3 — Adopt the converged design** in
-  [2026-08-18-fulgur-single-pass-fragmentation-design.md](./2026-08-18-fulgur-single-pass-fragmentation-design.md):
-  the single-pass architecture stated as a whole rather than accreted, with the
-  conformance ceiling enumerated.
+- **P0 — Finish R7. SHIPPED 2026-08-19.** `330274b9` (nested monolithic
+  slicing, 4 tests) and `fc2cd156` (flex/grid internal fragmentation, 7
+  tests). `pagination_layout.rs` `#[ignore]` count: 11 → 0.
+- **P1 — WPT `css/css-break` phase. SHIPPED 2026-08-19.** `185ed3a4`:
+  `expectations/css-break.txt` seeded (36 PASS / 969 FAIL / 163 SKIP),
+  phase runner and CI/nightly matrix entries wired. Promotion ledger is live.
+- **P2 — Converge the walker fork. SHIPPED 2026-08-19.** Five commits
+  (`1dd9473e` Ctx/Frame, `a12f6a02` enumeration, `2cf9eb2d` zero-height,
+  `f03fba9b` inline-root, `a91855c5` recursion gate) plus `3555418e`
+  (simulator assimilation). Behavior-preserving throughout; suite green with
+  no re-blessing; VRT fixture-level byte-identical each phase.
+- **P3 — Adopt the converged design. DONE.** This doc and the design doc are
+  the landing artifacts.
 
 ## Non-goals
 

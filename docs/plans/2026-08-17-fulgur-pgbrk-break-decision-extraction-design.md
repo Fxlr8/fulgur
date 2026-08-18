@@ -251,6 +251,13 @@ that claims to be. R4 needs a trustworthy simulator for its "does this subtree
 fit a fresh page?" test, so this is best done as R4's first step, where its
 output changes can be attributed.
 
+> **Resolved 2026-08-19 (`3555418e`).** Phase 5 of the walker convergence
+> replaced the simulator with `subtree_requires_recursion`, which evaluates
+> the walk's own `break_decision` with the parent's actual floor over the
+> walk's own enumeration. The floor disagreement is closed by construction;
+> output was proven unmoved by the full suite, the `--ignored` set, and the
+> VRT stash/diff protocol.
+
 **R2 / R6, R4 / R5.** Unchanged in scope and order by this work; that is the
 point of it.
 

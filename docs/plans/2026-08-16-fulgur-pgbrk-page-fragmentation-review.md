@@ -145,6 +145,14 @@ an edge case.
 > cluster (4). Every css-break-3 rule in the conformance map below now passes.
 > Sections whose work has landed are kept for the failure analysis, with a
 > status line at the top of each.
+>
+> **Campaign closed 2026-08-19.** R7 shipped (`330274b9` monolithic cluster,
+> `fc2cd156` flex/grid cluster): all 11 remaining `#[ignore]`s un-ignore and
+> the `--ignored` count in `pagination_layout.rs` is **0**. The walker was
+> converged per
+> [2026-08-18-fulgur-single-pass-fragmentation-design.md](./2026-08-18-fulgur-single-pass-fragmentation-design.md)
+> (`1dd9473e`…`3555418e`), and the WPT `css-break` phase is seeded as the
+> conformance ledger (`185ed3a4`: 36 PASS / 969 FAIL / 163 SKIP).
 
 Two of these still destroy content. Both have reproducible end-to-end cases
 measured against the current tree. Priority order is as listed.

@@ -18,6 +18,12 @@ byte-determinism, un-forked upstream dependencies** (decisions of record,
 **Tech stack:** Rust, `crates/fulgur/src/pagination_layout.rs` (walk),
 `crates/fulgur/src/render.rs` (paint), `crates/fulgur-wpt` (oracle).
 
+**Status: SHIPPED 2026-08-19.** Theorem, walk, and oracle all landed:
+convergence phases 1–5 (`1dd9473e`, `a12f6a02`, `2cf9eb2d`, `f03fba9b`,
+`a91855c5`, `3555418e`), R7 both clusters (`330274b9`, `fc2cd156`),
+WPT `css-break` phase (`185ed3a4`). `pagination_layout.rs` `#[ignore]`
+count: 0.
+
 **How to read this document.** Sections 1–3 describe the *target* design as a
 whole. Section 4 is the migration from the current tree; each phase is
 independently committable and behavior-preserving. "Thought out, not accreted"
@@ -489,9 +495,9 @@ New invariants this design makes structural, not conventional:
 ## Verification commands
 
 ```bash
-cargo test -p fulgur                          # 2481 passed / 18 ignored baseline
-cargo test -p fulgur --lib -- --ignored       # R7 gaps: expected to FAIL (11)
-cargo test -p fulgur-wpt                      # css-page baseline
+cargo test -p fulgur                          # 2525 passed / 2 ignored (non-lib)
+cargo test -p fulgur --lib -- --ignored       # empty: all R7 gaps closed
+cargo test -p fulgur-wpt                      # css-page + css-break phases
 cargo clippy -p fulgur && cargo fmt --check
 npx markdownlint-cli2 '**/*.md'
 ```
