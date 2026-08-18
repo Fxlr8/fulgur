@@ -687,6 +687,357 @@ fn fragment_inline_child(
     Some(frag_count)
 }
 
+/// Outcome of the shared recursion-gate helper
+/// ([`fragment_recursion_child`]). The body walk turns `Placed` into
+/// `emitted += 1`; the nested walk sets `emitted_anything` and — for
+/// `RequestBreakBefore` — hands the break up to its own caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecursionOutcome {
+    /// The gate fired and the child placed itself (possibly after one
+    /// retry); `frame` holds the post-placement page / cursor.
+    Placed,
+    /// The child's first attempt requested a break before itself and
+    /// the caller opted to propagate it (nested leading-child rule,
+    /// css-break-3 §3.1.1). The geometry table is untouched (the
+    /// `RequestBreakBefore` proof obligation) and `frame` is
+    /// unmodified.
+    RequestBreakBefore,
+}
+
+/// Recursion gate + recurse + one-shot retry shared by the body walk
+/// ([`PaginationLayoutTree::fragment_pagination_root`]) and the nested
+/// walk ([`fragment_block_subtree`]) — fulgur-pgbrk walker-convergence
+/// phase 3c.
+///
+/// The gate (fulgur-g9e3.1 + fulgur-a36m + fulgur-7hf5) recurses into
+/// a child whenever its subtree would split — truly oversized
+/// (grandchild overflow), in-place mid-element split, or a forced
+/// break / page-name change declared below — by composing the three
+/// pure probes [`has_forced_break_below`],
+/// [`has_page_name_change_below`] and [`would_split_block_subtree`].
+/// `would_split_block_subtree` returns `false` when the grandchildren
+/// all fit the available strip, so the "parent CSS height > children
+/// sum" case falls through to the caller's whole-emit path. The
+/// recursion enters from the child's current page-local position so an
+/// in-place split produces a fragment on the current page and a tail
+/// on the next (CSS Fragmentation §3).
+///
+/// When the recursion hands back [`SubtreeResult::RequestBreakBefore`]
+/// the helper retries **at most once**: it advances a page and
+/// re-enters at `cursor_y == 0`, where the callee's propagation
+/// conditions (`cursor_in > 0.0`) can no longer fire.
+///
+/// The two call shapes differ in exactly these parameterized ways; the
+/// gates keep each difference explicit rather than silently unifying
+/// it (same convention as [`fragment_inline_child`]):
+///
+/// 1. **Multicol / `column-span: all` exception.** Both walks treat a
+///    multicol container as atomic (multicol fragments itself via
+///    `multicol_layout::run_pass`; fulgur-7hf5), but the body walk
+///    honours the fulgur-916y exception: a multicol container with a
+///    `column-span: all` direct child lays that span out as a
+///    full-width block flowing between the column groups, so
+///    block-flow recursion may split it across pages. Gate:
+///    `frame.kind` (`RootBody`-only lookup).
+/// 2. **Entry cursor.** Body enters the recursion at its current
+///    cursor; nested enters at the Taffy-rebased page-local y
+///    (`page_start_y + (this_top_in_parent - page_taffy_origin)`) so a
+///    parallel flex / grid cell starts its recursion strip at the
+///    row's y rather than below a previous cell (fulgur-u0p0). Gate:
+///    `frame.kind`.
+/// 3. **Child-frame depth.** Body passes its own depth (body-direct
+///    children stay at depth 0); nested passes `depth + 1`. Preserved
+///    as-is. Gate: `frame.kind`.
+/// 4. **Leading-break propagation (nested-only).** When the first
+///    attempt returns `RequestBreakBefore`, the nested walk may hand
+///    the break further up instead of retrying — a break before a
+///    box's first child is a break before the box, recursively
+///    (css-break-3 §3.1.1). The predicate (`!emitted_anything &&
+///    cursor_in > 0.0 && propagate_leading_break`) needs the nested
+///    walk's *entry* cursor, which the frame no longer holds once the
+///    loop advances, so the nested call site passes it precomputed as
+///    `may_propagate_break`; body passes `false` (the root has no one
+///    to propagate to). The child frame's `allow_leading_break` is
+///    `frame.allow_leading_break && !suppress_page_check` — body's
+///    frame carries `true` and the body call passes `false`, so
+///    body-direct children get the literal `true` they always had.
+/// 5. **Retry advance (nested-only extras).** Before re-entering, the
+///    nested walk closes the parent slice on the outgoing page (when
+///    `cursor_y > page_start_y`, via `frame.parent_slice`) and rebases
+///    `page_taffy_origin` to the breaking child. Body has no parent
+///    to close and no origin to rebase. Gates: `frame.parent_slice`
+///    presence / `frame.kind`.
+/// 6. **Post-placement adoption.** Body adopts the returned
+///    `(page, cursor_y)` verbatim. Nested keeps the row's max bottom
+///    when the recursion stayed on-page (fulgur-u0p0), emits the
+///    fulgur-oc51 parent page spans for every crossed page (skipping
+///    the outgoing-page fragment when nothing landed there), restarts
+///    the parent's fragment at y=0 on the new page, defers the origin
+///    rebase through `origin_pending_target_y` /
+///    `origin_pending_same_row`, and marks the row
+///    `crossed_by_recursion` so same-row cells co-split. Gate:
+///    `frame.kind`.
+/// 7. **`break-after: page` / used-page-name / row max-end tail.**
+///    Nested closes the parent slice and defers the origin rebase;
+///    body advances only. The float-skipped `prev_used_page` update
+///    and the `RowState` max-end tracking are shared (no-ops for body
+///    through `parent_slice: None` / `row_state: None`).
+///
+/// `child_id` is read from `child.id` (the document arena id — the
+/// same id the call sites looked the child up by); that keeps the
+/// signature at the clippy arity ceiling alongside the phase 3a / 3b
+/// helpers.
+///
+/// Returns `None` when the gate said the subtree does not split — the
+/// caller then falls through to its strip-overflow / oversized-slice /
+/// whole-emit fallback. Returns `Some(Placed)` after a successful
+/// placement (body: `emitted += 1`; nested: `emitted_anything =
+/// true`), or `Some(RequestBreakBefore)` when the break propagates
+/// (nested-only; the caller returns `SubtreeResult::RequestBreakBefore`).
+fn fragment_recursion_child(
+    cx: &FragmentationCtx<'_>,
+    frame: &mut ContainerFrame,
+    geometry: &mut PaginationGeometryTable,
+    child: &blitz_dom::Node,
+    this_top_in_parent: f32,
+    suppress_page_check: bool,
+    may_propagate_break: bool,
+) -> Option<RecursionOutcome> {
+    let child_id = child.id;
+    let layout = child.final_layout;
+    let child_h = if layout.size.height.is_finite() {
+        layout.size.height
+    } else {
+        0.0
+    };
+    let child_w = if layout.size.width > 0.0 {
+        layout.size.width
+    } else {
+        frame.width
+    };
+
+    // The gate. `would_split_block_subtree` is a cheap simulator that
+    // walks the DOM children once with the same gap / OOF / whitespace
+    // skips `fragment_block_subtree` uses; it returns `false` when the
+    // children all fit the available strip.
+    let has_splittable_children = !child.children.is_empty();
+    // fulgur-7hf5: multicol containers (`column-count > 1` /
+    // `column-width: <len>`) distribute children across columns; their
+    // DOM children's flow does not match the visual flow
+    // `would_split_block_subtree` simulates. Difference 1: the
+    // fulgur-916y `column-span: all` exception is body-only.
+    let is_multicol = crate::blitz_adapter::is_multicol_container(child);
+    let multicol_span_all_exception = frame.kind == ContainerKind::RootBody
+        && child.children.iter().any(|&id| {
+            cx.doc
+                .get_node(id)
+                .is_some_and(crate::blitz_adapter::has_column_span_all)
+        });
+    let available_strip = (cx.page_h - frame.cursor_y).max(0.0);
+    let needs_recursion = has_splittable_children
+        && (!is_multicol || multicol_span_all_exception)
+        && (has_forced_break_below(cx.doc, child_id, cx.styles, 0)
+            || has_page_name_change_below(cx.doc, child_id, cx.used_page_names, 0)
+            || would_split_block_subtree(cx.doc, child_id, available_strip, cx.page_h, 0));
+    if !needs_recursion {
+        return None;
+    }
+
+    let child_x_in_body = frame.x_in_body + layout.location.x;
+    // Difference 2: entry cursor (see the doc comment).
+    let entry_cursor_y = if frame.kind == ContainerKind::Nested {
+        frame.page_start_y + (this_top_in_parent - frame.page_taffy_origin)
+    } else {
+        frame.cursor_y
+    };
+    // Difference 3: child-frame depth (see the doc comment).
+    let child_depth = if frame.kind == ContainerKind::Nested {
+        frame.depth + 1
+    } else {
+        frame.depth
+    };
+    // Difference 4: propagate the permission, not a bare `true` — once
+    // inside a flex / grid / atomic container the whole subtree below
+    // is pinned and must not hand breaks upward. For body frames this
+    // is `true && !false == true`, the body's historical literal.
+    let allow_leading_break = frame.allow_leading_break && !suppress_page_check;
+    let pre_recursion_page = frame.page;
+    let pre_recursion_cursor_y = frame.cursor_y;
+    let mut child_frame = ContainerFrame::child(
+        child_id,
+        child_x_in_body,
+        child_w,
+        frame.page,
+        entry_cursor_y,
+        allow_leading_break,
+        child_depth,
+    );
+    let mut result = fragment_block_subtree(cx, &mut child_frame, geometry);
+    if result == SubtreeResult::RequestBreakBefore {
+        // Difference 4: hand the break up instead of retrying when the
+        // nested leading-child rule says so.
+        if may_propagate_break {
+            return Some(RecursionOutcome::RequestBreakBefore);
+        }
+        // Difference 5: nested closes the parent on the outgoing page
+        // before advancing; body has no parent to close.
+        if frame.cursor_y > frame.page_start_y {
+            if let Some(slice) = frame.parent_slice {
+                slice.close_unforced(
+                    geometry,
+                    frame.row_state.as_mut(),
+                    frame.page,
+                    frame.page_start_y,
+                    frame.cursor_y,
+                );
+            }
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The retrying child is the first on the new page — rebase
+            // the Taffy origin to its `this_top_in_parent` so it lands
+            // at `page_start_y` (= 0), discarding the inter-child gap
+            // (CSS 3 Fragmentation §3).
+            frame.page_taffy_origin = this_top_in_parent;
+        }
+        // Retry at most once: entered at `cursor_y == 0`, the callee's
+        // `RequestBreakBefore` producers (which require `cursor_in >
+        // 0.0`) cannot fire again.
+        child_frame = ContainerFrame::child(
+            child_id,
+            child_x_in_body,
+            child_w,
+            frame.page,
+            0.0,
+            allow_leading_break,
+            child_depth,
+        );
+        result = fragment_block_subtree(cx, &mut child_frame, geometry);
+    }
+    let SubtreeResult::Placed {
+        page: new_page,
+        cursor_y: new_cursor,
+    } = result
+    else {
+        unreachable!("a retry entered at cursor_y == 0 always places")
+    };
+
+    // Difference 6: post-placement adoption (see the doc comment).
+    match frame.kind {
+        ContainerKind::RootBody => {
+            frame.page = new_page;
+            frame.cursor_y = new_cursor;
+        }
+        ContainerKind::Nested => {
+            frame.page = new_page;
+            // fulgur-u0p0: when the recursion stayed on the same page,
+            // keep the larger of the parent's existing cursor (the row
+            // max bottom from a previous parallel sibling) and the
+            // recursion's returned cursor; when it crossed pages the
+            // old cursor is stale.
+            frame.cursor_y = if new_page == pre_recursion_page {
+                frame.cursor_y.max(new_cursor)
+            } else {
+                new_cursor
+            };
+            // If the recursion crossed a boundary, the parent's
+            // current-page fragment must restart at y=0 on the new
+            // page.
+            if frame.page != pre_recursion_page || new_cursor < frame.page_start_y {
+                if frame.page > pre_recursion_page {
+                    // fulgur-oc51: parent fragments for every crossed
+                    // page span. Skip the outgoing-page fragment when
+                    // the parent has nothing on that page (the
+                    // recursing child is the parent's leading child
+                    // AND the recursion propagated the break up rather
+                    // than placing a slice on the outgoing page).
+                    let child_placed_on_pre_page = geometry.get(&child_id).is_some_and(|g| {
+                        g.fragments
+                            .iter()
+                            .any(|f| f.page_index == pre_recursion_page)
+                    });
+                    let parent_has_content_on_pre_page =
+                        pre_recursion_cursor_y > frame.page_start_y || child_placed_on_pre_page;
+                    if let Some(slice) = frame.parent_slice {
+                        emit_parent_page_spans(
+                            geometry,
+                            frame.row_state.as_mut(),
+                            &slice,
+                            pre_recursion_page,
+                            frame.page,
+                            frame.page_start_y,
+                            parent_has_content_on_pre_page,
+                        );
+                    }
+                }
+                frame.page_start_y = 0.0;
+                frame.origin_pending_target_y = Some(frame.cursor_y);
+                let row_top = this_top_in_parent;
+                let row_bottom = row_top + child_h;
+                let allow_same_row_rebase = cx
+                    .doc
+                    .get_node(frame.id)
+                    .is_some_and(crate::blitz_adapter::is_flex_or_grid_container_node);
+                frame.origin_pending_same_row =
+                    allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+                // fulgur-ysms: mark that this row had a recursion-
+                // driven page cross so subsequent same-row cells know
+                // to co-split.
+                if let Some(ref mut rs) = frame.row_state {
+                    rs.crossed_by_recursion = true;
+                }
+            }
+        }
+    }
+
+    // Difference 7: `break-after: page` tail, float-skipped
+    // used-page-name update, and row max-end tracking.
+    let break_props = cx
+        .styles
+        .and_then(|t| t.get(&child_id))
+        .cloned()
+        .unwrap_or_default();
+    if matches!(
+        break_props.break_after,
+        Some(crate::draw_primitives::BreakAfter::Page)
+    ) {
+        if let Some(slice) = frame.parent_slice {
+            slice.close_unforced(
+                geometry,
+                frame.row_state.as_mut(),
+                frame.page,
+                frame.page_start_y,
+                frame.cursor_y,
+            );
+        }
+        frame.page += 1;
+        frame.cursor_y = 0.0;
+        frame.page_start_y = 0.0;
+        if frame.kind == ContainerKind::Nested {
+            // The NEXT child is the first on the new page — defer the
+            // origin rebase via the pending slot.
+            frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_same_row = None;
+        }
+    }
+    if !crate::blitz_adapter::node_is_floating(child) {
+        let (_, used_end) = cx.used_page_endpoints_of(child_id);
+        frame.prev_used_page = Some(used_end);
+    }
+    if let Some(ref mut rs) = frame.row_state {
+        if frame.page > rs.max_end_page
+            || (frame.page == rs.max_end_page && frame.cursor_y > rs.max_end_cursor_y)
+        {
+            rs.max_end_page = frame.page;
+            rs.max_end_cursor_y = frame.cursor_y;
+        }
+    }
+    frame.emitted_anything = true;
+    Some(RecursionOutcome::Placed)
+}
+
 /// The unchanging half of the "close the parent's fragment on the page
 /// it is leaving" idiom, which appears at nine sites in
 /// [`fragment_block_subtree`] (fulgur-pgbrk Risk 1).
@@ -1601,120 +1952,27 @@ impl<'a> PaginationLayoutTree<'a> {
             }
 
             // fulgur-g9e3.1 + fulgur-a36m + fulgur-7hf5: unified
-            // recursion gate covering all three break cases —
-            //   - truly oversized (`child_h > page_h_px`) caught
-            //     here when `would_split_block_subtree` finds the
-            //     overflowing grandchild,
-            //   - in-place mid-element split (`cursor_y + child_h >
-            //     page_h_px` with `child_h <= page_h_px`),
-            //   - forced break declared anywhere in the subtree.
-            //
-            // The recursion enters from the **current** cursor (not
-            // a pre-advanced 0), so an in-place split with `cursor_y
-            // > 0` produces a within-child fragment on the current
-            // page and a tail on the next (CSS Fragmentation §3,
-            // splits at class B/C break points inside the box).
-            //
-            // `would_split_block_subtree` is a cheap simulator that
-            // walks the DOM children once with the same gap / OOF /
-            // whitespace skips `fragment_block_subtree` uses — it
-            // returns `false` when the children all fit in the
-            // available strip, so the in-place case where the
-            // parent's CSS height exceeds children's sum (e.g. a
-            // 600px div with one 30px h2) falls through to the
-            // existing whole-emit path and avoids the children-sum
-            // parent-height bug.
-            //
-            // `break-inside: avoid` is overridden when the subtree is
-            // truly oversized (CSS Fragmentation §4.2 "unforced
-            // break"), so we still fall through to splitting.
-            let child_node = cx.doc.get_node(child_id);
-            let has_splittable_children = child_node.is_some_and(|n| !n.children.is_empty());
-            // fulgur-7hf5: multicol containers (`column-count > 1` /
-            // `column-width: <len>`) distribute children across
-            // columns; their DOM children's flow does not match the
-            // visual flow `would_split_block_subtree` simulates. Skip
-            // recursion for them — multicol handles its own
-            // fragmentation via `multicol_layout::run_pass`, and the
-            // outer fragmenter treats the multicol container as a
-            // single unit for break decisions.
-            //
-            // fulgur-916y: multicol containers with a `column-span:
-            // all` direct child get an exception — the span subtree
-            // is laid out by Taffy as a full-width block flowing
-            // between the column groups, so block-flow recursion via
-            // `fragment_block_subtree` can split it across pages
-            // when it overflows. Containers without span:all stay
-            // atomic.
-            let is_multicol = child_node.is_some_and(crate::blitz_adapter::is_multicol_container);
-            let multicol_has_span_all = is_multicol
-                && child_node.is_some_and(|n| {
-                    n.children.iter().any(|&id| {
-                        cx.doc
-                            .get_node(id)
-                            .is_some_and(crate::blitz_adapter::has_column_span_all)
-                    })
-                });
-            let available_strip = (cx.page_h - frame.cursor_y).max(0.0);
-            let needs_recursion = has_splittable_children
-                && (!is_multicol || multicol_has_span_all)
-                && (has_forced_break_below(cx.doc, child_id, cx.styles, 0)
-                    || has_page_name_change_below(cx.doc, child_id, cx.used_page_names, 0)
-                    || would_split_block_subtree(cx.doc, child_id, available_strip, cx.page_h, 0));
-            if needs_recursion {
-                let child_x_in_body = frame.x_in_body + layout.location.x;
-                // fulgur-pgbrk R4 / R5: the subtree may hand a break
-                // back up instead of placing itself. Advance the page
-                // and re-enter; the retry cannot request again because
-                // it now starts at `cursor_y == 0`.
-                let mut child_frame = ContainerFrame::child(
-                    child_id,
-                    child_x_in_body,
-                    child_w,
-                    frame.page,
-                    frame.cursor_y,
-                    // Body-direct children are in block flow: a break
-                    // before their leading child may legally become a
-                    // break before the child itself.
-                    true,
-                    frame.depth,
-                );
-                let mut result = fragment_block_subtree(&cx, &mut child_frame, &mut self.geometry);
-                if result == SubtreeResult::RequestBreakBefore {
-                    frame.page += 1;
-                    frame.cursor_y = 0.0;
-                    child_frame = ContainerFrame::child(
-                        child_id,
-                        child_x_in_body,
-                        child_w,
-                        frame.page,
-                        frame.cursor_y,
-                        true,
-                        frame.depth,
-                    );
-                    result = fragment_block_subtree(&cx, &mut child_frame, &mut self.geometry);
-                }
-                let SubtreeResult::Placed {
-                    page: new_page,
-                    cursor_y: new_cursor,
-                } = result
-                else {
-                    unreachable!("a retry entered at cursor_y == 0 always places")
-                };
-                frame.page = new_page;
-                frame.cursor_y = new_cursor;
+            // recursion gate covering all three break cases (truly
+            // oversized, in-place mid-element split, forced break
+            // below) — see `fragment_recursion_child`. Body passes
+            // `false` for `suppress_page_check` and
+            // `may_propagate_break`: the root has no parent to close
+            // and no one to hand a break up to, so a child's
+            // `RequestBreakBefore` is always resolved by the
+            // advance-and-retry inside the helper.
+            if fragment_recursion_child(
+                &cx,
+                &mut frame,
+                &mut self.geometry,
+                child,
+                this_top_in_body,
+                false,
+                false,
+            )
+            .is_some()
+            {
                 emitted += 1;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
-                if !is_float {
-                    frame.prev_used_page = Some(used_end.clone());
-                }
-                if matches!(
-                    break_props.break_after,
-                    Some(crate::draw_primitives::BreakAfter::Page)
-                ) {
-                    frame.page += 1;
-                    frame.cursor_y = 0.0;
-                }
                 continue;
             }
 
@@ -2982,212 +3240,52 @@ fn fragment_block_subtree(
         }
 
         // fulgur-7hf5 (Phase 3.1.5c): unified recursion gate matching
-        // `fragment_pagination_root`'s body-direct branch — recurse
-        // whenever the child's subtree would split (in-place,
-        // truly-oversized, or forced-break-below). The recursion
-        // enters from the current cursor so an in-place split
-        // produces a `WithinChild`-shaped result on the current page
-        // strip and a tail on the next.
-        //
-        // `would_split_block_subtree` returns `false` when all the
-        // child's grandchildren fit the available strip — protects
-        // against the "parent CSS height > children sum" case where
-        // recursion would emit a parent fragment shorter than
-        // expected.
-        let available_strip = (page_height_px - cursor_y).max(0.0);
-        // fulgur-7hf5: see body-direct branch — multicol containers
-        // are atomic from the fragmenter's perspective.
-        let is_multicol = crate::blitz_adapter::is_multicol_container(child);
-        let needs_recursion = !child.children.is_empty()
-            && !is_multicol
-            && (has_forced_break_below(doc, child_id, column_styles, 0)
-                || has_page_name_change_below(doc, child_id, used_page_names, 0)
-                || would_split_block_subtree(doc, child_id, available_strip, page_height_px, 0));
-        if needs_recursion {
-            let parent_had_content = emitted_anything;
-            emitted_anything = true;
-            let pre_recursion_page = page_index;
-            let pre_recursion_cursor_y = cursor_y;
-            // fulgur-u0p0: enter recursion from `child_page_y` (the rebased
-            // page-local y of THIS child) instead of the parent's running
-            // `cursor_y`. For block flow, `child_page_y == cursor_y` after
-            // the cursor_y update above, so this is a no-op. For grid / flex
-            // parallel siblings (same Taffy `location.y` as a previous
-            // sibling on this page), `cursor_y` still holds the previous
-            // sibling's bottom — passing it would stack the parallel cell
-            // below the previous one instead of beside it. Using
-            // `child_page_y` keeps each cell's recursion strip aligned to
-            // the row's y on the current page.
-            let mut child_frame = ContainerFrame::child(
-                child_id,
-                child_x_in_body,
-                child_w,
-                page_index,
-                child_page_y,
-                // Propagate the permission, not a bare `true`: once we are
-                // inside a flex / grid / atomic container the whole subtree
-                // below it is pinned and must not hand breaks upward.
-                propagate_leading_break,
-                depth + 1,
-            );
-            let mut result = fragment_block_subtree(cx, &mut child_frame, geometry);
-            // fulgur-pgbrk R4 / R5: the child wants a break before
-            // itself. If it is OUR leading child too, and we may still
-            // hand breaks up, the request keeps travelling — a break
-            // before a box's first child is a break before the box,
-            // recursively (css-break-3 §3.1.1). Otherwise we are the
-            // container that owns the break: advance a page and re-enter
-            // the child, which then starts at a page top and cannot ask
-            // again.
-            if result == SubtreeResult::RequestBreakBefore {
-                if !parent_had_content && cursor_in > 0.0 && propagate_leading_break {
-                    return SubtreeResult::RequestBreakBefore;
-                }
-                if cursor_y > page_start_y {
-                    parent_slice.close_unforced(
-                        geometry,
-                        row_state.as_mut(),
-                        page_index,
-                        page_start_y,
-                        cursor_y,
-                    );
-                }
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                page_taffy_origin = this_top_in_parent;
-                child_page_y = 0.0;
-                child_frame = ContainerFrame::child(
-                    child_id,
-                    child_x_in_body,
-                    child_w,
-                    page_index,
-                    child_page_y,
-                    propagate_leading_break,
-                    depth + 1,
-                );
-                result = fragment_block_subtree(cx, &mut child_frame, geometry);
+        // `fragment_pagination_root`'s body-direct branch — see
+        // `fragment_recursion_child`. Same flush / rebind convention
+        // as the zero-height and inline helpers above: the helper
+        // reads / writes the frame; the in-loop locals shadow its
+        // fields, so flush them into the frame before the call and
+        // rebind them out afterwards. `may_propagate_break` carries
+        // the nested leading-child rule (css-break-3 §3.1.1 — a break
+        // before a box's first child is a break before the box,
+        // recursively): the helper hands `RequestBreakBefore` back
+        // only when the child is OUR leading child and breaks may
+        // still travel up.
+        let may_propagate_break = !emitted_anything && cursor_in > 0.0 && propagate_leading_break;
+        frame.page = page_index;
+        frame.cursor_y = cursor_y;
+        frame.page_start_y = page_start_y;
+        frame.page_taffy_origin = page_taffy_origin;
+        frame.origin_pending_target_y = origin_pending_target_y;
+        frame.origin_pending_same_row = origin_pending_same_row;
+        frame.prev_used_page = prev_used_page.clone();
+        frame.row_state = row_state.take();
+        let recursed = fragment_recursion_child(
+            cx,
+            frame,
+            geometry,
+            child,
+            this_top_in_parent,
+            suppress_page_check,
+            may_propagate_break,
+        );
+        page_index = frame.page;
+        cursor_y = frame.cursor_y;
+        page_start_y = frame.page_start_y;
+        page_taffy_origin = frame.page_taffy_origin;
+        origin_pending_target_y = frame.origin_pending_target_y;
+        origin_pending_same_row = frame.origin_pending_same_row;
+        prev_used_page = frame.prev_used_page.clone();
+        row_state = frame.row_state.take();
+        match recursed {
+            Some(RecursionOutcome::Placed) => {
+                emitted_anything = true;
+                continue;
             }
-            let SubtreeResult::Placed {
-                page: np,
-                cursor_y: nc,
-            } = result
-            else {
-                unreachable!("a retry entered at a page top always places")
-            };
-            page_index = np;
-            // fulgur-u0p0: when the recursion stayed on the same page,
-            // keep the larger of the parent's existing `cursor_y` (row max
-            // bottom from a previous parallel sibling) and the recursion's
-            // returned `nc`. When the recursion crossed pages, the previous
-            // page's `cursor_y` is stale — adopt `nc` directly.
-            cursor_y = if np == pre_recursion_page {
-                cursor_y.max(nc)
-            } else {
-                nc
-            };
-            // If the recursion crossed a boundary, the parent's
-            // current-page fragment must restart at y=0 on the new
-            // page. Defensive `nc < page_start_y` guards against
-            // backward cursor returns (impossible in normal flow).
-            if page_index != pre_recursion_page || nc < page_start_y {
-                // fulgur-oc51: emit parent fragments for every
-                // page span the recursion crossed. Without this,
-                // only the trailing close at the end of this
-                // function emits a parent fragment (on the *last*
-                // page), so the parent's background / borders
-                // disappear from the previous and intermediate
-                // pages. Pre-recursion overflow close (no-
-                // recursion branch, line ~1713) covers the
-                // analogous case for non-recursive children, but
-                // there is no equivalent push when the page
-                // advance happens *inside* the recursion.
-                //
-                // The parent's content extended to the page
-                // bottom on every previous page (otherwise the
-                // recursion would not have advanced past that
-                // page), so the previous-page fragment spans
-                // `[page_start_y, page_height_px]` and any
-                // intermediate page is a full strip.
-                if page_index > pre_recursion_page {
-                    // The outgoing-page fragment is exactly the visible
-                    // strip `[page_start_y, page_height_px]` — the parent's
-                    // content extended to the page bottom there, otherwise
-                    // the recursion would not have advanced past it.
-                    //
-                    // fulgur-pgbrk: skip the outgoing-page fragment when
-                    // the parent has nothing on that page. That happens
-                    // when the recursing child is the parent's leading
-                    // child (`pre_recursion_cursor_y == page_start_y`)
-                    // AND the recursion itself propagated the break up
-                    // rather than placing a slice — i.e. the child got no
-                    // fragment on the outgoing page either. Without this
-                    // the parent would paint a full-strip background on a
-                    // page where it renders no content. Keeping the
-                    // `child_placed_on_pre_page` term preserves the
-                    // established behaviour for a child that *does* start
-                    // on this page and splits (mo-006/008).
-                    let child_placed_on_pre_page = geometry.get(&child_id).is_some_and(|g| {
-                        g.fragments
-                            .iter()
-                            .any(|f| f.page_index == pre_recursion_page)
-                    });
-                    let parent_has_content_on_pre_page =
-                        pre_recursion_cursor_y > page_start_y || child_placed_on_pre_page;
-                    // fulgur-pgbrk R3: the outgoing-page span counted the
-                    // *splitting* child at its full unfragmented height
-                    // until R3 clipped it to the strip — the helper below
-                    // applies that clipped `[page_start_y, page_height_px]`
-                    // span for every crossed page.
-                    emit_parent_page_spans(
-                        geometry,
-                        row_state.as_mut(),
-                        &parent_slice,
-                        pre_recursion_page,
-                        page_index,
-                        page_start_y,
-                        parent_has_content_on_pre_page,
-                    );
-                }
-                page_start_y = 0.0;
-                origin_pending_target_y = Some(cursor_y);
-                let row_top = this_top_in_parent;
-                let row_bottom = row_top + child_h;
-                origin_pending_same_row =
-                    allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
-                // fulgur-ysms: mark that this row had a recursion-driven page
-                // cross so subsequent same-row cells know to co-split.
-                if let Some(ref mut rs) = row_state {
-                    rs.crossed_by_recursion = true;
-                }
+            Some(RecursionOutcome::RequestBreakBefore) => {
+                return SubtreeResult::RequestBreakBefore;
             }
-
-            // Honour `break-after: page` after recursion.
-            if break_after_page {
-                parent_slice.close_unforced(
-                    geometry,
-                    row_state.as_mut(),
-                    page_index,
-                    page_start_y,
-                    cursor_y,
-                );
-                page_index += 1;
-                cursor_y = 0.0;
-                page_start_y = 0.0;
-                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
-            }
-            if !is_float {
-                prev_used_page = Some(used_end.clone());
-            }
-            if let Some(ref mut rs) = row_state {
-                if page_index > rs.max_end_page
-                    || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
-                {
-                    rs.max_end_page = page_index;
-                    rs.max_end_cursor_y = cursor_y;
-                }
-            }
-            continue;
+            None => {}
         }
 
         // No recursion — apply the strip-overflow page cut for
