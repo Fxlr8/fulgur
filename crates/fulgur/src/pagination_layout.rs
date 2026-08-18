@@ -1359,145 +1359,29 @@ impl<'a> PaginationLayoutTree<'a> {
             // children fit the strip (the gate measures descendant
             // overflow, not the parent's intrinsic height), so we
             // would otherwise emit a single oversized fragment on the
-            // current page and stop. Emit one fragment per page strip
-            // with page-local y — `PaginationGeometry::is_split()`
-            // flips to `true` automatically once `fragments.len() > 1`,
-            // and render.rs picks the per-slice height accordingly.
-            // Descendants are recorded against the *first* slice only;
-            // exact mid-element pagination of nested content is still
-            // future work (see `record_subtree_descendants` notes).
-            //
-            // Tolerance: Stylo / Taffy round CSS-resolved `<length>`
-            // values to integer CSS pixels in some cases — a 220pt
-            // spacer (= 293.333… px) is reported back as `child_h =
-            // 294` while `page_height_px` is computed without that
-            // round-trip (= 293.33334). The literal `>` then trips
-            // by ~0.67 px and the spacer is wrongly sliced into two
-            // pages (gcpm_snapshot tests regress: spacer + page-break
-            // pair becomes 2 + 1 instead of 1 + 1 per section). One
-            // CSS pixel of slack absorbs the quantization without
-            // letting truly oversized content (`300vh ≈ 880 px on a
-            // 293-px strip`) slip through.
-            //
-            // Atomic children opt out: a transformed subtree paints
-            // as a single atomic box (CSS Transforms §6.1) — it must
-            // never split across pages because the rotation /
-            // skew / matrix is applied to a single shape, not
-            // per-slice. `contain: size` is NOT excluded: a
-            // `<div contain:size height:350vh>` still spans four
-            // pages visually (WPT `monolithic-overflow-022-print`),
-            // it's only the descendant content that's atomic.
+            // current page and stop. `slice_oversized_leaf` emits one
+            // fragment per page strip with page-local y — see its doc
+            // comment for the +1px oversize tolerance and the atomic
+            // transform exclusion (fulgur-pgbrk R7 shares the helper
+            // with the nested walk).
             let has_transform = child
                 .primary_styles()
                 .is_some_and(|s| !s.get_box().transform.0.is_empty());
             if !has_transform && child_h > self.page_height_px + 1.0 {
-                let first_slice_h = (self.page_height_px - cursor_y).min(child_h);
-                self.geometry
-                    .entry(child_id)
-                    .or_default()
-                    .fragments
-                    .push(Fragment {
-                        page_index,
-                        x: frag_x.as_px(),
-                        y: cursor_y.as_px(),
-                        width: child_w.as_px(),
-                        height: first_slice_h.as_px(),
-                    });
-                record_subtree_descendants(
+                let (np, nc) = slice_oversized_leaf(
                     &mut self.geometry,
                     self.doc,
                     child_id,
+                    frag_x,
+                    child_w,
+                    child_h,
                     page_index,
                     cursor_y,
-                    frag_x,
+                    self.page_height_px,
                     0,
                 );
-                let mut remaining = child_h - first_slice_h;
-                let mut last_slice_h = first_slice_h;
-                // fulgur-ezst: a CHILDLESS block whose slicing would exceed
-                // the cap is a pathological amplifier — `<div
-                // style="height:99999999px">` is a web-only spacer/overflow
-                // idiom that prints nothing but blank pages. Collapse it to
-                // its single first slice: emit only that slice AND bound the
-                // space it occupies (resume following content on the next
-                // page) so the document does not balloon. Background / border
-                // presence does NOT gate this — nobody authors a
-                // >MAX_PAGES-tall filled band on purpose. A content-bearing
-                // block, or a childless band that fits within the cap, is not
-                // collapsed and takes the truncate-and-warn path below
-                // unchanged.
-                //
-                // fulgur-c8re (security): a replaced element (`<img>` /
-                // `<svg>`) is NOT special-cased out of this collapse —
-                // painting or not. It only reaches this branch when it is
-                // taller than `MAX_PAGES` pages (~10M px), a range no
-                // legitimate single image occupies, so clipping it to one page
-                // loses nothing real — even a *resolved* image, because a 1×1
-                // bitmap stretched with `height:99999999px` is the same
-                // amplifier as an unresolved `src`. Gating on tag name alone
-                // (the removed `is_replaced_content`) let such a node amplify a
-                // few bytes of HTML into ~`MAX_PAGES` blank pages (a validated
-                // high-severity DoS).
-                let collapse_childless = self.page_height_px > 0.0
-                    && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
-                    && !subtree_has_rendered_content(self.doc, child_id, 0);
-                if collapse_childless {
-                    // fulgur-c8re (Codex P1 on PR #575): bound the OCCUPIED
-                    // SPACE, not just the fragment pushes. `implied_page_count`
-                    // reads the max fragment index across ALL nodes, so if the
-                    // slice loop advanced `page_index` to `MAX_PAGES` a trailing
-                    // in-flow sibling (`<div huge></div><p>after</p>`) would be
-                    // stranded on a deep page and re-inflate the PDF to
-                    // ~`MAX_PAGES` blank pages. The first slice already emitted
-                    // above fills the current strip, so resume following content
-                    // on the next page.
-                    log::warn!(
-                        "pagination: collapsed a childless block of height \
-                         {child_h}px (slicing would exceed the {}-page limit) \
-                         to a single page (fulgur-ezst)",
-                        crate::MAX_PAGES,
-                    );
-                    page_index += 1;
-                    cursor_y = 0.0;
-                } else {
-                    // fulgur-2m6w: cap the per-page-strip slicing at
-                    // `MAX_PAGES`. `child_h` is attacker-controlled CSS
-                    // (`height` / `vh`), so without this bound a few bytes of
-                    // HTML (`<div style="height:99999999px">`) generate ~10^5
-                    // fragments — and a non-finite height would never reduce
-                    // `remaining`, looping forever. The `page_index` ceiling is
-                    // load-bearing on its own (it stops the loop even when
-                    // `remaining` is `+inf`); content past the cap is truncated.
-                    while remaining > 0.0 && page_index < crate::MAX_PAGES {
-                        page_index += 1;
-                        last_slice_h = remaining.min(self.page_height_px);
-                        self.geometry
-                            .entry(child_id)
-                            .or_default()
-                            .fragments
-                            .push(Fragment {
-                                page_index,
-                                x: frag_x.as_px(),
-                                y: 0.0_f32.as_px(),
-                                width: child_w.as_px(),
-                                height: last_slice_h.as_px(),
-                            });
-                        remaining -= last_slice_h;
-                    }
-                    if remaining > 0.0 {
-                        log::warn!(
-                            "pagination: block height {child_h}px exceeds the \
-                             {}-page limit; truncating remaining content to \
-                             bound rendering (fulgur-2m6w)",
-                            crate::MAX_PAGES,
-                        );
-                    }
-                    cursor_y = if child_h - first_slice_h > 0.0 {
-                        last_slice_h
-                    } else {
-                        cursor_y + first_slice_h
-                    };
-                }
+                page_index = np;
+                cursor_y = nc;
                 emitted += 1;
                 prev_bottom_y_in_body = this_top_in_body + child_h;
                 if !is_float {
@@ -1743,6 +1627,153 @@ fn record_subtree_descendants(
             child_x,
             depth + 1,
         );
+    }
+}
+
+/// fulgur-sbw2 / fulgur-pgbrk R7: emit a monolithic leaf whose
+/// CSS-resolved height alone exceeds `page_height_px` (e.g.
+/// `<div height:300vh>`) as one fragment per page strip, instead of a
+/// single oversized fragment that hangs past the page bottom. Shared
+/// by the body-direct walk (`fragment_pagination_root`) and the nested
+/// walk (`fragment_block_subtree`) so monolithic content is treated
+/// uniformly at every depth — css-break-3 §4.1 permits either
+/// treatment of monolithic boxes, and fulgur slices everywhere.
+///
+/// Slice 1 lands at (`page_index`, `cursor_y`) with its height clipped
+/// to the remaining strip; slices 2..N start at `y = 0` on successive
+/// pages, each clipped to a full strip. `PaginationGeometry::is_split()`
+/// flips to `true` automatically once `fragments.len() > 1`, and
+/// render.rs picks the per-slice height accordingly. Descendants are
+/// recorded against the *first* slice only; exact mid-element
+/// pagination of nested content is still future work (see
+/// `record_subtree_descendants` notes). `depth` is the caller's
+/// recursion depth, forwarded to that recording.
+///
+/// Returns the updated `(page_index, cursor_y)`: following content
+/// resumes directly after the last slice.
+///
+/// Callers must apply the two reachability gates before invoking:
+///
+/// - **Oversize tolerance.** Stylo / Taffy round CSS-resolved
+///   `<length>` values to integer CSS pixels in some cases — a 220pt
+///   spacer (= 293.333… px) is reported back as `h = 294` while
+///   `page_height_px` is computed without that round-trip
+///   (= 293.33334). A literal `>` then trips by ~0.67 px and the
+///   spacer is wrongly sliced into two pages (gcpm_snapshot tests
+///   regress: spacer + page-break pair becomes 2 + 1 instead of 1 + 1
+///   per section). One CSS pixel of slack absorbs the quantization
+///   without letting truly oversized content (`300vh ≈ 880 px` on a
+///   293-px strip) slip through — hence `h > page_height_px + 1.0`.
+/// - **Atomic transform check.** A transformed subtree paints as a
+///   single atomic box (CSS Transforms §6.1) — it must never split
+///   across pages because the rotation / skew / matrix is applied to a
+///   single shape, not per-slice. `contain: size` is NOT excluded: a
+///   `<div contain:size height:350vh>` still spans four pages visually
+///   (WPT `monolithic-overflow-022-print`), it's only the descendant
+///   content that's atomic.
+#[allow(clippy::too_many_arguments)]
+fn slice_oversized_leaf(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    id: usize,
+    x_in_body: f32,
+    w: f32,
+    h: f32,
+    mut page_index: u32,
+    cursor_y: f32,
+    page_height_px: f32,
+    depth: usize,
+) -> (u32, f32) {
+    let first_slice_h = (page_height_px - cursor_y).min(h);
+    geometry.entry(id).or_default().fragments.push(Fragment {
+        page_index,
+        x: x_in_body.as_px(),
+        y: cursor_y.as_px(),
+        width: w.as_px(),
+        height: first_slice_h.as_px(),
+    });
+    record_subtree_descendants(geometry, doc, id, page_index, cursor_y, x_in_body, depth);
+    let mut remaining = h - first_slice_h;
+    let mut last_slice_h = first_slice_h;
+    // fulgur-ezst: a CHILDLESS block whose slicing would exceed
+    // the cap is a pathological amplifier — `<div
+    // style="height:99999999px">` is a web-only spacer/overflow
+    // idiom that prints nothing but blank pages. Collapse it to
+    // its single first slice: emit only that slice AND bound the
+    // space it occupies (resume following content on the next
+    // page) so the document does not balloon. Background / border
+    // presence does NOT gate this — nobody authors a
+    // >MAX_PAGES-tall filled band on purpose. A content-bearing
+    // block, or a childless band that fits within the cap, is not
+    // collapsed and takes the truncate-and-warn path below
+    // unchanged.
+    //
+    // fulgur-c8re (security): a replaced element (`<img>` /
+    // `<svg>`) is NOT special-cased out of this collapse —
+    // painting or not. It only reaches this branch when it is
+    // taller than `MAX_PAGES` pages (~10M px), a range no
+    // legitimate single image occupies, so clipping it to one page
+    // loses nothing real — even a *resolved* image, because a 1×1
+    // bitmap stretched with `height:99999999px` is the same
+    // amplifier as an unresolved `src`. Gating on tag name alone
+    // (the removed `is_replaced_content`) let such a node amplify a
+    // few bytes of HTML into ~`MAX_PAGES` blank pages (a validated
+    // high-severity DoS).
+    let collapse_childless = page_height_px > 0.0
+        && (remaining / page_height_px).ceil() > crate::MAX_PAGES as f32
+        && !subtree_has_rendered_content(doc, id, 0);
+    if collapse_childless {
+        // fulgur-c8re (Codex P1 on PR #575): bound the OCCUPIED
+        // SPACE, not just the fragment pushes. `implied_page_count`
+        // reads the max fragment index across ALL nodes, so if the
+        // slice loop advanced `page_index` to `MAX_PAGES` a trailing
+        // in-flow sibling (`<div huge></div><p>after</p>`) would be
+        // stranded on a deep page and re-inflate the PDF to
+        // ~`MAX_PAGES` blank pages. The first slice already emitted
+        // above fills the current strip, so resume following content
+        // on the next page.
+        log::warn!(
+            "pagination: collapsed a childless block of height \
+             {h}px (slicing would exceed the {}-page limit) \
+             to a single page (fulgur-ezst)",
+            crate::MAX_PAGES,
+        );
+        (page_index + 1, 0.0)
+    } else {
+        // fulgur-2m6w: cap the per-page-strip slicing at
+        // `MAX_PAGES`. `h` is attacker-controlled CSS
+        // (`height` / `vh`), so without this bound a few bytes of
+        // HTML (`<div style="height:99999999px">`) generate ~10^5
+        // fragments — and a non-finite height would never reduce
+        // `remaining`, looping forever. The `page_index` ceiling is
+        // load-bearing on its own (it stops the loop even when
+        // `remaining` is `+inf`); content past the cap is truncated.
+        while remaining > 0.0 && page_index < crate::MAX_PAGES {
+            page_index += 1;
+            last_slice_h = remaining.min(page_height_px);
+            geometry.entry(id).or_default().fragments.push(Fragment {
+                page_index,
+                x: x_in_body.as_px(),
+                y: 0.0_f32.as_px(),
+                width: w.as_px(),
+                height: last_slice_h.as_px(),
+            });
+            remaining -= last_slice_h;
+        }
+        if remaining > 0.0 {
+            log::warn!(
+                "pagination: block height {h}px exceeds the \
+                 {}-page limit; truncating remaining content to \
+                 bound rendering (fulgur-2m6w)",
+                crate::MAX_PAGES,
+            );
+        }
+        let cursor_y = if h - first_slice_h > 0.0 {
+            last_slice_h
+        } else {
+            cursor_y + first_slice_h
+        };
+        (page_index, cursor_y)
     }
 }
 
@@ -2063,6 +2094,80 @@ struct RowState {
     /// state-restore (co-split); non-recursion page advances are already handled
     /// by the existing `origin_pending_same_row` mechanism.
     crossed_by_recursion: bool,
+}
+
+/// fulgur-oc51: when a child crosses page boundaries *inside*
+/// `fragment_block_subtree` (via recursion into its subtree, or via
+/// fulgur-pgbrk R7 per-strip slicing of an oversized monolithic leaf),
+/// emit the parent's fragment for every page span crossed. Without
+/// this, only the trailing close at the end of the walk emits a parent
+/// fragment (on the *last* page), so the parent's background / borders
+/// disappear from the previous and intermediate pages.
+///
+/// The outgoing-page fragment spans `[page_start_y, page_height_px]`
+/// (the parent's content extended to the page bottom — otherwise the
+/// child would not have advanced past that page); each intermediate
+/// page is a full strip. `emit_pre_page` gates the outgoing-page
+/// fragment: the recursion branch suppresses it when the parent's
+/// leading child handed the break up without placing anything on the
+/// outgoing page (a full-strip background on an empty page would be
+/// wrong); the slicing branch always passes `true` because slice 1
+/// lands on the outgoing page by construction.
+///
+/// Emission dedupes across parallel flex / grid cells through the
+/// row's `emitted_parent_pages` set (`Option<&mut RowState>` — absent
+/// for sequential block flow, where each page is closed at most once).
+fn emit_parent_page_spans(
+    geometry: &mut PaginationGeometryTable,
+    mut row_state: Option<&mut RowState>,
+    parent_slice: &ParentSlice,
+    pre_page: u32,
+    post_page: u32,
+    page_start_y: f32,
+    emit_pre_page: bool,
+) {
+    if post_page <= pre_page {
+        return;
+    }
+    let prev_height = (parent_slice.page_height_px - page_start_y).max(0.0);
+    if emit_pre_page && prev_height > 0.0 {
+        let should_emit = row_state
+            .as_deref_mut()
+            .map(|rs| rs.emitted_parent_pages.insert(pre_page))
+            .unwrap_or(true);
+        if should_emit {
+            geometry
+                .entry(parent_slice.id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index: pre_page,
+                    x: parent_slice.x_in_body.as_px(),
+                    y: page_start_y.as_px(),
+                    width: parent_slice.width.as_px(),
+                    height: prev_height.as_px(),
+                });
+        }
+    }
+    for p in (pre_page + 1)..post_page {
+        let should_emit = row_state
+            .as_deref_mut()
+            .map(|rs| rs.emitted_parent_pages.insert(p))
+            .unwrap_or(true);
+        if should_emit {
+            geometry
+                .entry(parent_slice.id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index: p,
+                    x: parent_slice.x_in_body.as_px(),
+                    y: 0.0_f32.as_px(),
+                    width: parent_slice.width.as_px(),
+                    height: parent_slice.page_height_px.as_px(),
+                });
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2838,28 +2943,11 @@ fn fragment_block_subtree(
                 // `[page_start_y, page_height_px]` and any
                 // intermediate page is a full strip.
                 if page_index > pre_recursion_page {
-                    // The parent's content extended to the page bottom
-                    // on the outgoing page — otherwise the recursion
-                    // would not have advanced past it — so the
-                    // outgoing-page fragment is exactly the visible
-                    // strip `[page_start_y, page_height_px]`.
+                    // The outgoing-page fragment is exactly the visible
+                    // strip `[page_start_y, page_height_px]` — the parent's
+                    // content extended to the page bottom there, otherwise
+                    // the recursion would not have advanced past it.
                     //
-                    // fulgur-pgbrk R3: this previously used
-                    // `max(pre_recursion_cursor_y + child_h -
-                    // page_start_y, strip)`, counting the *splitting*
-                    // child at its full unfragmented height on the
-                    // outgoing page even though only the first slice
-                    // landed there. For a parent starting mid-page that
-                    // over-measures by the part of the child that moved
-                    // to the next page (e.g. `page_start_y=200`,
-                    // `child_h=400` on a 400px page yielded `h=400`, a
-                    // fragment bottom of 600). `render.rs:2793` feeds
-                    // `frag.height` straight into the background /
-                    // border / shadow paint for split blocks, so the
-                    // surplus painted the parent's decorations down
-                    // through the bottom margin and over any running
-                    // footer.
-                    let prev_height = (page_height_px - page_start_y).max(0.0);
                     // fulgur-pgbrk: skip the outgoing-page fragment when
                     // the parent has nothing on that page. That happens
                     // when the recursing child is the parent's leading
@@ -2879,44 +2967,20 @@ fn fragment_block_subtree(
                     });
                     let parent_has_content_on_pre_page =
                         pre_recursion_cursor_y > page_start_y || child_placed_on_pre_page;
-                    if prev_height > 0.0 && parent_has_content_on_pre_page {
-                        let should_emit = row_state
-                            .as_mut()
-                            .map(|rs| rs.emitted_parent_pages.insert(pre_recursion_page))
-                            .unwrap_or(true);
-                        if should_emit {
-                            geometry
-                                .entry(parent_id)
-                                .or_default()
-                                .fragments
-                                .push(Fragment {
-                                    page_index: pre_recursion_page,
-                                    x: parent_x_in_body.as_px(),
-                                    y: page_start_y.as_px(),
-                                    width: parent_w.as_px(),
-                                    height: prev_height.as_px(),
-                                });
-                        }
-                    }
-                    for p in (pre_recursion_page + 1)..page_index {
-                        let should_emit = row_state
-                            .as_mut()
-                            .map(|rs| rs.emitted_parent_pages.insert(p))
-                            .unwrap_or(true);
-                        if should_emit {
-                            geometry
-                                .entry(parent_id)
-                                .or_default()
-                                .fragments
-                                .push(Fragment {
-                                    page_index: p,
-                                    x: parent_x_in_body.as_px(),
-                                    y: 0.0_f32.as_px(),
-                                    width: parent_w.as_px(),
-                                    height: page_height_px.as_px(),
-                                });
-                        }
-                    }
+                    // fulgur-pgbrk R3: the outgoing-page span counted the
+                    // *splitting* child at its full unfragmented height
+                    // until R3 clipped it to the strip — the helper below
+                    // applies that clipped `[page_start_y, page_height_px]`
+                    // span for every crossed page.
+                    emit_parent_page_spans(
+                        geometry,
+                        row_state.as_mut(),
+                        &parent_slice,
+                        pre_recursion_page,
+                        page_index,
+                        page_start_y,
+                        parent_has_content_on_pre_page,
+                    );
                 }
                 page_start_y = 0.0;
                 origin_pending_target_y = Some(cursor_y);
@@ -3017,11 +3081,106 @@ fn fragment_block_subtree(
             child_page_y = 0.0;
         }
 
-        // Child fits the strip (or is an atomic oversized leaf that
-        // simply overflows below the page bottom — with a single
-        // in-flow child there is no valid interior split point, so
-        // the leaf emits whole). Emit its fragment and recurse into
-        // descendants on the same page.
+        // fulgur-pgbrk R7: a monolithic leaf taller than the fragmentainer
+        // (childless, or whose grandchildren all fit — either way the
+        // recursion gate above said "no break points below") is sliced
+        // per strip, uniform with the body-direct walk (fulgur-sbw2).
+        // css-break-3 §4.1 permits either treatment of monolithic
+        // content; fulgur slices in both places so the geometry never
+        // lands outside the page box. `slice_oversized_leaf` carries the
+        // +1px oversize tolerance and the atomic-transform exclusion —
+        // the SAME gates the body-direct branch applies. A nested
+        // `overflow: hidden` box is monolithic identically; it slices
+        // the same way.
+        let has_transform = child
+            .primary_styles()
+            .is_some_and(|s| !s.get_box().transform.0.is_empty());
+        if !has_transform && child_h > page_height_px + 1.0 {
+            emitted_anything = true;
+            let pre_slice_page = page_index;
+            let (np, nc) = slice_oversized_leaf(
+                geometry,
+                doc,
+                child_id,
+                child_x_in_body,
+                child_w,
+                child_h,
+                page_index,
+                child_page_y,
+                page_height_px,
+                depth + 1,
+            );
+            page_index = np;
+            // fulgur-u0p0: when the slicing stayed on the same page
+            // (only reachable at the `MAX_PAGES` ceiling), keep the
+            // larger of the parent's existing `cursor_y` (row max
+            // bottom from a previous parallel sibling) and the slicer's
+            // returned cursor. When it crossed pages, the old page's
+            // `cursor_y` is stale — adopt the returned one directly.
+            cursor_y = if np == pre_slice_page {
+                cursor_y.max(nc)
+            } else {
+                nc
+            };
+            // fulgur-oc51: the child crossed pages, so the parent's
+            // fragment must exist on every crossed page — otherwise its
+            // background / borders vanish from every page but the last.
+            // Slice 1 lands on the outgoing page by construction, so
+            // the pre-page emission is unconditional here.
+            emit_parent_page_spans(
+                geometry,
+                row_state.as_mut(),
+                &parent_slice,
+                pre_slice_page,
+                page_index,
+                page_start_y,
+                true,
+            );
+            page_start_y = 0.0;
+            origin_pending_target_y = Some(cursor_y);
+            let row_top = this_top_in_parent;
+            let row_bottom = row_top + child_h;
+            origin_pending_same_row = allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+            // fulgur-ysms: mark the row crossed so subsequent same-row
+            // cells co-split from the row-start state (uniform with the
+            // recursion branch's handling).
+            if let Some(ref mut rs) = row_state {
+                rs.crossed_by_recursion = true;
+            }
+
+            // Honour `break-after: page` after the slicing (mirrors the
+            // whole-emit tail below).
+            if break_after_page {
+                parent_slice.close_unforced(
+                    geometry,
+                    row_state.as_mut(),
+                    page_index,
+                    page_start_y,
+                    cursor_y,
+                );
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
+                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
+            }
+            if !is_float {
+                prev_used_page = Some(used_end.clone());
+            }
+            if let Some(ref mut rs) = row_state {
+                if page_index > rs.max_end_page
+                    || (page_index == rs.max_end_page && cursor_y > rs.max_end_cursor_y)
+                {
+                    rs.max_end_page = page_index;
+                    rs.max_end_cursor_y = cursor_y;
+                }
+            }
+            continue;
+        }
+
+        // Child fits the strip (or — before fulgur-pgbrk R7 — was an
+        // atomic oversized leaf emitted whole; now only transform-atomic
+        // or sub-tolerance overshoot reaches whole-emit). Emit its
+        // fragment and recurse into descendants on the same page.
         emitted_anything = true;
         geometry
             .entry(child_id)
@@ -5198,6 +5357,112 @@ mod tests {
         ));
     }
 
+    /// fulgur-pgbrk R7: `slice_oversized_leaf` slice arithmetic — an
+    /// exact multiple of the strip height must emit one fragment per
+    /// page with NO trailing zero-height sliver, and the returned
+    /// cursor sits at the filled strip's bottom edge.
+    #[test]
+    fn slice_oversized_leaf_exact_fit_no_sliver() {
+        let html = r#"<html><body><div id="p"></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        // 1600px on an 800px strip from cursor 0: two full slices.
+        let (page, cursor) = super::slice_oversized_leaf(
+            &mut geom, &doc, probe, 0.0, 600.0, 1600.0, 0, 0.0, 800.0, 0,
+        );
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(frags.len(), 2, "exact fit slices, no sliver: {frags:?}");
+        assert_eq!(
+            frags.iter().map(|f| f.page_index).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        for f in frags {
+            assert!(
+                (f.height.to_f32() - 800.0).abs() < 0.01,
+                "full strip: {f:?}"
+            );
+        }
+        assert_eq!(page, 1);
+        assert!(
+            (cursor - 800.0).abs() < 0.01,
+            "resume after a full strip, not past it: {cursor}"
+        );
+    }
+
+    /// fulgur-pgbrk R7: `slice_oversized_leaf` one-past-boundary — a
+    /// box one px taller than the strip emits a second one-px slice on
+    /// the next page, and following content resumes after that sliver.
+    #[test]
+    fn slice_oversized_leaf_one_past_boundary() {
+        let html = r#"<html><body><div id="p"></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        let (page, cursor) = super::slice_oversized_leaf(
+            &mut geom, &doc, probe, 0.0, 600.0, 801.0, 0, 0.0, 800.0, 0,
+        );
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(frags.len(), 2, "sliver slice: {frags:?}");
+        assert!(
+            (frags[1].height.to_f32() - 1.0).abs() < 0.01,
+            "second slice is the 1px remainder: {frags:?}"
+        );
+        assert_eq!(page, 1);
+        assert!(
+            (cursor - 1.0).abs() < 0.01,
+            "resume after the sliver: {cursor}"
+        );
+    }
+
+    /// fulgur-2m6w: `slice_oversized_leaf` caps the per-strip slicing at
+    /// `MAX_PAGES` even when the box is taller — content past the cap is
+    /// truncated (a content-BEARING box, so the childless collapse below
+    /// does not fire).
+    #[test]
+    fn slice_oversized_leaf_max_pages_cap() {
+        let html = r#"<html><body><div id="p"><div id="c">content</div></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        // Clearly past `MAX_PAGES` strips even after the first slice —
+        // mirrors the `height: 99999999px` fixtures used by the ezst
+        // integration tests (a bare `MAX_PAGES + 1` strips would, after
+        // slice 1, leave exactly `MAX_PAGES` strips of remainder and
+        // the childless collapse's `ceil > MAX_PAGES` gate would not
+        // fire).
+        let huge = 9_999_999.0_f32;
+        let (page, _) =
+            super::slice_oversized_leaf(&mut geom, &doc, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0);
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(page, crate::MAX_PAGES, "capped at MAX_PAGES");
+        assert_eq!(
+            frags.len() as u32,
+            crate::MAX_PAGES + 1,
+            "first slice plus MAX_PAGES loop slices, then truncated: {} fragments",
+            frags.len()
+        );
+    }
+
+    /// fulgur-ezst: `slice_oversized_leaf` collapses a CHILDLESS box
+    /// whose slicing would exceed `MAX_PAGES` to its single first slice
+    /// and resumes following content on the next page (cursor 0).
+    #[test]
+    fn slice_oversized_leaf_childless_collapse() {
+        let html = r#"<html><body><div id="p"></div></body></html>"#;
+        let doc = parse(html, 600.0);
+        let probe = find_by_id(&doc, "p").expect("div#p");
+        let mut geom = PaginationGeometryTable::new();
+        let huge = 9_999_999.0_f32;
+        let (page, cursor) =
+            super::slice_oversized_leaf(&mut geom, &doc, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0);
+        let frags = &geom.get(&probe).expect("probe").fragments;
+        assert_eq!(frags.len(), 1, "collapsed to the first slice: {frags:?}");
+        assert_eq!(page, 1, "only one page consumed");
+        assert!((frags[0].height.to_f32() - 800.0).abs() < 0.01);
+        assert!((cursor).abs() < 0.01, "following content starts at y=0");
+    }
+
     /// fulgur-c8re (security): a pathologically tall CHILDLESS replaced
     /// element (`<img>` / `<svg>`) that paints nothing must collapse like any
     /// blank spacer. "Paints nothing" covers the common offline-first case of
@@ -5361,36 +5626,60 @@ mod tests {
         }
     }
 
-    /// fulgur-i5a: `overflow: hidden` is a pure visual effect that must
-    /// not affect pagination. A 50px-tall parent containing a 1200px-tall
-    /// child stays single-page even though the child would otherwise
-    /// extend past the 800px page strip. The clip is applied at draw
-    /// time (`render.rs` push/pop_clip_path), and pagination follows the
-    /// parent's layout box, not the child's overflowing intrinsic height.
+    /// fulgur-i5a + fulgur-pgbrk R7: `overflow: hidden` boxes are
+    /// monolithic — the clip is applied at draw time (`render.rs`
+    /// push/pop_clip_path), so pagination treats an overflowing child
+    /// as unsplittable. A monolithic child taller than the
+    /// fragmentainer is nonetheless sliced per strip, uniform with the
+    /// body-direct path (fulgur-sbw2) and the nested walk
+    /// (fulgur-pgbrk R7): one fragment per page, each inside its strip.
     #[test]
-    #[ignore = "fulgur-pgbrk R3: monolithic content taller than the fragmentainer is emitted whole and overflows (css-break-3 §4.1 permits this, but fulgur already slices in the body-direct path — see R7). The overflow guard in run_pass_inner now catches it. Un-ignore once the nested path slices per strip like the body-direct one."]
-    fn overflow_hidden_does_not_split_oversize_child() {
+    fn overflow_hidden_oversize_child_is_sliced_per_strip() {
         let html = r#"
             <html><body>
-              <div style="height: 50px; overflow: hidden">
-                <div style="height: 1200px"></div>
+              <div id="outer" style="height: 50px; overflow: hidden">
+                <div id="inner" style="height: 1200px"></div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 600.0);
+        let outer = find_by_id(&doc, "outer").expect("div#outer");
+        let inner = find_by_id(&doc, "inner").expect("div#inner");
         let table = run_pass(&mut doc, 800.0);
 
-        // body + outer (50px clip) + inner (1200px overflowing child)
-        // = 3 entries; every entry has a single fragment on page 0.
-        assert_eq!(table.len(), 3, "expected body + outer + inner = 3 entries");
-        for (id, geom) in &table {
-            assert_eq!(
-                geom.fragments.len(),
-                1,
-                "node {id} should not split under overflow:hidden parent"
+        // The 1200px monolithic child on an 800px strip: two slices
+        // (800 + 400) on consecutive pages instead of one overflowing
+        // fragment on page 0.
+        let inner_frags = &table.get(&inner).expect("inner in geometry").fragments;
+        assert_eq!(
+            inner_frags.len(),
+            2,
+            "monolithic oversize child is sliced per strip; frags={inner_frags:?}"
+        );
+        let pages: Vec<u32> = inner_frags.iter().map(|f| f.page_index).collect();
+        assert_eq!(
+            pages,
+            vec![0, 1],
+            "consecutive pages; frags={inner_frags:?}"
+        );
+        let total: f32 = inner_frags.iter().map(|f| f.height.to_f32()).sum();
+        assert!(
+            (total - 1200.0).abs() <= 0.5,
+            "the slices reconstruct the box height exactly; frags={inner_frags:?}"
+        );
+        for f in inner_frags {
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= 800.5,
+                "no slice may extend past the strip; frags={inner_frags:?}"
             );
-            assert_eq!(geom.fragments[0].page_index, 0);
         }
+        // The clipped parent still participates in geometry on every
+        // page its child crossed (fulgur-oc51).
+        let outer_frags = &table.get(&outer).expect("outer in geometry").fragments;
+        assert!(
+            outer_frags.iter().any(|f| f.page_index == 0),
+            "the overflow:hidden parent keeps a page-0 fragment; frags={outer_frags:?}"
+        );
     }
 
     /// Phase 4 prerequisite repro: confirm `string-set` carry semantic
@@ -7403,7 +7692,6 @@ h2 { string-set: chapter-title content(text); }
     /// (`final_layout` defaults), and pagination terminates with a
     /// single fragment.
     #[test]
-    #[ignore = "fulgur-pgbrk R3: monolithic content taller than the fragmentainer is emitted whole and overflows (css-break-3 §4.1 permits this, but fulgur already slices in the body-direct path — see R7). The overflow guard in run_pass_inner now catches it. Un-ignore once the nested path slices per strip like the body-direct one."]
     fn fragment_block_subtree_walks_layout_children_for_anon_block_synthesis() {
         // Outer wrapper > [tall block sibling, trailing inline text].
         // Stylo wraps the trailing text in an anon block whose Taffy
@@ -7441,7 +7729,6 @@ h2 { string-set: chapter-title content(text); }
     /// only fragment to the *last* page (line 1799 close), leaving
     /// page 1 with no parent paint at all (background/borders gone).
     #[test]
-    #[ignore = "fulgur-pgbrk R3: monolithic content taller than the fragmentainer is emitted whole and overflows (css-break-3 §4.1 permits this, but fulgur already slices in the body-direct path — see R7). The overflow guard in run_pass_inner now catches it. Un-ignore once the nested path slices per strip like the body-direct one."]
     fn fragment_block_subtree_emits_parent_fragment_when_recursion_crosses_page() {
         // Two-deep nesting: outer (with background) > inner > [tall
         // child, trailing inline]. Inner's recursion will cross the
@@ -8997,19 +9284,14 @@ h2 { string-set: chapter-title content(text); }
     /// nowhere to push it and no interior break point.
     ///
     /// css-break-3 §4.1 allows a UA either to overflow such a box or to
-    /// slice it per fragmentainer. fulgur already slices in the
-    /// body-direct path (fulgur-sbw2); the nested path emits it once,
-    /// oversized. This test states the target — slice in both places —
-    /// so the two paths agree and no fragment lands outside the page
-    /// box.
+    /// slice it per fragmentainer. fulgur slices in BOTH the body-direct
+    /// path (fulgur-sbw2) and the nested path (fulgur-pgbrk R7) so the
+    /// two walks agree and no fragment lands outside the page box.
     ///
     /// It must also keep pinning that the `child_page_y > 0.0` floor is
     /// never "fixed" into an infinite page-advance loop: every slice
     /// after the first starts at the top of its page, and the count is
     /// bounded by the box height.
-    #[ignore = "fulgur-pgbrk R7: the nested path emits an oversized leaf whole \
-                instead of slicing it per strip like the body-direct path. \
-                Un-ignore when nested monolithic content is sliced."]
     #[test]
     fn oversized_unbreakable_leading_leaf_at_page_top_is_sliced_per_strip() {
         let html = r#"
@@ -9273,10 +9555,9 @@ h2 { string-set: chapter-title content(text); }
     /// representation". Body-direct, fulgur takes the slicing option
     /// (fulgur-sbw2): one fragment per page strip, each inside its
     /// strip, and following content continues after the last slice.
-    /// (The NESTED leading-child variant instead emits once, oversized
-    /// — pinned by `oversized_unbreakable_leading_leaf_at_page_top_
-    /// emits_once`; that asymmetry is a documented limitation, not a
-    /// spec violation, since §4.1 allows either treatment.)
+    /// The nested walk (fulgur-pgbrk R7) slices identically — pinned
+    /// by `oversized_unbreakable_leading_leaf_at_page_top_is_sliced_
+    /// per_strip`.
     #[test]
     fn css_break3_monolithic_body_direct_box_is_sliced_per_strip() {
         let html = r#"
