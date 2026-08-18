@@ -2450,6 +2450,12 @@ fn slice_oversized_leaf(
 /// caller's whole-emit path. A child taller than a full page reports
 /// `true` regardless of the floor: the walk slices such a child
 /// (`slice_oversized_leaf`) after placing it, which is a split.
+/// Likewise (fulgur-pgbrk R7b) a child pinned at its floor — the
+/// suppressed-floor containers (flex / grid / atomic-inline /
+/// orthogonal) forbid the push — that spills the strip reports `true`:
+/// the walk slices it in place, and when it carries descendants the
+/// recursion must walk them so spill-shaped descendants fragment too
+/// instead of being recorded whole past the strip.
 fn subtree_requires_recursion(
     cx: &FragmentationCtx<'_>,
     node_id: usize,
@@ -2488,6 +2494,15 @@ fn subtree_requires_recursion(
         let gap = (this_top - prev_bottom).max(0.0);
         top += gap;
         if break_decision(top, h, floor, page_h) == BreakDecision::PushToNextPage {
+            return true;
+        }
+        if top <= floor && top + h > page_h + OVERFLOW_EPS_PX {
+            // fulgur-pgbrk R7b: pinned at the floor and spilling the
+            // strip — the walk's spill-slice fires exactly here, which
+            // is a split; a spilling child with descendants needs the
+            // recursion so its descendants fragment per strip too.
+            // The epsilon mirrors the walk's spill predicate so gate
+            // and walk stay in agreement on the boundary.
             return true;
         }
         if h > page_h {
@@ -3397,21 +3412,44 @@ fn fragment_block_subtree(
             child_page_y = 0.0;
         }
 
-        // fulgur-pgbrk R7: a monolithic leaf taller than the fragmentainer
-        // (childless, or whose grandchildren all fit — either way the
-        // recursion gate above said "no break points below") is sliced
-        // per strip, uniform with the body-direct walk (fulgur-sbw2).
-        // css-break-3 §4.1 permits either treatment of monolithic
-        // content; fulgur slices in both places so the geometry never
-        // lands outside the page box. `slice_oversized_leaf` carries the
-        // +1px oversize tolerance and the atomic-transform exclusion —
-        // the SAME gates the body-direct branch applies. A nested
-        // `overflow: hidden` box is monolithic identically; it slices
-        // the same way.
+        // fulgur-pgbrk R7: slice a child the walk cannot place whole,
+        // uniform with the body-direct walk (fulgur-sbw2). Two shapes
+        // reach this branch, both handled identically by
+        // `slice_oversized_leaf` (whose doc comment carries the +1px
+        // oversize tolerance and the atomic-transform exclusion — the
+        // SAME gates the body-direct branch applies):
+        //
+        // 1. **Oversized**: a monolithic leaf whose own height exceeds
+        //    the fragmentainer (childless, or whose grandchildren all
+        //    fit — either way the recursion gate above said "no break
+        //    points below"). css-break-3 §4.1 permits either treatment
+        //    of monolithic content; fulgur slices everywhere so the
+        //    geometry never lands outside the page box. A nested
+        //    `overflow: hidden` box is monolithic identically.
+        // 2. **Strip spill (R7b)**: a child that fits a fresh strip
+        //    but crosses the current strip boundary at a floor that
+        //    forbids the push — flex / grid cells, atomic-inline and
+        //    orthogonal children, whose items are not class A break
+        //    points (§2.1 / §4.1) and whose leading child is pinned at
+        //    the row's entry cursor by the suppressed floor. Per §2.1
+        //    each cell / item is a parallel fragmentation flow, and
+        //    §4.1 lets a layout model add break points; since width is
+        //    page-invariant the slice is exact. Each crossed strip
+        //    gets one fragment clipped to it at the box's computed
+        //    content offsets — the RowState co-split machinery then
+        //    starts the same-row sibling at the identical cursor, so
+        //    parallel cells clip in lockstep and
+        //    `find_overflowing_fragments` has nothing left to catch.
+        //
+        // In both shapes the whole-emit fallback below is unreachable:
+        // geometry that would hang past the strip is sliced instead
+        // of overflowing the page box.
         let has_transform = child
             .primary_styles()
             .is_some_and(|s| !s.get_box().transform.0.is_empty());
-        if !has_transform && child_h > page_height_px + 1.0 {
+        let oversized = child_h > page_height_px + 1.0;
+        let spills_strip = child_page_y + child_h > page_height_px + OVERFLOW_EPS_PX;
+        if !has_transform && (oversized || spills_strip) {
             emitted_anything = true;
             let pre_slice_page = page_index;
             let (np, nc) = slice_oversized_leaf(
@@ -8256,194 +8294,297 @@ h2 { string-set: chapter-title content(text); }
     }
 
     #[test]
-    #[ignore = "fulgur-pgbrk R3: flex / grid items are not class A break points (css-break-3 §4.1), so fulgur co-splits rows in place and a row taller than the strip overflows the page box. The overflow guard in run_pass_inner now catches that. Un-ignore once flex / grid rows fragment internally."]
     fn grid_row_leaf_cells_cosplit_across_page_boundary() {
         // 2-col grid, each leaf cell 60px tall.
         // spacer 80px pushes grid to y=80 on a 100px page.
-        // pre-fix: cell 2 pushed to page 1 at y=0 (whole cell).
-        // post-fix: both cells split — page 0 y=80..100 (20px),
-        //           page 1 y=0..40 (40px).
+        // Cells are not class A break points (css-break-3 §4.1): the
+        // row co-splits internally — each cell emits one fragment per
+        // crossed strip, clipped to it: page 0 at y=80 (20px clipped
+        // at the strip bottom), page 1 at y=0 (40px remainder).
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 80px"></div>
               <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
-                <div style="height: 60px; width: 100px"></div>
-                <div style="height: 60px; width: 100px"></div>
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px"></div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        // collect all 60px-tall, 100px-wide fragments (the two leaf cells)
-        let mut frags: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 60.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
-        assert_eq!(
-            on_page0.len(),
-            2,
-            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
-        );
-        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
+        // Parallel-row alignment: both cells' page-0 slices share the
+        // same entry y.
+        let y1 = geom.get(&c1).unwrap().fragments[0].y.to_f32();
+        let y2 = geom.get(&c2).unwrap().fragments[0].y.to_f32();
         assert!(
-            (ys[0] - ys[1]).abs() < 0.5,
-            "page-0 fragments must share the same y (parallel row); ys={ys:?}"
+            (y1 - y2).abs() < 0.5,
+            "page-0 slices must share the same y (parallel row); y1={y1}, y2={y2}"
         );
     }
 
     #[test]
-    #[ignore = "fulgur-pgbrk R3: flex / grid items are not class A break points (css-break-3 §4.1), so fulgur co-splits rows in place and a row taller than the strip overflows the page box. The overflow guard in run_pass_inner now catches that. Un-ignore once flex / grid rows fragment internally."]
     fn flex_row_leaf_cells_cosplit_across_page_boundary() {
+        // Same clipped-co-split shape as the grid variant above, on a
+        // flex container.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 80px"></div>
               <div style="display: flex; width: 200px;">
-                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
-                <div style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+                <div id="c1" style="height: 60px; width: 100px; flex: 0 0 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px; flex: 0 0 100px"></div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        let mut frags: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 60.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        frags.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let on_page0: Vec<_> = frags.iter().filter(|(p, _, _)| *p == 0).collect();
-        assert_eq!(
-            on_page0.len(),
-            2,
-            "both leaf cells must have a fragment on page 0 (co-split); frags={frags:?}"
-        );
-        let ys: Vec<f32> = on_page0.iter().map(|(_, _, y)| *y).collect();
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
+        let y1 = geom.get(&c1).unwrap().fragments[0].y.to_f32();
+        let y2 = geom.get(&c2).unwrap().fragments[0].y.to_f32();
         assert!(
-            (ys[0] - ys[1]).abs() < 0.5,
-            "page-0 fragments must share the same y; ys={ys:?}"
+            (y1 - y2).abs() < 0.5,
+            "page-0 slices must share the same y (parallel row); y1={y1}, y2={y2}"
         );
     }
 
     #[test]
-    #[ignore = "fulgur-pgbrk R3: flex / grid items are not class A break points (css-break-3 §4.1), so fulgur co-splits rows in place and a row taller than the strip overflows the page box. The overflow guard in run_pass_inner now catches that. Un-ignore once flex / grid rows fragment internally."]
     fn grid_row_recursive_cells_cosplit_across_page_boundary() {
-        // 2-col grid, each cell has 2 inner divs (40px each) = 80px total.
-        // spacer 70px, page_height 100px → grid starts at y=70.
-        // Row bottom = 70 + 80 = 150 > 100 → crosses page boundary.
+        // 2-col grid; each cell has 2 inner divs (40px each) = 80px.
+        // spacer 70px, 100px page → grid row starts at y=70, crossing
+        // the boundary (70 + 80 = 150 > 100).
         //
-        // pre-fix: cell 2 recursion starts at page 1 cursor=0 (because
-        //   cell 1's recursion advanced page_index to 1) → both inner
-        //   divs of cell 2 land entirely on page 1.
-        // post-fix: both cells start recursion at page 0 cursor=70 →
-        //   first inner div (40px) splits at page boundary, landing
-        //   partly on page 0 (y=70..100) and partly on page 1 (y=0..10).
-        //   Specifically: both columns' first inner divs must appear on page 0.
+        // The first inner div of EACH column fragments internally:
+        // page 0 at y=70 (30px clipped at the strip bottom) and page 1
+        // at y=0 (10px remainder). The second inner div continues at
+        // page 1 y=10 whole. Originally the sentinel pinned presence:
+        // the RIGHT column's first inner div must appear on page 0
+        // (pre-slicing the recursion jumped straight to page 1); now
+        // it also pins the clipped slice geometry.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 70px"></div>
               <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
                 <div style="width: 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="a1" style="height: 40px; width: 100px"></div>
+                  <div id="a2" style="height: 40px; width: 100px"></div>
                 </div>
                 <div style="width: 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="b1" style="height: 40px; width: 100px"></div>
+                  <div id="b2" style="height: 40px; width: 100px"></div>
                 </div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let ids = ["a1", "a2", "b1", "b2"]
+            .iter()
+            .map(|s| (find_by_id(doc.deref_mut(), s).expect(s), *s))
+            .collect::<Vec<_>>();
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        // inner divs: 40px tall, 100px wide
-        let mut inner: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 40.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        // Each column has 2 inner divs (40px each).
-        // After the fix, both columns' FIRST inner div must appear on page 0
-        // (at y≈70, since the grid row starts there).
-        // Pre-fix: only cell 1's first inner div is on page 0; cell 2's
-        // recursion starts from page 1 so its inner divs are at y=0,40 on page 1.
-        let _first_divs_page0: Vec<_> = inner
-            .iter()
-            .filter(|(p, _, y)| *p == 0 && *y > 60.0)
-            .collect();
-        // The critical assertion: the RIGHT column's first inner div must also
-        // appear on page 0 (at x=100, y≈70). Pre-fix: cell 2's recursion starts
-        // from page 1, so its inner divs land at x=100 only on page 1.
-        let right_col_page0: Vec<_> = inner
-            .iter()
-            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
-            .collect();
-        assert!(
-            !right_col_page0.is_empty(),
-            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
-        );
+        for (id, name) in &ids {
+            let first = name.ends_with('1');
+            let slices: &[(u32, f32, f32)] = if first {
+                // First inner div of each column co-splits in place.
+                &[(0, 70.0, 30.0), (1, 0.0, 10.0)]
+            } else {
+                // Second inner div continues on page 1 at y=10.
+                &[(1, 10.0, 40.0)]
+            };
+            assert_cell_slices(&geom, *id, name, 100.0, 40.0, slices);
+        }
     }
 
     #[test]
-    #[ignore = "fulgur-pgbrk R3: flex / grid items are not class A break points (css-break-3 §4.1), so fulgur co-splits rows in place and a row taller than the strip overflows the page box. The overflow guard in run_pass_inner now catches that. Un-ignore once flex / grid rows fragment internally."]
     fn flex_row_recursive_cells_cosplit_across_page_boundary() {
+        // Same clipped-co-split shape as the grid variant above, on a
+        // flex container.
         let html = r#"
             <html><body style="margin: 0; padding: 0">
               <div style="height: 70px"></div>
               <div style="display: flex; width: 200px;">
                 <div style="width: 100px; flex: 0 0 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="a1" style="height: 40px; width: 100px"></div>
+                  <div id="a2" style="height: 40px; width: 100px"></div>
                 </div>
                 <div style="width: 100px; flex: 0 0 100px">
-                  <div style="height: 40px; width: 100px"></div>
-                  <div style="height: 40px; width: 100px"></div>
+                  <div id="b1" style="height: 40px; width: 100px"></div>
+                  <div id="b2" style="height: 40px; width: 100px"></div>
                 </div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let ids = ["a1", "a2", "b1", "b2"]
+            .iter()
+            .map(|s| (find_by_id(doc.deref_mut(), s).expect(s), *s))
+            .collect::<Vec<_>>();
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
 
-        let mut inner: Vec<(u32, f32, f32)> = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 40.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .map(|f| (f.page_index, f.x.to_f32(), f.y.to_f32()))
-            .collect();
-        inner.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (id, name) in &ids {
+            let first = name.ends_with('1');
+            let slices: &[(u32, f32, f32)] = if first {
+                &[(0, 70.0, 30.0), (1, 0.0, 10.0)]
+            } else {
+                &[(1, 10.0, 40.0)]
+            };
+            assert_cell_slices(&geom, *id, name, 100.0, 40.0, slices);
+        }
+    }
 
-        let right_col_page0: Vec<_> = inner
-            .iter()
-            .filter(|(p, x, y)| *p == 0 && (x - 100.0).abs() < 0.5 && *y > 60.0)
-            .collect();
-        assert!(
-            !right_col_page0.is_empty(),
-            "right column's first inner div must appear on page 0 at x=100 (pre-fix: only on page 1); inner={inner:?}"
+    // ── per-cell clip arithmetic (fulgur-pgbrk R7b) ──────────────────
+
+    /// fulgur-pgbrk R7b: two-page row — a row entering the strip at
+    /// y=80 clips each cell to the remaining 20px and carries the 40px
+    /// remainder to the next page's top.
+    #[test]
+    fn row_cells_clip_per_strip_two_page_row() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
+    }
+
+    /// fulgur-pgbrk R7b: three-page row. A row crossing three strips
+    /// necessarily has cells taller than one strip — the oversized
+    /// branch and the spill branch go through the same
+    /// `slice_oversized_leaf` arithmetic, and this pins it: each cell
+    /// clips 20px on page 0, a full 100px strip on page 1, and the
+    /// 60px remainder on page 2.
+    #[test]
+    fn row_cells_clip_per_strip_three_page_row() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 180px; width: 100px"></div>
+                <div id="c2" style="height: 180px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                180.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 100.0), (2, 0.0, 60.0)],
+            );
+        }
+    }
+
+    /// fulgur-pgbrk R7b: exact-fit boundary — a row whose bottom edge
+    /// lands exactly on the strip boundary emits no slice at all; each
+    /// cell keeps its single 60px fragment.
+    #[test]
+    fn row_cells_clip_per_strip_exact_fit_is_not_sliced() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 40px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 60px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(&geom, id, name, 100.0, 60.0, &[(0, 40.0, 60.0)]);
+        }
+    }
+
+    /// fulgur-pgbrk R7b: unequal cell heights — each cell clips its own
+    /// extent: the 60px cell leaves a 40px remainder; the 90px cell
+    /// leaves a 70px one. The row's size is the max across cells.
+    #[test]
+    fn row_cells_clip_per_strip_unequal_cell_heights() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 80px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px;">
+                <div id="c1" style="height: 60px; width: 100px"></div>
+                <div id="c2" style="height: 90px; width: 100px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
+        assert_cell_slices(
+            &geom,
+            c1,
+            "c1",
+            100.0,
+            60.0,
+            &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+        );
+        assert_cell_slices(
+            &geom,
+            c2,
+            "c2",
+            100.0,
+            90.0,
+            &[(0, 80.0, 20.0), (1, 0.0, 70.0)],
         );
     }
 
@@ -8982,6 +9123,60 @@ h2 { string-set: chapter-title content(text); }
         t
     }
 
+    /// fulgur-pgbrk R7b: pin one flex / grid cell's per-strip clipped
+    /// fragments — the "per-cell internal fragmentation" the
+    /// spill-slice branch of `fragment_block_subtree` performs
+    /// (css-break-3 §2.1 parallel fragmentation flows). Each
+    /// `(page, y, height)` entry of `slices` is one expected fragment:
+    /// the first slice sits at the cell's entry cursor, every later
+    /// slice at the page top, heights clipped at the strip boundary.
+    /// Also asserts no fragment extends past `page_h` and that the
+    /// slice heights reconstruct the cell's full extent `full_h`.
+    #[track_caller]
+    fn assert_cell_slices(
+        geom: &PaginationGeometryTable,
+        node: usize,
+        name: &str,
+        page_h: f32,
+        full_h: f32,
+        slices: &[(u32, f32, f32)],
+    ) {
+        let frags = &geom
+            .get(&node)
+            .unwrap_or_else(|| panic!("{name} must be in geometry"))
+            .fragments;
+        assert_eq!(
+            frags.len(),
+            slices.len(),
+            "{name}: one fragment per crossed strip; frags={frags:?}"
+        );
+        let mut total = 0.0_f32;
+        for (i, f) in frags.iter().enumerate() {
+            let (page, y, h) = slices[i];
+            total += f.height.to_f32();
+            assert_eq!(
+                f.page_index, page,
+                "{name}: slice {i} must sit on page {page}; frags={frags:?}"
+            );
+            assert!(
+                (f.y.to_f32() - y).abs() < 0.5,
+                "{name}: slice {i} y={y} (entry cursor first, page top after); frags={frags:?}"
+            );
+            assert!(
+                (f.height.to_f32() - h).abs() < 0.5,
+                "{name}: slice {i} clips to {h}px at the strip boundary; frags={frags:?}"
+            );
+            assert!(
+                f.y.to_f32() + f.height.to_f32() <= page_h + 0.5,
+                "{name}: no fragment may extend past the {page_h}px strip; frags={frags:?}"
+            );
+        }
+        assert!(
+            (total - full_h).abs() < 0.5,
+            "{name}: slice heights reconstruct the cell's {full_h}px exactly; frags={frags:?}"
+        );
+    }
+
     #[test]
     fn find_overflowing_fragments_reports_nothing_for_an_empty_table() {
         let t = PaginationGeometryTable::new();
@@ -9160,25 +9355,29 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
-    /// Walker-convergence phase 5: the recursion-gate probe is
-    /// floor-aware. A leading child that overflows the remaining strip
-    /// but fits a fresh page is PINNED at `page_start_y` when
-    /// `allow_leading_break == false` (flex / grid / atomic-inline /
-    /// orthogonal subtrees): the walk places it whole, so the gate
-    /// must answer "no recursion". Setup: container entered mid-page
-    /// (available_strip 200 of a 400px page ⟹ page_start_y = 200) with
-    /// a single 300px leading child at offset 0.
+    /// Walker-convergence phase 5 + fulgur-pgbrk R7b: the recursion
+    /// gate is floor-aware. A leading child PINNED at the
+    /// `page_start_y` floor (`allow_leading_break == false` — flex /
+    /// grid / atomic-inline / orthogonal subtrees) that SPILLS the
+    /// strip now reports "recurse": the walk spill-slices it in place
+    /// (pre-R7b it fell back to the whole-emit path and the overflow
+    /// guard caught it, so "no recursion" used to be pinned here). A
+    /// pinned child that FITS still reports "no recursion".
     #[test]
     fn subtree_requires_recursion_pins_leading_child_at_page_start_floor() {
         let html = r#"
             <html><body style="margin: 0">
-              <div id="probe">
+              <div id="spill">
                 <div style="height: 300px"></div>
+              </div>
+              <div id="fit">
+                <div style="height: 150px"></div>
               </div>
             </body></html>
         "#;
         let doc = parse(html, 600.0);
-        let probe = find_by_id(&doc, "probe").expect("probe div should exist");
+        let spill = find_by_id(&doc, "spill").expect("spill div should exist");
+        let fit = find_by_id(&doc, "fit").expect("fit div should exist");
         let cx = super::FragmentationCtx {
             doc: &doc,
             styles: None,
@@ -9186,10 +9385,16 @@ h2 { string-set: chapter-title content(text); }
             running: None,
             page_h: 400.0,
         };
+        // 300px child pinned at the 200px floor spills (500 > 400.5)
+        // — the walk slices it, which is a split.
         assert!(
-            !super::subtree_requires_recursion(&cx, probe, 200.0, false),
-            "leading child pinned at the page_start_y floor must not \
-             trigger recursion — the walk places it whole"
+            super::subtree_requires_recursion(&cx, spill, 200.0, false),
+            "pinned child spilling the strip must trigger recursion — the walk slices it"
+        );
+        // 150px child pinned at the same floor fits (350 <= 400).
+        assert!(
+            !super::subtree_requires_recursion(&cx, fit, 200.0, false),
+            "pinned child that fits the strip must not trigger recursion"
         );
     }
 
@@ -9347,7 +9552,6 @@ h2 { string-set: chapter-title content(text); }
     /// one level deeper, so the permission has to survive two recursion
     /// hops to keep the row co-splitting in place.
     #[test]
-    #[ignore = "fulgur-pgbrk R3: flex / grid items are not class A break points (css-break-3 §4.1), so fulgur co-splits rows in place and a row taller than the strip overflows the page box. The overflow guard in run_pass_inner now catches that. Un-ignore once flex / grid rows fragment internally."]
     fn leading_break_permission_is_threaded_through_recursion() {
         // 100px page, grid row starts at y=80, leading child is 60px tall
         // (80 + 60 = 140 > 100). With the permission correctly cleared for
@@ -9391,7 +9595,6 @@ h2 { string-set: chapter-title content(text); }
     /// flex and atomic-inline (`inline-block`) sources so a narrowing of
     /// the condition to grid-only is caught.
     #[test]
-    #[ignore = "fulgur-pgbrk R3: flex / grid items are not class A break points (css-break-3 §4.1), so fulgur co-splits rows in place and a row taller than the strip overflows the page box. The overflow guard in run_pass_inner now catches that. Un-ignore once flex / grid rows fragment internally."]
     fn leading_break_is_not_propagated_out_of_flex_or_inline_block() {
         for (label, container_style) in [
             ("flex", "display: flex; width: 200px"),
@@ -9782,37 +9985,38 @@ h2 { string-set: chapter-title content(text); }
     }
 
     #[test]
-    #[ignore = "fulgur-pgbrk R3: flex / grid items are not class A break points (css-break-3 §4.1), so fulgur co-splits rows in place and a row taller than the strip overflows the page box. The overflow guard in run_pass_inner now catches that. Un-ignore once flex / grid rows fragment internally."]
     fn leading_break_is_not_propagated_out_of_a_grid_row() {
         // Counterpart to the fix: flex / grid items are not class A
         // break points (CSS Fragmentation 3 §3.2) and their rows
-        // co-split in place (fulgur-ysms). The leading-edge break must
-        // therefore stop at a grid container rather than dragging a row
-        // that cannot move onto the next page.
+        // co-split internally (fulgur-ysms, now clipped per strip by
+        // fulgur-pgbrk R7b). The leading-edge break must therefore
+        // stop at a grid container rather than dragging a row that
+        // cannot move onto the next page. Both cells stay on page 0
+        // — as clipped slices — instead of jumping to page 1.
         let html = r#"
             <html><body style="margin:0; padding:0">
               <div style="height:80px"></div>
               <div style="display:grid; grid-template-columns:100px 100px; width:200px;">
-                <div style="height:60px; width:100px"></div>
-                <div style="height:60px; width:100px"></div>
+                <div id="c1" style="height:60px; width:100px"></div>
+                <div id="c2" style="height:60px; width:100px"></div>
               </div>
             </body></html>
         "#;
         let mut doc = parse(html, 400.0);
+        let c1 = find_by_id(doc.deref_mut(), "c1").expect("div#c1");
+        let c2 = find_by_id(doc.deref_mut(), "c2").expect("div#c2");
         let table = blitz_adapter::extract_column_style_table(&doc);
         let geom = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &table);
-        let cells_on_page0 = geom
-            .values()
-            .flat_map(|g| g.fragments.iter())
-            .filter(|f| {
-                (f.height.to_f32() - 60.0).abs() < 0.5 && (f.width.to_f32() - 100.0).abs() < 0.5
-            })
-            .filter(|f| f.page_index == 0)
-            .count();
-        assert_eq!(
-            cells_on_page0, 2,
-            "both grid cells must stay on page 0 and co-split in place"
-        );
+        for (id, name) in [(c1, "c1"), (c2, "c2")] {
+            assert_cell_slices(
+                &geom,
+                id,
+                name,
+                100.0,
+                60.0,
+                &[(0, 80.0, 20.0), (1, 0.0, 40.0)],
+            );
+        }
     }
 
     /// fulgur-pgbrk R8: a forced break on a flex / grid cell must not
