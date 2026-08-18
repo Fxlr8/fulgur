@@ -1271,6 +1271,52 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    // Smoke: a <div> with `display:list-item` AND an explicit numeric
+    // `line-height` renders without crashing.  Empirically Blitz assigns
+    // `list_item_data` with an outside marker layout for this combination, so
+    // the outside-marker path (branch 1) fires rather than the fallback
+    // (branch 2) — but the render path is still exercised end-to-end.
+    #[test]
+    fn smoke_display_list_item_div_with_numeric_line_height() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><body>
+            <div style="display:list-item;line-height:1.5">Numeric line-height</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Smoke: same as above but with an absolute-length `line-height`.
+    #[test]
+    fn smoke_display_list_item_div_with_length_line_height() {
+        let pdf = render_list_html(
+            r#"<!doctype html><html><body>
+            <div style="display:list-item;line-height:24px">Absolute line-height</div>
+            </body></html>"#,
+        );
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // Smoke: a <div> with `display:list-item` and `list-style-image:url(dot.png)`
+    // renders without crashing.  Blitz assigns `list_item_data` with an outside
+    // marker layout for this combination (branch 1), so the outside-marker path
+    // with an image marker is exercised.
+    #[test]
+    fn smoke_display_list_item_div_with_inline_image_marker() {
+        let mut bundle = crate::asset::AssetBundle::default();
+        bundle.add_image("dot.png", RED_1X1_PNG.to_vec());
+        let pdf = crate::engine::Engine::builder()
+            .assets(bundle)
+            .build()
+            .render(
+                r#"<!doctype html><html><body>
+                <div style="display:list-item;list-style-image:url(dot.png)">Image marker</div>
+                </body></html>"#,
+            )
+            .expect("render failed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     // try_convert branch 3 (inside marker, non-inline-root, non-empty children):
     // when `list-style-image` is set AND `list-style-position: inside`, and the
     // `<li>` has a block child (making it non-inline-root), the non-empty-children
