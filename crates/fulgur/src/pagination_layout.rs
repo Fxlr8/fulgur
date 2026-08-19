@@ -427,6 +427,7 @@ fn fragment_zero_height_child(
             // page — rebase the origin eagerly.
             frame.page_taffy_origin = this_top_in_parent;
             frame.origin_pending_target_y = None;
+            frame.origin_pending_anchor = None;
             frame.origin_pending_same_row = None;
         }
     }
@@ -467,6 +468,7 @@ fn fragment_zero_height_child(
             // The NEXT child is the first on the new page — defer the
             // origin rebase via the pending slot.
             frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_anchor = None;
             frame.origin_pending_same_row = None;
         }
     }
@@ -651,6 +653,14 @@ fn fragment_inline_child(
                 frame.cursor_y = new_cursor;
                 frame.page_start_y = 0.0;
                 frame.origin_pending_target_y = Some(frame.cursor_y);
+                // Anchor the deferred rebase on THIS
+                // paragraph's own Taffy-space bottom edge
+                // (`this_top_in_parent + box_total_h`), not the next
+                // sibling's `this_top_in_parent` — otherwise the next
+                // sibling is forced flush against the paragraph's tail,
+                // discarding their natural (possibly collapsed-margin)
+                // gap. See `origin_pending_anchor`'s doc comment.
+                frame.origin_pending_anchor = Some(this_top_in_parent + box_total_h);
                 frame.origin_pending_same_row = None;
                 if let Some(ref mut rs) = frame.row_state {
                     rs.crossed_by_recursion = true;
@@ -681,6 +691,7 @@ fn fragment_inline_child(
             // The NEXT child is the first on the new page — defer the
             // origin rebase via the pending slot.
             frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_anchor = None;
             frame.origin_pending_same_row = None;
         }
     }
@@ -1003,6 +1014,14 @@ fn fragment_recursion_child(
                     .is_some_and(crate::blitz_adapter::is_flex_or_grid_container_node);
                 frame.origin_pending_same_row =
                     allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+                // Non-row case anchor (see
+                // `origin_pending_anchor`'s doc comment) — the recursed
+                // child's own Taffy-space bottom edge, so the next
+                // sibling's natural gap to it survives the rebase. Set
+                // unconditionally; the consumer prefers
+                // `origin_pending_same_row` when present, so this is a
+                // no-op in the flex/grid row case above.
+                frame.origin_pending_anchor = Some(this_top_in_parent + child_h);
                 // fulgur-ysms: mark that this row had a recursion-
                 // driven page cross so subsequent same-row cells know
                 // to co-split.
@@ -1040,6 +1059,7 @@ fn fragment_recursion_child(
             // The NEXT child is the first on the new page — defer the
             // origin rebase via the pending slot.
             frame.origin_pending_target_y = Some(frame.page_start_y);
+            frame.origin_pending_anchor = None;
             frame.origin_pending_same_row = None;
         }
     }
@@ -1284,6 +1304,19 @@ struct ContainerFrame {
     page_start_y: f32,
     page_taffy_origin: f32,
     origin_pending_target_y: Option<f32>,
+    /// Taffy parent-relative y (`this_top_in_parent + box_h`) of the
+    /// child whose placement produced a non-flush
+    /// `origin_pending_target_y` (a recursed subtree or sliced leaf
+    /// that crossed a page mid-walk, landing its tail at a page-local
+    /// y other than 0). The deferred rebase must anchor on THIS
+    /// point, not on the next sibling's own `this_top_in_parent` —
+    /// otherwise the next sibling is forced flush against the
+    /// previous one's tail, discarding their natural (possibly
+    /// collapsed-margin) gap. `None` for the flush case
+    /// (`origin_pending_target_y == Some(page_start_y)`), where
+    /// anchoring on the next sibling's own top is correct by
+    /// construction (it IS the first child on the fresh page).
+    origin_pending_anchor: Option<f32>,
     origin_pending_same_row: Option<(f32, f32, f32)>,
     prev_used_page: Option<Option<String>>,
     emitted_anything: bool,
@@ -1317,6 +1350,7 @@ impl ContainerFrame {
             page_start_y: cursor_y,
             page_taffy_origin: 0.0,
             origin_pending_target_y: None,
+            origin_pending_anchor: None,
             origin_pending_same_row: None,
             prev_used_page: None,
             emitted_anything: false,
@@ -1747,6 +1781,7 @@ impl<'a> PaginationLayoutTree<'a> {
             page_start_y: 0.0,
             page_taffy_origin: 0.0,
             origin_pending_target_y: None,
+            origin_pending_anchor: None,
             origin_pending_same_row: None,
             prev_used_page: None,
             emitted_anything: false,
@@ -2941,6 +2976,7 @@ fn fragment_block_subtree(
     //   collapses to the row's first y).
     let mut page_taffy_origin = frame.page_taffy_origin;
     let mut origin_pending_target_y = frame.origin_pending_target_y;
+    let mut origin_pending_anchor = frame.origin_pending_anchor;
     let mut origin_pending_same_row = frame.origin_pending_same_row;
     // fulgur-uebl: tracks the previous in-flow sibling's used page-name
     // for implicit forced-break detection; see `fragment_pagination_root`
@@ -3129,6 +3165,7 @@ fn fragment_block_subtree(
                         page_start_y = rs.start_page_start_y;
                         page_taffy_origin = rs.start_page_taffy_origin;
                         origin_pending_target_y = None;
+                        origin_pending_anchor = None;
                         origin_pending_same_row = None;
                     }
                     // If crossed_by_recursion is false (e.g., a previous cell
@@ -3145,6 +3182,7 @@ fn fragment_block_subtree(
                     if rs.max_end_page > rs.start_page {
                         page_start_y = 0.0;
                         origin_pending_target_y = Some(rs.max_end_cursor_y);
+                        origin_pending_anchor = None;
                         origin_pending_same_row = None;
                     } else {
                         page_start_y = rs.start_page_start_y;
@@ -3172,12 +3210,28 @@ fn fragment_block_subtree(
         }
 
         if let Some(mut target_y) = origin_pending_target_y.take() {
+            let anchor = origin_pending_anchor.take();
             if let Some((row_top, row_bottom, same_row_y)) = origin_pending_same_row.take()
                 && this_top_in_parent < row_bottom - 0.5
             {
                 target_y = same_row_y + (this_top_in_parent - row_top);
+                page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
+            } else if let Some(anchor) = anchor {
+                // Anchor the rebase on the point that
+                // PRODUCED `target_y` (a recursed subtree's, or sliced
+                // leaf's, own Taffy-space bottom edge —
+                // `this_top_in_parent + box_h` captured at the setting
+                // site) rather than THIS sibling's own
+                // `this_top_in_parent`. Using this sibling's own top
+                // here would force it flush against the previous
+                // sibling's tail, discarding their natural (possibly
+                // collapsed-margin) gap — see `origin_pending_anchor`'s
+                // doc comment and the margin-collapse regression this
+                // fixes.
+                page_taffy_origin = anchor - (target_y - page_start_y);
+            } else {
+                page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
             }
-            page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
         }
 
         if child_h <= 0.0 {
@@ -3191,6 +3245,7 @@ fn fragment_block_subtree(
             frame.page_start_y = page_start_y;
             frame.page_taffy_origin = page_taffy_origin;
             frame.origin_pending_target_y = origin_pending_target_y;
+            frame.origin_pending_anchor = origin_pending_anchor;
             frame.origin_pending_same_row = origin_pending_same_row;
             frame.prev_used_page = prev_used_page.clone();
             frame.row_state = row_state.take();
@@ -3210,6 +3265,7 @@ fn fragment_block_subtree(
             page_start_y = frame.page_start_y;
             page_taffy_origin = frame.page_taffy_origin;
             origin_pending_target_y = frame.origin_pending_target_y;
+            origin_pending_anchor = frame.origin_pending_anchor;
             origin_pending_same_row = frame.origin_pending_same_row;
             prev_used_page = frame.prev_used_page.clone();
             row_state = frame.row_state.take();
@@ -3317,6 +3373,7 @@ fn fragment_block_subtree(
         frame.page_start_y = page_start_y;
         frame.page_taffy_origin = page_taffy_origin;
         frame.origin_pending_target_y = origin_pending_target_y;
+        frame.origin_pending_anchor = origin_pending_anchor;
         frame.origin_pending_same_row = origin_pending_same_row;
         frame.prev_used_page = prev_used_page.clone();
         frame.row_state = row_state.take();
@@ -3334,6 +3391,7 @@ fn fragment_block_subtree(
         page_start_y = frame.page_start_y;
         page_taffy_origin = frame.page_taffy_origin;
         origin_pending_target_y = frame.origin_pending_target_y;
+        origin_pending_anchor = frame.origin_pending_anchor;
         origin_pending_same_row = frame.origin_pending_same_row;
         prev_used_page = frame.prev_used_page.clone();
         row_state = frame.row_state.take();
@@ -3360,6 +3418,7 @@ fn fragment_block_subtree(
         frame.page_start_y = page_start_y;
         frame.page_taffy_origin = page_taffy_origin;
         frame.origin_pending_target_y = origin_pending_target_y;
+        frame.origin_pending_anchor = origin_pending_anchor;
         frame.origin_pending_same_row = origin_pending_same_row;
         frame.prev_used_page = prev_used_page.clone();
         frame.row_state = row_state.take();
@@ -3377,6 +3436,7 @@ fn fragment_block_subtree(
         page_start_y = frame.page_start_y;
         page_taffy_origin = frame.page_taffy_origin;
         origin_pending_target_y = frame.origin_pending_target_y;
+        origin_pending_anchor = frame.origin_pending_anchor;
         origin_pending_same_row = frame.origin_pending_same_row;
         prev_used_page = frame.prev_used_page.clone();
         row_state = frame.row_state.take();
@@ -3530,6 +3590,14 @@ fn fragment_block_subtree(
             let row_top = this_top_in_parent;
             let row_bottom = row_top + child_h;
             origin_pending_same_row = allow_same_row_rebase.then_some((row_top, row_bottom, 0.0));
+            // Non-row anchor (see
+            // `origin_pending_anchor`'s doc comment) — this sliced
+            // leaf's own Taffy-space bottom edge, so the next sibling's
+            // natural gap to it survives the rebase. Set
+            // unconditionally; the consumer prefers
+            // `origin_pending_same_row` when present, so this is a
+            // no-op in the flex/grid row case above.
+            origin_pending_anchor = Some(this_top_in_parent + child_h);
             // fulgur-ysms: mark the row crossed so subsequent same-row
             // cells co-split from the row-start state (uniform with the
             // recursion branch's handling).
@@ -3550,7 +3618,11 @@ fn fragment_block_subtree(
                 page_index += 1;
                 cursor_y = 0.0;
                 page_start_y = 0.0;
-                (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
+                (
+                    origin_pending_target_y,
+                    origin_pending_anchor,
+                    origin_pending_same_row,
+                ) = (Some(page_start_y), None, None);
             }
             if !is_float {
                 prev_used_page = Some(used_end.clone());
@@ -3611,7 +3683,11 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
-            (origin_pending_target_y, origin_pending_same_row) = (Some(page_start_y), None);
+            (
+                origin_pending_target_y,
+                origin_pending_anchor,
+                origin_pending_same_row,
+            ) = (Some(page_start_y), None, None);
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
@@ -5950,6 +6026,62 @@ mod tests {
             implied_page_count(&table) <= 2,
             "a childless spacer followed by content must stay a handful of pages; got {}",
             implied_page_count(&table),
+        );
+    }
+
+    /// Regression for the margin-collapse-after-fragmentation-break bug
+    /// (see `FULGUR_MARGIN_COLLAPSE_BUG.md` at the repo root): the
+    /// sibling immediately following a child whose *own* recursion
+    /// crossed a page boundary lost its collapsed margin against that
+    /// child entirely, landing flush against its tail instead.
+    ///
+    /// Shape: `section` (recursed into from body, since its content
+    /// spans two pages) contains `a` (250px, fills most of page 1),
+    /// `c` (a div with a single 100px child `c_inner`, `margin: 20px 0`
+    /// — too tall for the 30px left on page 1, so `c` itself is
+    /// recursed into and its content lands wholly on page 2), and `d`
+    /// (50px, `margin-top: 20px`).
+    ///
+    /// `c`'s and `d`'s margins collapse to a single 20px gap (CSS 2.1
+    /// §8.3.1) — neither margin is at a fragmentation break (`c`'s own
+    /// leading margin was already truncated when `c_inner` was placed
+    /// at page 2's top; the break is not between `c` and `d`). `d`
+    /// must land at `c_inner`'s bottom (100px, page-local) + the 20px
+    /// gap = 120px. Pre-fix, the deferred origin rebase anchored on
+    /// `d`'s own Taffy-space top instead of `c`'s, forcing `d` flush
+    /// against `c_inner` at y=100 — losing the margin.
+    #[test]
+    fn recursed_child_crossing_page_preserves_next_sibling_collapsed_margin() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <section style="width: 200px;">
+                <div id="a" style="height: 250px; width: 200px"></div>
+                <div id="c" style="width: 200px; margin-top: 20px; margin-bottom: 20px">
+                  <div id="c_inner" style="height: 100px; width: 200px"></div>
+                </div>
+                <div id="d" style="height: 50px; width: 200px; margin-top: 20px"></div>
+              </section>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let table = run_pass(&mut doc, 300.0);
+        let d_id = find_by_id(doc.deref_mut(), "d").expect("div#d");
+        let d_frag = table
+            .get(&d_id)
+            .expect("div#d must appear in geometry")
+            .fragments
+            .first()
+            .expect("div#d must have a fragment");
+        assert_eq!(
+            d_frag.page_index, 1,
+            "div#d should land on page 1 (0-indexed), following c's page-2 tail",
+        );
+        let d_y = d_frag.y.to_f32();
+        assert!(
+            (d_y - 120.0).abs() < 0.5,
+            "div#d must sit 20px below c_inner's 100px-tall page-2 fragment \
+             (y=120), preserving the collapsed c/d margin; got y={d_y} \
+             (pre-fix: y=100, flush against c_inner with the margin dropped)",
         );
     }
 
