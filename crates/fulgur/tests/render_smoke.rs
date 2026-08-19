@@ -5822,6 +5822,79 @@ fn test_tagged_hidden_heading_omits_title_attribute() {
     }
 }
 
+/// Codex review (PR #719): `slice_oversized_leaf` (fulgur-pgbrk R7) now
+/// gives an oversized NESTED `<img>` one fragment per crossed page, but
+/// `dispatch_fragment` calls the image draw helpers once per fragment and
+/// — before the fix in `draw_replaced_sliced` — each call painted the
+/// FULL image at the same content-box origin: every page repeated the
+/// image's top, and the lower portion never appeared anywhere.
+///
+/// A 700px-tall image nested inside a `<div>` (so it takes the nested
+/// walk, `fragment_block_subtree`, not the body-direct path) on a
+/// 300px-strip page must span 3 pages. Each page's `Do` draws the image
+/// at a distinct vertical offset (`inner_y - consumed`, `consumed`
+/// growing by the previous slice's height each page) — repeated
+/// identical `y` values across pages is exactly the redraw-duplicate
+/// regression this test pins.
+#[test]
+fn nested_oversized_image_slices_do_not_repeat_across_pages() {
+    // A tiny real PNG (AssetBundle, not a data: URI — inspect.rs's XObject
+    // scan needs an image krilla actually embeds as a page-resource
+    // XObject to find it).
+    let img = image::RgbImage::from_fn(4, 4, |_, _| image::Rgb([255u8, 0, 0]));
+    let mut png_bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png_bytes),
+        image::ImageFormat::Png,
+    )
+    .expect("encode png");
+    let mut bundle = AssetBundle::new();
+    bundle.add_image("nested.png", png_bytes);
+
+    let html = r#"<!DOCTYPE html>
+<style>
+  @page { size: 400px 300px; margin: 0; }
+  body { margin: 0; }
+</style>
+<body>
+  <div><img src="nested.png" style="display:block;width:100px;height:700px;"></div>
+</body>"#;
+    let pdf = Engine::builder()
+        .assets(bundle)
+        .build()
+        .render(html)
+        .expect("render");
+    assert!(!pdf.is_empty());
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_oversized_image.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+    let result = fulgur::inspect::inspect(&path).expect("inspect");
+
+    assert!(
+        result.pages >= 3,
+        "a 700px image on a 300px strip should span 3 pages, got {}",
+        result.pages
+    );
+    assert!(
+        result.images.len() as u32 >= result.pages,
+        "expected at least one image draw per page the fragment spans; images={:?}",
+        result.images
+    );
+
+    let mut ys: Vec<f32> = result.images.iter().map(|i| i.y).collect();
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut unique_ys = ys.clone();
+    unique_ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    assert_eq!(
+        unique_ys.len(),
+        ys.len(),
+        "every page's image slice must draw at a distinct vertical offset — \
+         repeated identical y values mean the image is being redrawn from its \
+         top on every page instead of cropped/offset per fragment; ys={ys:?}"
+    );
+}
+
 #[test]
 fn test_render_html_huge_multicol_column_count_is_bounded() {
     // Security regression (unbounded `column-count` memory-exhaustion DoS):

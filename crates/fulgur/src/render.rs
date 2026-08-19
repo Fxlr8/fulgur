@@ -1193,11 +1193,31 @@ pub(crate) fn dispatch_fragment(
         draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
     }
     if let Some(img) = drawables.images.get(&node_id) {
-        draw_image_v2(canvas, img, x_pt, y_pt);
+        draw_replaced_sliced(
+            canvas,
+            geom,
+            frag,
+            x_pt,
+            y_pt,
+            img.width.to_f32(),
+            |c, x, y| {
+                draw_image_v2(c, img, x, y);
+            },
+        );
         return;
     }
     if let Some(svg) = drawables.svgs.get(&node_id) {
-        draw_svg_v2(canvas, svg, x_pt, y_pt);
+        draw_replaced_sliced(
+            canvas,
+            geom,
+            frag,
+            x_pt,
+            y_pt,
+            svg.width.to_f32(),
+            |c, x, y| {
+                draw_svg_v2(c, svg, x, y);
+            },
+        );
         return;
     }
     if has_paragraph_slices {
@@ -1945,10 +1965,30 @@ fn draw_under_clip(
             }
         }
         if let Some(i) = img_for_block {
-            draw_image_inner_paint(canvas, i, inner_x, inner_y);
+            draw_replaced_sliced(
+                canvas,
+                geom,
+                frag,
+                inner_x,
+                inner_y,
+                i.width.to_f32(),
+                |c, x, y| {
+                    draw_image_inner_paint(c, i, x, y);
+                },
+            );
         }
         if let Some(s) = svg_for_block {
-            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+            draw_replaced_sliced(
+                canvas,
+                geom,
+                frag,
+                inner_x,
+                inner_y,
+                s.width.to_f32(),
+                |c, x, y| {
+                    draw_svg_inner_paint(c, s, x, y);
+                },
+            );
         }
 
         // Strict descendants — each at its own fragment's coords.
@@ -2612,6 +2652,70 @@ fn build_multicol_stroke(
     Some(stroke)
 }
 
+/// Cumulative height of `frag`'s node's earlier fragments (fulgur-pgbrk
+/// R7 follow-up). `slice_oversized_leaf` gives an oversized nested leaf
+/// one fragment per crossed page strip, each recording only its own
+/// slice height — this sums the ones before `frag` so a caller can
+/// recover how far into the source content `frag`'s window starts.
+/// Returns 0 for the first (or only) fragment.
+fn fragment_consumed_pt(
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+) -> f32 {
+    let Some(pos) = geom
+        .fragments
+        .iter()
+        .position(|f| f.page_index == frag.page_index)
+    else {
+        return 0.0;
+    };
+    geom.fragments[..pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<crate::units::Px>()
+        .in_pt()
+        .to_f32()
+}
+
+/// Paint a replaced element's (`<img>`/`<svg>`) inner content, clipping
+/// and vertically offsetting it when its node has multiple fragments.
+///
+/// `slice_oversized_leaf` (fulgur-pgbrk R7) now gives an oversized
+/// nested image/svg one fragment per crossed page, but replaced content
+/// is a single monolithic payload with no line-level split points the
+/// way paragraphs have. Without this, `dispatch_fragment` calls the
+/// inner-paint helpers once per fragment and each call draws the WHOLE
+/// image at the same content-box origin: every page repeats the image's
+/// top while its lower portion never appears anywhere (Codex review,
+/// PR #719). Single-fragment nodes (`geom.is_split() == false`, the
+/// overwhelming common case) skip the clip/offset entirely and draw
+/// exactly as before.
+fn draw_replaced_sliced(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+    x: f32,
+    y: f32,
+    width: f32,
+    draw_full: impl FnOnce(&mut crate::draw_primitives::Canvas<'_, '_>, f32, f32),
+) {
+    if !geom.is_split() {
+        draw_full(canvas, x, y);
+        return;
+    }
+    let consumed = fragment_consumed_pt(geom, frag);
+    let slice_h = frag.height.in_pt().to_f32();
+    let Some(clip) = crate::draw_primitives::build_overflow_rect_path(x, y, width, slice_h) else {
+        draw_full(canvas, x, y - consumed);
+        return;
+    };
+    canvas
+        .surface
+        .push_clip_path(&clip, &krilla::paint::FillRule::default());
+    draw_full(canvas, x, y - consumed);
+    canvas.surface.pop();
+}
+
 /// v2 image draw. Mirrors `image::ImageRender::draw` but operates on
 /// the side-channel `ImageEntry` data; the `width`/`height` are the
 /// CSS-resolved size in pt that fulgur stores on the original
@@ -3188,10 +3292,30 @@ fn draw_block_with_inner_content(
             );
         }
         if let Some(i) = image {
-            draw_image_inner_paint(canvas, i, inner_x, inner_y);
+            draw_replaced_sliced(
+                canvas,
+                geom,
+                frag,
+                inner_x,
+                inner_y,
+                i.width.to_f32(),
+                |c, x, y| {
+                    draw_image_inner_paint(c, i, x, y);
+                },
+            );
         }
         if let Some(s) = svg {
-            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+            draw_replaced_sliced(
+                canvas,
+                geom,
+                frag,
+                inner_x,
+                inner_y,
+                s.width.to_f32(),
+                |c, x, y| {
+                    draw_svg_inner_paint(c, s, x, y);
+                },
+            );
         }
     });
 }
