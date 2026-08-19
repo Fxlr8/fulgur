@@ -154,8 +154,10 @@ an edge case.
 > (`1dd9473e`…`3555418e`), and the WPT `css-break` phase is seeded as the
 > conformance ledger (`185ed3a4`: 36 PASS / 969 FAIL / 163 SKIP).
 
-Two of these still destroy content. Both have reproducible end-to-end cases
-measured against the current tree. Priority order is as listed.
+**Historical snapshot** (see the campaign-closed note above for current
+status): at the time this review was written, two of these still destroyed
+content, each with a reproducible end-to-end case measured against the
+tree as it stood then. Priority order is as listed.
 
 ### R1: paragraph padding and border are excluded from break measurement (P1, loses content)
 

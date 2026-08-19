@@ -270,5 +270,5 @@ cargo test -p fulgur
 cargo test -p fulgur --lib break_decision
 cargo test -p fulgur --lib -- --ignored        # open gaps: expected to FAIL
 cargo clippy -p fulgur && cargo fmt --check
-npx markdownlint-cli2 '**/*.md'
+npx markdownlint-cli2 'docs/plans/2026-08-17-fulgur-pgbrk-break-decision-extraction-design.md'
 ```

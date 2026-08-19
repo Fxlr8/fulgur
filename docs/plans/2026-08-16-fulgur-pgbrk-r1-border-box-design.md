@@ -186,7 +186,7 @@ otherwise, so single-fragment paragraphs are unaffected by the height change.
 Per CLAUDE.md's coverage rule, the fragmenter logic is lib-level and belongs in
 `#[cfg(test)] mod tests` in `pagination_layout.rs`.
 
-- `inline_root_box_metrics`: lead-in from line metrics, lead-out from Taffy,
+- `inline_root_box_metrics`: lead-in and lead-out both from Taffy,
   zero-padding case, single-line case, empty-metrics case.
 - `fragment_inline_root`: each row of the height table — unsplit, first,
   middle, last — plus `cursor_y` advancing past `lead_out`.
@@ -258,5 +258,5 @@ cargo test -p fulgur --lib fragment_inline_root
 cargo test -p fulgur --lib -- --ignored        # open gaps: expected to FAIL
 cargo test -p fulgur --test render_smoke
 cargo clippy -p fulgur && cargo fmt --check
-npx markdownlint-cli2 '**/*.md'
+npx markdownlint-cli2 'docs/plans/2026-08-16-fulgur-pgbrk-r1-border-box-design.md'
 ```

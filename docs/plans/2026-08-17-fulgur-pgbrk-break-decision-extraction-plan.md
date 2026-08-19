@@ -523,7 +523,7 @@ cargo test -p fulgur
 cargo test -p fulgur --lib -- --ignored 2>&1 | tail -3
 cargo clippy -p fulgur --all-targets
 cargo fmt --check
-npx markdownlint-cli2 '**/*.md'
+npx markdownlint-cli2 'docs/plans/2026-08-17-fulgur-pgbrk-break-decision-extraction-plan.md'
 ```
 
 Expected:

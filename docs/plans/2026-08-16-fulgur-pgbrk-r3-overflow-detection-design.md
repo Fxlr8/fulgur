@@ -314,7 +314,7 @@ cargo test -p fulgur --lib
 cargo test -p fulgur --lib find_overflowing_fragments
 cargo test -p fulgur --lib -- --ignored     # open gaps: expected to FAIL
 cargo clippy -p fulgur && cargo fmt --check
-npx markdownlint-cli2 '**/*.md'
+npx markdownlint-cli2 'docs/plans/2026-08-16-fulgur-pgbrk-r3-overflow-detection-design.md'
 ```
 
 VRT is not expected to move. Per the parent review, `cargo test -p fulgur-vrt`

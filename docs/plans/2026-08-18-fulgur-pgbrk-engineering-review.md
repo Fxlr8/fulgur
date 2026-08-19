@@ -24,7 +24,12 @@ hard requirements per project direction (2026-08-18).
 
 ## Verified architecture map
 
-All numbers below were measured against the tree, not copied from prior docs.
+All numbers below were measured against the tree at the time this review was
+written, not copied from prior docs. **Historical snapshot:** the campaign
+has since closed (2026-08-19, see the predecessor review's closing note) —
+R7 shipped and `pagination_layout.rs` now has zero `#[ignore]`d tests; the
+counts below are the pre-R7 baseline this review reasoned from, not current
+state.
 
 - `crates/fulgur/src/pagination_layout.rs`: **9,544 lines**, ~4,730 of them the
   `#[cfg(test)] mod tests` block. **139 tests**, **11 `#[ignore]`d** (the R7
