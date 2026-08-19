@@ -177,6 +177,21 @@ pub(crate) struct FragmentOverflow {
 /// inline elsewhere in this module.
 const OVERFLOW_EPS_PX: f32 = 0.5;
 
+/// Tolerance for the "is this leaf oversized" gate that decides whether
+/// [`slice_oversized_leaf`] runs at all — see that function's doc
+/// comment ("Oversize tolerance") for the 220pt→294px Taffy rounding
+/// case this absorbs. Deliberately larger than [`OVERFLOW_EPS_PX`]:
+/// that constant guards genuine strip-crossing overflow detection
+/// (where a tighter epsilon is correct), while this one exists purely
+/// to swallow px-rounding noise before a box is judged too tall for a
+/// page at all. The two gates that decide whether to call
+/// `slice_oversized_leaf` (`oversized` and `spills_strip` at this
+/// module's flex/grid-cell call site) must share this tolerance —
+/// using `OVERFLOW_EPS_PX` for one and not the other let a box in the
+/// 0.5–1.0px gap defeat the tolerance via the other gate (Codex review,
+/// PR #719).
+const OVERSIZE_QUANTIZATION_TOLERANCE_PX: f32 = 1.0;
+
 /// CSS 3 Fragmentation initial value for `orphans`.
 const ORPHANS_INITIAL: usize = 2;
 /// CSS 3 Fragmentation initial value for `widows`.
@@ -2257,6 +2272,28 @@ fn record_subtree_descendants(
     }
 }
 
+/// fulgur-pgbrk R7 reachability gate for [`slice_oversized_leaf`] at the
+/// nested walk's per-child call site: true when a child is either
+/// **oversized** (taller than a full page strip on its own, e.g.
+/// `<div height:300vh>`) or **spills the current strip** (fits a fresh
+/// strip but crosses the strip boundary from wherever it currently
+/// sits — R7b, flex/grid cells and other floor-pinned children whose
+/// items are not class-A break points).
+///
+/// Both checks share [`OVERSIZE_QUANTIZATION_TOLERANCE_PX`]
+/// deliberately: at `child_page_y == 0` (a child sitting at the top of
+/// a fresh strip) the two conditions collapse to the same shape, and
+/// using a tighter tolerance for one than the other let a box in the
+/// gap between them defeat the oversize tolerance via whichever
+/// condition had the smaller slack (Codex review, PR #719) — see
+/// `slice_oversized_leaf`'s "Oversize tolerance" doc section for the
+/// 220pt→294px Taffy-rounding case the tolerance exists to absorb.
+fn needs_leaf_slicing(child_h: f32, child_page_y: f32, page_height_px: f32) -> bool {
+    let oversized = child_h > page_height_px + OVERSIZE_QUANTIZATION_TOLERANCE_PX;
+    let spills_strip = child_page_y + child_h > page_height_px + OVERSIZE_QUANTIZATION_TOLERANCE_PX;
+    oversized || spills_strip
+}
+
 /// fulgur-sbw2 / fulgur-pgbrk R7: emit a monolithic leaf whose
 /// CSS-resolved height alone exceeds `page_height_px` (e.g.
 /// `<div height:300vh>`) as one fragment per page strip, instead of a
@@ -3447,9 +3484,7 @@ fn fragment_block_subtree(
         let has_transform = child
             .primary_styles()
             .is_some_and(|s| !s.get_box().transform.0.is_empty());
-        let oversized = child_h > page_height_px + 1.0;
-        let spills_strip = child_page_y + child_h > page_height_px + OVERFLOW_EPS_PX;
-        if !has_transform && (oversized || spills_strip) {
+        if !has_transform && needs_leaf_slicing(child_h, child_page_y, page_height_px) {
             emitted_anything = true;
             let pre_slice_page = page_index;
             let (np, nc) = slice_oversized_leaf(
@@ -5663,6 +5698,42 @@ mod tests {
             x,
             crate::MAX_DOM_DEPTH
         ));
+    }
+
+    /// Codex review (PR #719): a nested child at the top of a fresh
+    /// strip (`child_page_y == 0`) whose height exceeds the strip by
+    /// the documented 220pt→294px Taffy-rounding delta (~0.67px) sits
+    /// inside `oversized`'s 1px tolerance and must NOT be sliced — even
+    /// though it was previously only 0.5px (`OVERFLOW_EPS_PX`) inside
+    /// `spills_strip`'s tolerance, which would wrongly trigger slicing
+    /// and produce a spurious sliver page for an exact-fit box.
+    #[test]
+    fn needs_leaf_slicing_respects_oversize_tolerance_at_a_fresh_strip_top() {
+        let page_height_px = 293.33334_f32;
+        let child_h = 294.0_f32; // ~0.67px over — the documented rounding case
+        assert!(
+            !super::needs_leaf_slicing(child_h, 0.0, page_height_px),
+            "a box inside the 1px Taffy-rounding tolerance must not be sliced, \
+             even sitting at a fresh strip's top edge"
+        );
+    }
+
+    /// The same tolerance must still catch a genuinely oversized child
+    /// (e.g. `300vh` on a 293px strip) at a fresh strip's top.
+    #[test]
+    fn needs_leaf_slicing_still_catches_true_oversize() {
+        let page_height_px = 293.33334_f32;
+        let child_h = 880.0_f32;
+        assert!(super::needs_leaf_slicing(child_h, 0.0, page_height_px));
+    }
+
+    /// A child that fits its own height but crosses the strip boundary
+    /// because it sits mid-strip (`child_page_y > 0`, the R7b flex/grid
+    /// case) must still be sliced.
+    #[test]
+    fn needs_leaf_slicing_catches_mid_strip_spill() {
+        let page_height_px = 800.0_f32;
+        assert!(super::needs_leaf_slicing(400.0, 500.0, page_height_px));
     }
 
     /// fulgur-pgbrk R7: `slice_oversized_leaf` slice arithmetic — an
