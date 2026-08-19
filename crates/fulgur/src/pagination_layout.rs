@@ -3837,8 +3837,21 @@ fn scan_split_points(
         } else {
             0.0
         };
-        let projected_bottom_in_body =
-            paragraph_top_in_body + frag_lead_in + (line_bottom_local - frag_top_local);
+        // The trailing decoration (`padding-bottom` / `border-bottom`)
+        // is added unconditionally to whichever fragment ends up last
+        // (see the `frag_lead_out` push after this loop). If line `i`
+        // is the paragraph's last line, closing the fragment here makes
+        // it that final fragment, so the fit check must include
+        // `lead_out` too — otherwise a fragment whose lines fit exactly
+        // but whose trailing decoration doesn't can sail past
+        // `page_height_px` unnoticed, and the relaxed re-scan below
+        // hits the identical blind spot (fulgur-pgbrk R7 follow-up,
+        // Codex review PR #719).
+        let frag_lead_out = if i == total_lines - 1 { lead_out } else { 0.0 };
+        let projected_bottom_in_body = paragraph_top_in_body
+            + frag_lead_in
+            + (line_bottom_local - frag_top_local)
+            + frag_lead_out;
 
         if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
             let first_size = i - fragment_start_idx;
@@ -7679,6 +7692,42 @@ h2 { string-set: chapter-title content(text); }
             super::resolved_line_constraints(doc.deref_mut(), probe, None),
             (2, 2),
             "no table at all still yields the initial values"
+        );
+    }
+
+    /// Codex review (PR #719): four 100px lines on a 250px strip with a
+    /// 100px `lead_out` (`padding-bottom` / `border-bottom`). The lines
+    /// alone fit the last fragment (200px), but the scan's overflow
+    /// predicate only compared line bottoms — never `lead_out` — so it
+    /// never split before the trailing line, and the unconditional
+    /// `+ lead_out` push after the loop produced a 300px final fragment
+    /// on a 250px strip: exactly what `find_overflowing_fragments`
+    /// panics on in test builds. The fix folds `lead_out` into the fit
+    /// check for the paragraph's last line, so the split lands one line
+    /// earlier and every fragment (200 / 100 / 200) fits the strip.
+    #[test]
+    fn scan_accounts_for_lead_out_on_the_final_fragment() {
+        let lines: Vec<(f32, f32)> = (0..4)
+            .map(|i| (i as f32 * 100.0, (i + 1) as f32 * 100.0))
+            .collect();
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 100.0,
+            orphans: 1,
+            widows: 1,
+        };
+        let plan = super::scan_split_points(&input, 0.0, 0, 250.0);
+        for f in &plan {
+            assert!(
+                f.height <= 250.0 + 0.01,
+                "fragment overflows the strip once lead_out is counted; plan={plan:?}"
+            );
+        }
+        let last = plan.last().expect("scan always emits a final fragment");
+        assert!(
+            (last.height - 200.0).abs() < 0.01,
+            "final fragment should be 1 line (100) + lead_out (100); plan={plan:?}"
         );
     }
 
