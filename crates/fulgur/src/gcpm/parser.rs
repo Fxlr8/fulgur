@@ -3659,9 +3659,8 @@ mod tests {
             Some(PageSizeDecl::Keyword("A4".to_string()))
         );
         assert!(
-            ctx.cleaned_css.contains("@media print")
-                && ctx.cleaned_css.contains("body")
-                && ctx.cleaned_css.contains("margin: 0"),
+            ctx.cleaned_css
+                .contains("@media print { body { margin: 0; } }"),
             "complete @media rule must survive in cleaned_css: {:?}",
             ctx.cleaned_css
         );
