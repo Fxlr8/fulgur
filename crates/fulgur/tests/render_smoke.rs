@@ -5769,6 +5769,98 @@ fn layout_single_pass_returns_drawables_and_geometry() {
     );
 }
 
+/// `render::fragment_consumed_pt` / `draw_replaced_sliced` do not strip
+/// `content_lead_in` / `content_lead_out` out of their slice math, on the
+/// grounds that geometries on that path never carry them (CodeRabbit
+/// review, PR #719). This pins both halves of that argument end-to-end.
+///
+/// A padded, bordered, page-crossing `<svg>` is sliced by
+/// `slice_oversized_leaf`, which records no decoration — so subtracting
+/// the leads there would be a no-op. A padded paragraph split at line
+/// boundaries *does* carry them, but is not a replaced element, so it
+/// takes `paragraph_lines_for_page` (which does strip them) instead. If a
+/// future change makes those populations overlap, this test fails.
+#[test]
+fn sliced_replaced_element_records_no_content_leads() {
+    let sliced_svg = r#"<!DOCTYPE html>
+<html><head><style>
+@page { size: 400px 300px; margin: 0; }
+body { margin: 0; }
+svg { display: block; width: 100px; height: 900px; padding: 50px 0; border-top: 10px solid black; }
+</style></head>
+<body><svg xmlns="http://www.w3.org/2000/svg"><rect width="100" height="900" fill="red"/></svg></body></html>"#;
+
+    let out = Engine::builder()
+        .build()
+        .layout(sliced_svg)
+        .expect("layout");
+    let sliced: Vec<_> = out
+        .geometry
+        .iter()
+        .filter(|(_, g)| g.is_split())
+        .filter(|(id, _)| {
+            out.drawables.svgs.contains_key(id) || out.drawables.images.contains_key(id)
+        })
+        .collect();
+    assert!(
+        !sliced.is_empty(),
+        "fixture must actually slice a replaced element across pages"
+    );
+    for (id, g) in sliced {
+        assert_eq!(
+            (g.content_lead_in, g.content_lead_out),
+            (fulgur::units::Px::ZERO, fulgur::units::Px::ZERO),
+            "node {id}: slice_oversized_leaf must record no decoration, or \
+             draw_replaced_sliced's slice math needs to strip it; got \
+             lead_in={:?} lead_out={:?}",
+            g.content_lead_in,
+            g.content_lead_out
+        );
+    }
+
+    // The converse: a line-split padded paragraph carries the leads, and
+    // is not a replaced element.
+    let words = |p: &str| {
+        (0..80)
+            .map(|i| format!("{p}{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let split_para = format!(
+        r#"<!DOCTYPE html>
+<html><head><style>
+@page {{ size: 400px 300px; margin: 0; }}
+body {{ margin: 0; }}
+p {{ padding: 60px 0; border-top: 12px solid black; font-size: 20px; line-height: 1.5; }}
+</style></head>
+<body><p>{} {}</p></body></html>"#,
+        words("word"),
+        words("tail")
+    );
+
+    let out = Engine::builder()
+        .build()
+        .layout(&split_para)
+        .expect("layout");
+    let decorated: Vec<_> = out
+        .geometry
+        .iter()
+        .filter(|(_, g)| g.is_split() && g.content_lead_in > fulgur::units::Px::ZERO)
+        .collect();
+    assert!(
+        !decorated.is_empty(),
+        "fixture must actually split a padded inline root across pages"
+    );
+    for (id, _) in decorated {
+        assert!(
+            !out.drawables.svgs.contains_key(id) && !out.drawables.images.contains_key(id),
+            "node {id} carries content leads AND is a replaced element — the \
+             two populations must stay disjoint, or draw_replaced_sliced's \
+             slice math needs to strip the leads"
+        );
+    }
+}
+
 /// Smoke: public `Engine::layout()` 2-pass path. A `target-counter()` in
 /// `::after` forces `needs_pass_two`, so `layout()` falls through the early
 /// return and re-lays out with the pass-1 `AnchorMap`. Covers the else-arm

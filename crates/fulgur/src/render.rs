@@ -2657,7 +2657,24 @@ fn build_multicol_stroke(
 /// one fragment per crossed page strip, each recording only its own
 /// slice height — this sums the ones before `frag` so a caller can
 /// recover how far into the source content `frag`'s window starts.
-/// Returns 0 for the first (or only) fragment.
+/// Returns 0 for the first (or only) fragment, and for a `frag` whose
+/// `page_index` this geometry does not carry.
+///
+/// Unlike [`paragraph_lines_for_page`], this deliberately does NOT strip
+/// `content_lead_in` / `content_lead_out` back out (CodeRabbit review,
+/// PR #719). Those two are written at exactly one site —
+/// `pagination_layout`'s inline-root line-splitter — and describe a
+/// *line-box* partition that has to reconcile Parley's content-box line
+/// metrics with border-box fragment heights. The geometries reaching this
+/// function come from `slice_oversized_leaf`, which never sets either
+/// field, so both are zero here and subtracting them would be a no-op:
+/// a padded, bordered, page-crossing `<svg>` records
+/// `content_lead_in == content_lead_out == 0`, and a padded line-split
+/// paragraph — which does carry them — has no entry in
+/// `drawables.images` / `drawables.svgs`, so it never reaches
+/// [`draw_replaced_sliced`]. The two populations are disjoint. Should a
+/// future change teach `slice_oversized_leaf` to record decoration, this
+/// function and [`draw_replaced_sliced`] must be revisited together.
 fn fragment_consumed_pt(
     geom: &crate::pagination_layout::PaginationGeometry,
     frag: &crate::pagination_layout::Fragment,
@@ -5185,6 +5202,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- fragment_consumed_pt ---
+
+    /// The first fragment starts at the top of the source content, so
+    /// nothing has been consumed before it.
+    #[test]
+    fn fragment_consumed_pt_first_fragment_is_zero() {
+        let geom = make_geom(vec![
+            make_fragment(0, 100.0),
+            make_fragment(1, 200.0),
+            make_fragment(2, 40.0),
+        ]);
+        assert_eq!(fragment_consumed_pt(&geom, &geom.fragments[0]), 0.0);
+    }
+
+    /// Each later fragment is offset by the sum of the slices before it,
+    /// converted px -> pt (100px = 75pt).
+    #[test]
+    fn fragment_consumed_pt_sums_preceding_slices() {
+        let geom = make_geom(vec![
+            make_fragment(0, 100.0),
+            make_fragment(1, 200.0),
+            make_fragment(2, 40.0),
+        ]);
+        assert!((fragment_consumed_pt(&geom, &geom.fragments[1]) - 75.0).abs() < 0.01);
+        assert!((fragment_consumed_pt(&geom, &geom.fragments[2]) - 225.0).abs() < 0.01);
+    }
+
+    /// A `page_index` this geometry does not carry has no window to
+    /// offset, so the lookup falls back to 0 rather than panicking or
+    /// summing every fragment.
+    #[test]
+    fn fragment_consumed_pt_unknown_page_index_is_zero() {
+        let geom = make_geom(vec![make_fragment(0, 100.0), make_fragment(1, 200.0)]);
+        assert_eq!(fragment_consumed_pt(&geom, &make_fragment(7, 50.0)), 0.0);
+    }
+
+    /// Decoration is not stripped here (see the note on
+    /// `fragment_consumed_pt`): geometries on this path always carry zero
+    /// leads, so a non-zero lead would be a bug upstream, not something
+    /// this function compensates for. Pinning the behavior keeps the
+    /// disjointness argument honest — if `slice_oversized_leaf` ever
+    /// starts recording decoration, this test fails and forces the
+    /// question.
+    #[test]
+    fn fragment_consumed_pt_ignores_content_leads() {
+        let fragments = vec![make_fragment(0, 100.0), make_fragment(1, 200.0)];
+        let plain = make_geom(fragments.clone());
+        let decorated = crate::pagination_layout::PaginationGeometry {
+            fragments,
+            is_repeat: false,
+            content_lead_in: 20.0_f32.as_px(),
+            content_lead_out: 10.0_f32.as_px(),
+        };
+        assert_eq!(
+            fragment_consumed_pt(&plain, &plain.fragments[1]),
+            fragment_consumed_pt(&decorated, &decorated.fragments[1]),
+        );
     }
 
     /// fulgur-pgbrk R1 + css-break-3 §5.4: the block's content-box inset
