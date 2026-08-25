@@ -912,15 +912,16 @@ fn fragment_recursion_child(
             return Some(RecursionOutcome::RequestBreakBefore);
         }
         // Difference 5: nested closes the parent on the outgoing page
-        // before advancing; body has no parent to close.
+        // before advancing; body has no parent to close. The retrying
+        // child is placed on the next page, so the parent continues —
+        // its outgoing fragment spans the full strip.
         if frame.cursor_y > frame.page_start_y {
             if let Some(slice) = frame.parent_slice {
-                slice.close_unforced(
+                slice.close_continuing(
                     geometry,
                     frame.row_state.as_mut(),
                     frame.page,
                     frame.page_start_y,
-                    frame.cursor_y,
                 );
             }
         }
@@ -1161,6 +1162,60 @@ impl ParentSlice {
         if should_emit {
             self.close_forced(geometry, page_index, page_start_y, cursor_y);
         }
+    }
+
+    /// Close the parent on a page it is **leaving**, i.e. one where more
+    /// of its content follows on a later page.
+    ///
+    /// Such a fragment spans the whole remaining strip
+    /// (`page_height_px - page_start_y`), not the child cursor: the box
+    /// continues past the page bottom by definition, so its background,
+    /// side borders and shadow must run to the page edge rather than
+    /// stopping at whichever child happened to be the last to fit. The
+    /// gap between that child's bottom and the page bottom is the
+    /// container's own padding-bottom, an inter-child gap, or simply
+    /// space the next child could not use — never a place for the box to
+    /// end.
+    ///
+    /// This is the same span [`emit_parent_page_spans`] already claims
+    /// for the recursion / slicing crossings; routing the push and
+    /// forced-break closers here is what makes the two agree. Contrast
+    /// [`ParentSlice::close_forced`] / [`ParentSlice::close_unforced`],
+    /// which are for the page a container **ends** on and must stay
+    /// cursor-derived so a trailing margin adjoining an unforced break is
+    /// not baked into the height (css-break-3 §5.2 — see
+    /// [`parent_slice_height`]).
+    ///
+    /// Dedupes across parallel flex / grid cells exactly as
+    /// [`ParentSlice::close_unforced`] does.
+    fn close_continuing(
+        &self,
+        geometry: &mut PaginationGeometryTable,
+        row_state: Option<&mut RowState>,
+        page_index: u32,
+        page_start_y: f32,
+    ) {
+        let should_emit = row_state
+            .map(|rs| rs.emitted_parent_pages.insert(page_index))
+            .unwrap_or(true);
+        if !should_emit {
+            return;
+        }
+        let height = (self.page_height_px - page_start_y).max(0.0);
+        if height <= 0.0 {
+            return;
+        }
+        geometry
+            .entry(self.id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index,
+                x: self.x_in_body.as_px(),
+                y: page_start_y.as_px(),
+                width: self.width.as_px(),
+                height: height.as_px(),
+            });
     }
 }
 
@@ -3281,6 +3336,15 @@ fn fragment_block_subtree(
         // this places them at the same page-local y; for sequential
         // block flow, it matches Taffy's stacked positions exactly.
         let mut child_page_y = page_start_y + (this_top_in_parent - page_taffy_origin);
+        // The cursor as of BEFORE this child — i.e. "has this container
+        // actually placed content on the current page strip yet?".
+        // `cursor_y` is about to be raised to this child's own top, which
+        // for the strip's leading child is the container's
+        // `border-top + padding-top` (or an uncollapsed top margin), NOT
+        // placed content. Gates that mean "content is already on this
+        // page" must read this, not the post-raise `cursor_y`, or a
+        // container's own decoration masquerades as content.
+        let content_on_this_page = cursor_y > page_start_y;
         // Update the cursor only when the child's bottom advances
         // past it. For block flow this matches cursor advancing by
         // `gap + child_h`; for grid parallel siblings the cursor
@@ -3296,16 +3360,23 @@ fn fragment_block_subtree(
         // container. Hand it up rather than dropping it, which is what
         // the `cursor_y > page_start_y` gate below did on its own.
         //
+        // `!emitted_anything` is the whole of the leading-child test, and
+        // it is also exactly `RequestBreakBefore`'s invariant (nothing
+        // pushed into `geometry` yet). It deliberately does NOT also
+        // require `cursor_y <= page_start_y`: line 3289 has already
+        // raised `cursor_y` to `page_start_y + this_top_in_parent`, and
+        // for a leading child `this_top_in_parent` IS the container's
+        // `border-top + padding-top`. Gating on it therefore made any
+        // container with top decoration fail to propagate its own leading
+        // child's break, splitting instead and stranding a
+        // decoration-sized stub on the outgoing page.
+        //
         // `cursor_in > 0.0` keeps this from firing when the container
         // already starts at a page top: a break before it would be a
         // no-op, and requesting one would bounce between caller and
-        // callee forever.
-        if break_before_page
-            && !emitted_anything
-            && cursor_y <= page_start_y
-            && cursor_in > 0.0
-            && propagate_leading_break
-        {
+        // callee forever. It is also what terminates the caller's retry.
+        let may_propagate_break = !emitted_anything && cursor_in > 0.0 && propagate_leading_break;
+        if break_before_page && may_propagate_break {
             return SubtreeResult::RequestBreakBefore;
         }
 
@@ -3313,14 +3384,10 @@ fn fragment_block_subtree(
         // when some content has already been placed on this page —
         // gated by `cursor_y > page_start_y` (mirrors body-level's
         // `cursor_y > 0.0` since body's implicit page_start is 0).
-        if break_before_page && cursor_y > page_start_y {
-            parent_slice.close_unforced(
-                geometry,
-                row_state.as_mut(),
-                page_index,
-                page_start_y,
-                cursor_y,
-            );
+        // The breaking child lands on the next page, so the container
+        // continues and claims the full strip here.
+        if break_before_page && content_on_this_page {
+            parent_slice.close_continuing(geometry, row_state.as_mut(), page_index, page_start_y);
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
@@ -3411,8 +3478,10 @@ fn fragment_block_subtree(
         // before a box's first child is a break before the box,
         // recursively): the helper hands `RequestBreakBefore` back
         // only when the child is OUR leading child and breaks may
-        // still travel up.
-        let may_propagate_break = !emitted_anything && cursor_in > 0.0 && propagate_leading_break;
+        // still travel up. Computed once before the `break-before`
+        // check above, since nothing between there and here can change
+        // its inputs (the branches that set `emitted_anything` all
+        // `continue`).
         frame.page = page_index;
         frame.cursor_y = cursor_y;
         frame.page_start_y = page_start_y;
@@ -3483,6 +3552,26 @@ fn fragment_block_subtree(
         if break_decision(child_page_y, child_h, overflow_floor, page_height_px)
             == BreakDecision::PushToNextPage
         {
+            // css-break-3 §3.1.1 / §4.1, the unforced twin of the
+            // `break-before` propagation above: pushing our LEADING child
+            // to the next page is a break at the class B point between
+            // this container's content edge and that child. Taking it
+            // leaves the container's `border-top + padding-top` behind on
+            // the outgoing page — legal only if that decoration actually
+            // fits there. When nothing has been emitted yet it does not:
+            // the container has no content on this page, so the only
+            // thing the stub would paint is decoration for content that
+            // has moved away. Hand the break up so the caller re-places
+            // the whole container on the next page (which is already what
+            // a childless or inline-root container does at this shape).
+            //
+            // Safe with respect to `RequestBreakBefore`'s invariant:
+            // `may_propagate_break` requires `!emitted_anything`, so
+            // `geometry` is untouched. Terminating: the caller re-enters
+            // at `cursor_in == 0.0`, which the predicate excludes.
+            if may_propagate_break {
+                return SubtreeResult::RequestBreakBefore;
+            }
             // Only claim a fragment on the page we are leaving when the
             // parent actually placed content there. When the break is
             // propagated from the parent's leading edge (nothing emitted
@@ -3491,12 +3580,11 @@ fn fragment_block_subtree(
             // would additionally flip `is_split()` on and corrupt
             // downstream slicing.
             if cursor_y > page_start_y {
-                parent_slice.close_unforced(
+                parent_slice.close_continuing(
                     geometry,
                     row_state.as_mut(),
                     page_index,
                     page_start_y,
-                    cursor_y,
                 );
             }
             page_index += 1;
@@ -11068,5 +11156,227 @@ h2 { string-set: chapter-title content(text); }
         let states = collect_counter_states(&geom, &ops);
         assert_eq!(states.len(), 1);
         assert!(states[0].is_empty());
+    }
+
+    /// Sum of a node's fragment heights, for the border-box conservation
+    /// checks below.
+    fn total_h(entry: &PaginationGeometry) -> f32 {
+        entry.fragments.iter().map(|f| f.height.to_f32()).sum()
+    }
+
+    /// css-break-3 §3.1.1: a `break-before` on a box's first in-flow child
+    /// is a break before the box. R5 (`cd24af40`) implemented this, but
+    /// gated it on `cursor_y <= page_start_y` — and `cursor_y` has already
+    /// been raised to `page_start_y + this_top_in_parent`, which for a
+    /// leading child IS the container's `border-top + padding-top`. So any
+    /// top decoration on the container defeated its own propagation and
+    /// stranded a decoration-sized stub on the outgoing page.
+    ///
+    /// Pinned as a pair: the only difference between the two documents is
+    /// the container's leading decoration, and both must move whole.
+    #[test]
+    fn leading_forced_break_propagates_through_container_top_decoration() {
+        // `trailing_deco` = `padding-bottom + border-bottom`, which a box
+        // that moved whole still loses today — see the deficit assertion.
+        for (label, deco, trailing_deco) in [
+            ("bare", "padding:0; border:0", 0.0),
+            ("padded", "padding:20px; border:5px solid #000", 25.0),
+        ] {
+            let html = format!(
+                r#"
+                <html><body style="margin:0">
+                  <div style="height:200px"></div>
+                  <div id="probe" style="{deco}">
+                    <p style="margin:0; height:20px; break-before:page">one</p>
+                    <p style="margin:0; height:20px">two</p>
+                  </div>
+                </body></html>
+            "#
+            );
+            let mut doc = parse(&html, 360.0);
+            let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+            let box_h = doc
+                .get_node(probe)
+                .expect("probe node")
+                .final_layout
+                .size
+                .height;
+            let styles = blitz_adapter::extract_column_style_table(&doc);
+            let table =
+                super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &styles);
+            let entry = table.get(&probe).expect("probe geometry");
+            assert_eq!(
+                entry.fragments.len(),
+                1,
+                "[{label}] the break belongs before the box, so it moves whole \
+                 rather than stranding a {}px decoration stub; frags={:?}",
+                entry
+                    .fragments
+                    .first()
+                    .map(|f| f.height.to_f32())
+                    .unwrap_or(0.0),
+                entry.fragments,
+            );
+            assert_eq!(
+                entry.fragments[0].page_index, 1,
+                "[{label}] frags={:?}",
+                entry.fragments
+            );
+            // KNOWN GAP (not this fix): a container fragment's height is
+            // still the child cursor, so the box's own trailing
+            // decoration is missing. Pinned exactly rather than left
+            // loose, so that teaching the block path a
+            // `content_lead_out` fails this assertion loudly instead of
+            // passing unnoticed. When that lands, the expected deficit
+            // becomes 0 for both rows.
+            assert!(
+                (box_h - total_h(entry) - trailing_deco).abs() < 0.51,
+                "[{label}] expected the border box {box_h}px short by exactly \
+                 its trailing decoration {trailing_deco}px; got {}px total, \
+                 frags={:?}",
+                total_h(entry),
+                entry.fragments,
+            );
+        }
+    }
+
+    /// The same rule for an *unforced* break. The container's leading child
+    /// overflows the strip only because the container's own padding pushed
+    /// it there, so the break belongs before the container (css-break-3
+    /// §3 / §4.1 — a class B break is only usable if the leading
+    /// decoration it leaves behind actually fits).
+    #[test]
+    fn leading_overflow_propagates_instead_of_stranding_decoration() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:250px"></div>
+              <div id="probe" style="padding:20px; border:5px solid #000">
+                <p style="margin:0; height:14px">hello</p>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 360.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let box_h = doc
+            .get_node(probe)
+            .expect("probe node")
+            .final_layout
+            .size
+            .height;
+        let table = run_pass(doc.deref_mut(), 260.0);
+        let entry = table.get(&probe).expect("probe geometry");
+        assert_eq!(
+            entry.fragments.len(),
+            1,
+            "only 10px of the box's 25px leading decoration fits the strip, \
+             so the class B break before its first child is unusable and the \
+             box must move whole; frags={:?}",
+            entry.fragments
+        );
+        // Same KNOWN GAP as the forced-break test above: 20px
+        // padding-bottom + 5px border-bottom are still missing because a
+        // container fragment's height is the child cursor.
+        assert!(
+            (box_h - total_h(entry) - 25.0).abs() < 0.51,
+            "expected the {box_h}px border box short by exactly its 25px \
+             trailing decoration; got {}px total, frags={:?}",
+            total_h(entry),
+            entry.fragments,
+        );
+    }
+
+    /// A forced break on the leading child of a *grid cell*, where
+    /// leading-edge propagation is forbidden (`suppress_page_check` —
+    /// css-break-3 §3.2, grid items are not class A break points).
+    ///
+    /// Deliberate behaviour change, pinned because it is a trade between
+    /// two imperfect outputs and neither had coverage. The break used to
+    /// be honoured locally, at the cell's own content edge: cell 1's
+    /// content went to page 2 while its parallel sibling stayed on page
+    /// 1, **tearing the row in half across the page boundary** — the same
+    /// class of defect as a straddling grid row whose cells fragment
+    /// independently. Now the break collapses instead and the row stays
+    /// intact on one page.
+    ///
+    /// Neither is what CSS asks for. The break should propagate out
+    /// through the grid to the class A point before the grid container,
+    /// moving the whole grid. That needs row-level agreement in
+    /// `RowState`, which is a separate piece of work; until then, keeping
+    /// the row together is the less damaging of the two available
+    /// answers.
+    #[test]
+    fn forced_break_inside_a_grid_cell_collapses_rather_than_tearing_the_row() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:200px"></div>
+              <div style="display:grid; grid-template-columns:1fr 1fr">
+                <div id="a" style="padding:10px; border:2px solid #000">
+                  <p style="margin:0; height:20px; break-before:page">a</p>
+                </div>
+                <div id="b" style="padding:10px; border:2px solid #000">
+                  <p style="margin:0; height:20px">b</p>
+                </div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 360.0);
+        let a = find_by_id(doc.deref_mut(), "a").expect("a");
+        let b = find_by_id(doc.deref_mut(), "b").expect("b");
+        let styles = blitz_adapter::extract_column_style_table(&doc);
+        let table = super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &styles);
+        let pages_of = |id: usize| -> Vec<u32> {
+            table
+                .get(&id)
+                .map(|e| e.fragments.iter().map(|f| f.page_index).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            pages_of(a),
+            pages_of(b),
+            "parallel cells of one row must not land on different pages; \
+             a={:?} b={:?}",
+            table.get(&a).map(|e| &e.fragments),
+            table.get(&b).map(|e| &e.fragments),
+        );
+    }
+
+    /// A container that genuinely continues onto a later page must claim
+    /// the whole remaining strip on the page it is leaving, not stop at
+    /// the last child that fit. `emit_parent_page_spans` already spans the
+    /// full strip for the recursion / slicing crossings; the push and
+    /// forced-break closers used the child cursor instead, so a container
+    /// with padding-bottom (or simply a gap below its last fitting child)
+    /// had its background and side borders stop short of the page bottom.
+    #[test]
+    fn continuing_container_claims_the_full_strip_on_the_page_it_leaves() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div style="height:200px"></div>
+              <div id="probe" style="padding:20px; border:5px solid #000">
+                <p style="margin:0; height:20px">one</p>
+                <p style="margin:0; height:20px">two</p>
+                <p style="margin:0; height:20px">three</p>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 360.0);
+        let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+        let table = run_pass(doc.deref_mut(), 260.0);
+        let entry = table.get(&probe).expect("probe geometry");
+        assert!(
+            entry.fragments.len() >= 2,
+            "the box is 110px starting at y=200 on a 260px strip, so it splits; \
+             frags={:?}",
+            entry.fragments
+        );
+        let first = &entry.fragments[0];
+        assert!(
+            (first.y.to_f32() + first.height.to_f32() - 260.0).abs() < 0.51,
+            "the outgoing fragment must reach the strip bottom at 260px, not \
+             stop at the last child that fit; got y={} h={}, frags={:?}",
+            first.y.to_f32(),
+            first.height.to_f32(),
+            entry.fragments,
+        );
     }
 }
