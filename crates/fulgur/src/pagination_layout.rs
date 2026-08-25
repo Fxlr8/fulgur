@@ -410,13 +410,18 @@ fn fragment_zero_height_child(
     ) || page_name_changed;
 
     if break_before_page && frame.cursor_y > frame.page_start_y {
+        let resume = resume_taffy_origin(
+            frame.page_taffy_origin,
+            frame.page_start_y,
+            cx.page_h,
+            this_top_in_parent,
+        );
         if let Some(slice) = frame.parent_slice {
-            slice.close_unforced(
+            slice.close_continuing(
                 geometry,
                 frame.row_state.as_mut(),
                 frame.page,
                 frame.page_start_y,
-                frame.cursor_y,
             );
         }
         frame.page += 1;
@@ -425,7 +430,7 @@ fn fragment_zero_height_child(
         if frame.kind == ContainerKind::Nested {
             // The zero-height breaking child IS the first on the new
             // page — rebase the origin eagerly.
-            frame.page_taffy_origin = this_top_in_parent;
+            frame.page_taffy_origin = resume;
             frame.origin_pending_target_y = None;
             frame.origin_pending_anchor = None;
             frame.origin_pending_same_row = None;
@@ -587,17 +592,23 @@ fn fragment_inline_child(
     if break_decision(child_top_on_page, box_total_h, overflow_floor, cx.page_h)
         == BreakDecision::PushToNextPage
     {
+        let resume = resume_taffy_origin(
+            frame.page_taffy_origin,
+            frame.page_start_y,
+            cx.page_h,
+            this_top_in_parent,
+        );
         if let Some(slice) = frame.parent_slice {
             // Nested only: close the parent on the outgoing page
             // (the `cursor > start` guard skips the fresh-strip
-            // close). Body has no parent to close.
+            // close). Body has no parent to close. The inline root
+            // moves to the next page, so the parent continues here.
             if frame.cursor_y > frame.page_start_y {
-                slice.close_unforced(
+                slice.close_continuing(
                     geometry,
                     frame.row_state.as_mut(),
                     frame.page,
                     frame.page_start_y,
-                    frame.cursor_y,
                 );
             }
         }
@@ -606,7 +617,11 @@ fn fragment_inline_child(
         frame.page_start_y = 0.0;
         child_top_on_page = 0.0;
         if frame.kind == ContainerKind::Nested {
-            frame.page_taffy_origin = this_top_in_parent;
+            frame.page_taffy_origin = resume;
+            // Any part of the container's leading decoration that the
+            // outgoing page did not spend is still owed here, so the
+            // inline root resumes below it rather than at the strip top.
+            child_top_on_page = this_top_in_parent - resume;
         }
     }
 
@@ -915,6 +930,12 @@ fn fragment_recursion_child(
         // before advancing; body has no parent to close. The retrying
         // child is placed on the next page, so the parent continues —
         // its outgoing fragment spans the full strip.
+        let resume = resume_taffy_origin(
+            frame.page_taffy_origin,
+            frame.page_start_y,
+            cx.page_h,
+            this_top_in_parent,
+        );
         if frame.cursor_y > frame.page_start_y {
             if let Some(slice) = frame.parent_slice {
                 slice.close_continuing(
@@ -930,10 +951,11 @@ fn fragment_recursion_child(
         frame.page_start_y = 0.0;
         if frame.kind == ContainerKind::Nested {
             // The retrying child is the first on the new page — rebase
-            // the Taffy origin to its `this_top_in_parent` so it lands
-            // at `page_start_y` (= 0), discarding the inter-child gap
-            // (CSS 3 Fragmentation §3).
-            frame.page_taffy_origin = this_top_in_parent;
+            // the Taffy origin so it lands at `page_start_y` (= 0),
+            // discarding the inter-child gap (CSS 3 Fragmentation §3),
+            // except for any unspent leading decoration of the
+            // container itself (see `resume_taffy_origin`).
+            frame.page_taffy_origin = resume;
         }
         // Retry at most once: entered at `cursor_y == 0`, the callee's
         // `RequestBreakBefore` producers (which require `cursor_in >
@@ -3387,17 +3409,25 @@ fn fragment_block_subtree(
         // The breaking child lands on the next page, so the container
         // continues and claims the full strip here.
         if break_before_page && content_on_this_page {
+            let resume = resume_taffy_origin(
+                page_taffy_origin,
+                page_start_y,
+                page_height_px,
+                this_top_in_parent,
+            );
             parent_slice.close_continuing(geometry, row_state.as_mut(), page_index, page_start_y);
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
             // The breaking child is the first in-flow child on the
-            // new page strip. Rebase the Taffy origin to its
-            // `this_top_in_parent` so it lands at `page_start_y` (= 0)
-            // — discarding the inter-child gap, matching CSS 3
-            // Fragmentation §3 (margins at forced breaks truncate).
-            page_taffy_origin = this_top_in_parent;
-            child_page_y = 0.0;
+            // new page strip. Rebase the Taffy origin so it lands at
+            // `page_start_y` (= 0) — discarding the inter-child gap,
+            // matching CSS 3 Fragmentation §3 (margins at forced breaks
+            // truncate). Padding and border do not truncate, so any
+            // unspent leading decoration still offsets it; see
+            // `resume_taffy_origin`.
+            page_taffy_origin = resume;
+            child_page_y = this_top_in_parent - resume;
         }
 
         // (Strip-overflow page cut moved below the recursion gate as
@@ -3579,6 +3609,12 @@ fn fragment_block_subtree(
             // on the outgoing page at all, and a zero-height fragment
             // would additionally flip `is_split()` on and corrupt
             // downstream slicing.
+            let resume = resume_taffy_origin(
+                page_taffy_origin,
+                page_start_y,
+                page_height_px,
+                this_top_in_parent,
+            );
             if cursor_y > page_start_y {
                 parent_slice.close_continuing(
                     geometry,
@@ -3591,10 +3627,12 @@ fn fragment_block_subtree(
             cursor_y = 0.0;
             page_start_y = 0.0;
             // Forced to a fresh page: rebase the Taffy origin so the
-            // current child lands at page_start_y (= 0) on the new
-            // page. Sequential siblings then continue from this point.
-            page_taffy_origin = this_top_in_parent;
-            child_page_y = 0.0;
+            // current child lands at the top of the new strip, below
+            // whatever leading decoration of this container the
+            // outgoing page did not spend (see `resume_taffy_origin`).
+            // Sequential siblings then continue from this point.
+            page_taffy_origin = resume;
+            child_page_y = this_top_in_parent - resume;
         }
 
         // fulgur-pgbrk R7: slice a child the walk cannot place whole,
@@ -3800,6 +3838,26 @@ fn fragment_block_subtree(
         }
     }
 
+    // css-break-3 §5.4 (`box-decoration-break: slice`): the container's
+    // own trailing decoration belongs to its LAST fragment. `cursor_y`
+    // tracks child content only — children are laid out inside the
+    // padding box — so without this the box's `padding-bottom +
+    // border-bottom` is dropped from every fragmented container, and
+    // `render.rs` closes the border box at the last child's edge.
+    //
+    // Folded into `cursor_y` rather than into the emitted height alone
+    // so the returned cursor describes the box's real bottom: the
+    // caller places the next sibling from it (`fragment_recursion_child`
+    // adopts `new_cursor` verbatim), and the non-recursed sibling path
+    // it has to agree with advances by Taffy's full border-box `child_h`.
+    //
+    // The leading decoration needs no equivalent: children sit
+    // `lead_in` below the container's own top, so the first fragment —
+    // measured from `page_start_y` to the first child's bottom —
+    // already contains it.
+    let (lead_in, lead_out) = box_decoration(parent);
+    cursor_y += lead_out;
+
     // Close the parent's fragment for the final page span. Always
     // emit at least one fragment so the parent is represented in
     // geometry — `collect_counter_states` and friends look up nodes
@@ -3809,6 +3867,15 @@ fn fragment_block_subtree(
     // (whitespace / OOF / running) — that's intentional and
     // matches `fragment_pagination_root`'s zero-height-element path.
     parent_slice.close_forced(geometry, page_index, page_start_y, cursor_y);
+
+    // Publish the split, for the same reason the inline path does: a
+    // consumer partitioning this box's content across its fragments has
+    // to know which part of the first and last fragment is decoration
+    // rather than content.
+    if let Some(entry) = geometry.get_mut(&parent_id) {
+        entry.content_lead_in = lead_in.as_px();
+        entry.content_lead_out = lead_out.as_px();
+    }
 
     SubtreeResult::Placed {
         page: page_index,
@@ -3863,17 +3930,77 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
 /// Non-finite Taffy values are sanitized to `0.0` — same convention as
 /// the child-height sanitization in `fragment_block_subtree`.
 fn inline_root_box_metrics(node: &blitz_dom::Node, line_metrics: &[(f32, f32)]) -> (f32, f32, f32) {
-    fn finite(v: f32) -> f32 {
-        if v.is_finite() { v.max(0.0) } else { 0.0 }
-    }
-    let layout = &node.final_layout;
-    let lead_in = finite(layout.border.top) + finite(layout.padding.top);
-    let lead_out = finite(layout.padding.bottom) + finite(layout.border.bottom);
+    let (lead_in, lead_out) = box_decoration(node);
     let lines_h = match (line_metrics.first(), line_metrics.last()) {
         (Some(first), Some(last)) => (last.1 - first.0).max(0.0),
         _ => 0.0,
     };
     (lead_in, lines_h, lead_out)
+}
+
+/// Where a container's continuation resumes, in the container's own
+/// Taffy coordinate space — the value to install as `page_taffy_origin`
+/// after advancing a page, so that the child being placed lands at
+/// `page_start_y + (child_top - origin)`.
+///
+/// Two things compete for the new strip's top:
+///
+/// - `cut` — the box-local y at which the outgoing page ended. The
+///   container's outgoing fragment spans its whole remaining strip (see
+///   [`ParentSlice::close_continuing`]), so everything above `cut` is
+///   already painted and must not be painted again.
+/// - `child_top` — the child's own box-local top.
+///
+/// Taking the **earlier** of the two is what makes both cases right:
+///
+/// - `child_top >= cut` (the ordinary split, between or inside
+///   children): the child was pushed whole from below the cut, so the
+///   gap collapses and it lands flush at the strip top. This is the
+///   long-standing behaviour, `origin = child_top`.
+/// - `child_top < cut` (the container's own `border-top + padding-top`
+///   straddled the boundary): the leading decoration is only partly
+///   spent, and the remainder is still owed on the continuation. The
+///   child is inset by exactly what is left, `child_top - cut`, instead
+///   of being slammed against the strip top and silently swallowing it.
+///
+/// Without the second case a container cut inside its own decoration
+/// loses the unspent part from every fragment, so its border box does
+/// not add up across pages.
+fn resume_taffy_origin(
+    page_taffy_origin: f32,
+    page_start_y: f32,
+    page_height_px: f32,
+    child_top: f32,
+) -> f32 {
+    let cut = page_taffy_origin + (page_height_px - page_start_y).max(0.0);
+    child_top.min(cut)
+}
+
+/// A box's own block-axis decoration, in CSS px:
+/// `(border-top + padding-top, padding-bottom + border-bottom)`.
+///
+/// This is the part of a border box that belongs to the box itself
+/// rather than to any child, and the part that
+/// `box-decoration-break: slice` (CSS Fragmentation 3 §5.4, the initial
+/// value) assigns to the FIRST and LAST fragment respectively. Both
+/// come from Taffy rather than from any content measurement — see
+/// [`inline_root_box_metrics`] for why that distinction bites on the
+/// inline path.
+///
+/// Shared by the inline-root splitter and by
+/// [`fragment_block_subtree`]'s tail, so the two paths cannot drift on
+/// what a box's decoration is. Non-finite Taffy values are sanitized to
+/// `0.0`, matching the child-height sanitization in
+/// `fragment_block_subtree`.
+fn box_decoration(node: &blitz_dom::Node) -> (f32, f32) {
+    fn finite(v: f32) -> f32 {
+        if v.is_finite() { v.max(0.0) } else { 0.0 }
+    }
+    let layout = &node.final_layout;
+    (
+        finite(layout.border.top) + finite(layout.padding.top),
+        finite(layout.padding.bottom) + finite(layout.border.bottom),
+    )
 }
 
 /// fulgur-p55h: split a multi-line inline root across page boundaries
@@ -11176,11 +11303,9 @@ h2 { string-set: chapter-title content(text); }
     /// the container's leading decoration, and both must move whole.
     #[test]
     fn leading_forced_break_propagates_through_container_top_decoration() {
-        // `trailing_deco` = `padding-bottom + border-bottom`, which a box
-        // that moved whole still loses today — see the deficit assertion.
-        for (label, deco, trailing_deco) in [
-            ("bare", "padding:0; border:0", 0.0),
-            ("padded", "padding:20px; border:5px solid #000", 25.0),
+        for (label, deco) in [
+            ("bare", "padding:0; border:0"),
+            ("padded", "padding:20px; border:5px solid #000"),
         ] {
             let html = format!(
                 r#"
@@ -11222,17 +11347,12 @@ h2 { string-set: chapter-title content(text); }
                 "[{label}] frags={:?}",
                 entry.fragments
             );
-            // KNOWN GAP (not this fix): a container fragment's height is
-            // still the child cursor, so the box's own trailing
-            // decoration is missing. Pinned exactly rather than left
-            // loose, so that teaching the block path a
-            // `content_lead_out` fails this assertion loudly instead of
-            // passing unnoticed. When that lands, the expected deficit
-            // becomes 0 for both rows.
+            // A box that moved whole keeps its entire border box —
+            // including the trailing decoration that `cursor_y` (child
+            // content only) does not cover.
             assert!(
-                (box_h - total_h(entry) - trailing_deco).abs() < 0.51,
-                "[{label}] expected the border box {box_h}px short by exactly \
-                 its trailing decoration {trailing_deco}px; got {}px total, \
+                (total_h(entry) - box_h).abs() < 0.51,
+                "[{label}] expected the full {box_h}px border box; got {}px, \
                  frags={:?}",
                 total_h(entry),
                 entry.fragments,
@@ -11273,15 +11393,94 @@ h2 { string-set: chapter-title content(text); }
              box must move whole; frags={:?}",
             entry.fragments
         );
-        // Same KNOWN GAP as the forced-break test above: 20px
-        // padding-bottom + 5px border-bottom are still missing because a
-        // container fragment's height is the child cursor.
         assert!(
-            (box_h - total_h(entry) - 25.0).abs() < 0.51,
-            "expected the {box_h}px border box short by exactly its 25px \
-             trailing decoration; got {}px total, frags={:?}",
+            (total_h(entry) - box_h).abs() < 0.51,
+            "expected the full {box_h}px border box; got {}px, frags={:?}",
             total_h(entry),
             entry.fragments,
+        );
+    }
+
+    /// A container cut *inside its own leading decoration*: the unspent
+    /// remainder is still owed on the continuation, so the box's border
+    /// box adds up across pages and its content is inset by what is
+    /// left rather than slammed against the strip top.
+    ///
+    /// Uses a grid cell because that is where the case survives — in
+    /// block flow a container whose leading decoration does not fit now
+    /// moves whole instead (`propagate_leading_break`), while inside a
+    /// grid propagation is forbidden and the cell must cut in place.
+    /// The cell's `padding-top` is 4px and only 2px of it fit, so the
+    /// paragraph resumes 2px down.
+    #[test]
+    fn container_cut_inside_its_leading_decoration_owes_the_remainder() {
+        // Fixed-height children rather than text, so the row pitch is an
+        // exact 23px (4 + 14 + 4 + 1) and does not move with font
+        // metrics. Rows then start at 0, 23, ... 253; a 255px strip cuts
+        // 2px into row 12's 4px padding-top.
+        let cells: String = (1..=12)
+            .map(|r| {
+                format!(
+                    "<div class=c id=\"c{r}\"><div class=k id=\"k{r}\"></div></div>\
+                     <div class=c><div class=k></div></div>"
+                )
+            })
+            .collect();
+        let html = format!(
+            r#"
+            <html><body style="margin:0">
+              <style>
+                .g {{ display:grid; grid-template-columns:1fr 1fr }}
+                .c {{ padding:4px; border-bottom:1px solid #000 }}
+                .k {{ height:14px }}
+              </style>
+              <div class="g">{cells}</div>
+            </body></html>
+        "#
+        );
+        let mut doc = parse(&html, 360.0);
+        let probe = find_by_id(doc.deref_mut(), "c12").expect("c12");
+        let box_h = doc
+            .get_node(probe)
+            .expect("probe node")
+            .final_layout
+            .size
+            .height;
+        let table = run_pass(doc.deref_mut(), 255.0);
+        let entry = table.get(&probe).expect("probe geometry");
+        assert_eq!(
+            entry.fragments.len(),
+            2,
+            "the last row straddles the boundary; frags={:?}",
+            entry.fragments
+        );
+        let consumed_on_page_0 = entry.fragments[0].height.to_f32();
+        assert!(
+            consumed_on_page_0 < 4.0,
+            "the cut must land INSIDE the 4px padding-top for this test to \
+             exercise anything; got {consumed_on_page_0}px, frags={:?}",
+            entry.fragments
+        );
+        assert!(
+            (total_h(entry) - box_h).abs() < 0.51,
+            "the two fragments must partition the {box_h}px border box; got \
+             {}px, frags={:?}",
+            total_h(entry),
+            entry.fragments,
+        );
+        // …and the content inside resumes below the unspent padding
+        // rather than flush against the strip top.
+        let inner = find_by_id(doc.deref_mut(), "k12").expect("k12");
+        let inner_frag = table
+            .get(&inner)
+            .and_then(|g| g.fragments.iter().find(|f| f.page_index == 1))
+            .expect("inner child on page 1");
+        let expected_inset = 4.0 - consumed_on_page_0;
+        assert!(
+            (inner_frag.y.to_f32() - expected_inset).abs() < 0.51,
+            "content must resume {expected_inset}px down (the unspent \
+             padding-top), got y={}",
+            inner_frag.y.to_f32()
         );
     }
 
@@ -11376,6 +11575,17 @@ h2 { string-set: chapter-title content(text); }
              stop at the last child that fit; got y={} h={}, frags={:?}",
             first.y.to_f32(),
             first.height.to_f32(),
+            entry.fragments,
+        );
+        // …and the continuation carries the box's trailing decoration:
+        // two 20px children pushed here, plus 20px padding-bottom and
+        // the 5px border-bottom.
+        let last = entry.fragments.last().expect("last fragment");
+        assert!(
+            (last.height.to_f32() - 65.0).abs() < 0.51,
+            "the final fragment must close the border box — 2 x 20px content \
+             + 20px padding-bottom + 5px border-bottom; got {}px, frags={:?}",
+            last.height.to_f32(),
             entry.fragments,
         );
     }
