@@ -1095,23 +1095,14 @@ pub fn build_rounded_rect_path(
     pb.finish()
 }
 
-/// Append a rounded rectangle as a subpath to an existing `PathBuilder`.
-///
-/// Useful for composing compound paths (e.g., ring shapes for box-shadow clipping).
-/// The subpath is self-closing; the caller can continue adding subpaths after this returns.
-pub(crate) fn append_rounded_rect_subpath(
-    pb: &mut krilla::geom::PathBuilder,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    radii: &[[f32; 2]; 4],
-) {
-    // Bézier approximation constant for quarter circle
-    const KAPPA: f32 = 0.552_284_8;
+/// Bézier approximation constant for a quarter circle.
+const KAPPA: f32 = 0.552_284_8;
 
-    // CSS spec: if adjacent radii sum exceeds an edge, scale all radii proportionally.
-    // Compute the minimum scale factor across all four edges.
+/// CSS Backgrounds 3 §5.5 corner-overlap rule: when two radii sharing an
+/// edge sum to more than that edge, every radius is scaled by the same
+/// factor until none do. Returned in the `[top-left, top-right,
+/// bottom-right, bottom-left]` order the rest of this module uses.
+fn scaled_radii(w: f32, h: f32, radii: &[[f32; 2]; 4]) -> [[f32; 2]; 4] {
     let scale = |a: f32, b: f32, edge: f32| -> f32 {
         let sum = a + b;
         if sum > edge && sum > 0.0 {
@@ -1124,13 +1115,27 @@ pub(crate) fn append_rounded_rect_subpath(
         .min(scale(radii[1][1], radii[2][1], h)) // right edge (ry)
         .min(scale(radii[2][0], radii[3][0], w)) // bottom edge (rx)
         .min(scale(radii[3][1], radii[0][1], h)); // left edge (ry)
-
-    let r: [[f32; 2]; 4] = [
+    [
         [radii[0][0] * f, radii[0][1] * f],
         [radii[1][0] * f, radii[1][1] * f],
         [radii[2][0] * f, radii[2][1] * f],
         [radii[3][0] * f, radii[3][1] * f],
-    ];
+    ]
+}
+
+/// Append a rounded rectangle as a subpath to an existing `PathBuilder`.
+///
+/// Useful for composing compound paths (e.g., ring shapes for box-shadow clipping).
+/// The subpath is self-closing; the caller can continue adding subpaths after this returns.
+pub(crate) fn append_rounded_rect_subpath(
+    pb: &mut krilla::geom::PathBuilder,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radii: &[[f32; 2]; 4],
+) {
+    let r = scaled_radii(w, h, radii);
 
     // Start at top-left corner (after radius)
     pb.move_to(x + r[0][0], y);
@@ -1551,6 +1556,136 @@ fn draw_border_line(
     }
 }
 
+/// Which horizontal edges of a box's border box are *cuts* rather than
+/// real edges — i.e. the box continues past them into another fragment.
+///
+/// `box-decoration-break: slice` (CSS Fragmentation 3 §4.3, the initial
+/// value) says a box sliced by a fragmentainer break draws **no border
+/// at the cut**: the outgoing fragment has no `border-bottom`, the
+/// incoming one no `border-top`. The side borders and the background do
+/// continue to the fragmentainer edge, which is why only the horizontal
+/// pair is modelled here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OpenEdges {
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl OpenEdges {
+    /// A box that is not sliced: every edge is a real edge.
+    pub(crate) const CLOSED: Self = Self {
+        top: false,
+        bottom: false,
+    };
+
+    pub(crate) fn any(self) -> bool {
+        self.top || self.bottom
+    }
+}
+
+/// Border stroke path for a *sliced* rounded box: an **open** path that
+/// omits the edges named by `open`.
+///
+/// A cut is not a corner, so the two radii adjoining an open edge are
+/// dropped and the surviving sides simply run into it — matching how the
+/// square-cornered per-side path already behaves. The radii that remain
+/// are the ones at real edges, which keeps a split card's outer corners
+/// round instead of squaring off the whole box.
+///
+/// `radii` is `[top-left, top-right, bottom-right, bottom-left]`. The
+/// rect passed in is the stroke centreline, so the caller is responsible
+/// for insetting the closed sides by `border-width / 2` and leaving the
+/// open ends flush with the cut. Returns `None` if the path is degenerate.
+fn build_sliced_rounded_border_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radii: &[[f32; 2]; 4],
+    open: OpenEdges,
+) -> Option<krilla::geom::Path> {
+    let mut squared = *radii;
+    if open.top {
+        squared[0] = [0.0, 0.0];
+        squared[1] = [0.0, 0.0];
+    }
+    if open.bottom {
+        squared[2] = [0.0, 0.0];
+        squared[3] = [0.0, 0.0];
+    }
+    let r = scaled_radii(w, h, &squared);
+    let mut pb = krilla::geom::PathBuilder::new();
+
+    match (open.top, open.bottom) {
+        // Both ends cut: only the two sides survive, as separate
+        // subpaths — there is no corner left to join them through.
+        (true, true) => {
+            pb.move_to(x, y);
+            pb.line_to(x, y + h);
+            pb.move_to(x + w, y);
+            pb.line_to(x + w, y + h);
+        }
+        // Cut at the bottom: up the left side, over the top, back down.
+        (false, true) => {
+            pb.move_to(x, y + h);
+            pb.line_to(x, y + r[0][1]);
+            if r[0][0] > 0.0 || r[0][1] > 0.0 {
+                pb.cubic_to(
+                    x,
+                    y + r[0][1] * (1.0 - KAPPA),
+                    x + r[0][0] * (1.0 - KAPPA),
+                    y,
+                    x + r[0][0],
+                    y,
+                );
+            }
+            pb.line_to(x + w - r[1][0], y);
+            if r[1][0] > 0.0 || r[1][1] > 0.0 {
+                pb.cubic_to(
+                    x + w - r[1][0] * (1.0 - KAPPA),
+                    y,
+                    x + w,
+                    y + r[1][1] * (1.0 - KAPPA),
+                    x + w,
+                    y + r[1][1],
+                );
+            }
+            pb.line_to(x + w, y + h);
+        }
+        // Cut at the top: down the left side, along the bottom, back up.
+        (true, false) => {
+            pb.move_to(x, y);
+            pb.line_to(x, y + h - r[3][1]);
+            if r[3][0] > 0.0 || r[3][1] > 0.0 {
+                pb.cubic_to(
+                    x,
+                    y + h - r[3][1] * (1.0 - KAPPA),
+                    x + r[3][0] * (1.0 - KAPPA),
+                    y + h,
+                    x + r[3][0],
+                    y + h,
+                );
+            }
+            pb.line_to(x + w - r[2][0], y + h);
+            if r[2][0] > 0.0 || r[2][1] > 0.0 {
+                pb.cubic_to(
+                    x + w - r[2][0] * (1.0 - KAPPA),
+                    y + h,
+                    x + w,
+                    y + h - r[2][1] * (1.0 - KAPPA),
+                    x + w,
+                    y + h - r[2][1],
+                );
+            }
+            pb.line_to(x + w, y);
+        }
+        // Not sliced — `build_rounded_rect_path` owns this shape.
+        (false, false) => return None,
+    }
+
+    pb.finish()
+}
+
 pub(crate) fn draw_block_border(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -1558,6 +1693,31 @@ pub(crate) fn draw_block_border(
     y: f32,
     w: f32,
     h: f32,
+) {
+    draw_block_border_sliced(canvas, style, x, y, w, h, OpenEdges::CLOSED);
+}
+
+/// [`draw_block_border`] with `box-decoration-break: slice` awareness:
+/// any edge named by `open` is a fragmentainer cut and is not stroked.
+///
+/// With `OpenEdges::CLOSED` this is byte-for-byte the old function — the
+/// closed-box fast paths (single rounded-rect stroke, single inset-rect
+/// stroke) are preserved verbatim.
+///
+/// A sliced box takes one of two shapes. A uniform rounded border keeps
+/// its fast path and switches to [`build_sliced_rounded_border_path`], so
+/// the corners at *real* edges stay round and only the ones at the cut
+/// square off. Everything else falls to the per-side path with the open
+/// sides skipped, which — as before this change — ignores
+/// `border-radius` entirely.
+pub(crate) fn draw_block_border_sliced(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    open: OpenEdges,
 ) {
     let [bt, br, bb, bl] = style.border_widths.map(crate::units::Pt::to_f32);
     let [st, sr, sb, sl] = style.border_styles;
@@ -1576,13 +1736,23 @@ pub(crate) fn draw_block_border(
                 (ry.to_f32() - inset).max(0.0),
             ]
         });
-        if let Some(path) = build_rounded_rect_path(
-            x + inset,
-            y + inset,
-            w - inset * 2.0,
-            h - inset * 2.0,
-            &inset_radii,
-        ) {
+        // A cut end is not inset: the sides run flush into the
+        // fragmentainer edge, the same way the per-side path draws them.
+        let top = if open.top { y } else { y + inset };
+        let bottom = if open.bottom { y + h } else { y + h - inset };
+        let path = if open.any() {
+            build_sliced_rounded_border_path(
+                x + inset,
+                top,
+                w - inset * 2.0,
+                bottom - top,
+                &inset_radii,
+                open,
+            )
+        } else {
+            build_rounded_rect_path(x + inset, top, w - inset * 2.0, bottom - top, &inset_radii)
+        };
+        if let Some(path) = path {
             let base = krilla::paint::Stroke {
                 paint: krilla::color::rgb::Color::new(bc[0], bc[1], bc[2]).into(),
                 width: bt,
@@ -1596,7 +1766,8 @@ pub(crate) fn draw_block_border(
                 canvas.surface.set_stroke(None);
             }
         }
-    } else if !style.has_radius()
+    } else if !open.any()
+        && !style.has_radius()
         && uniform_width
         && uniform_style
         && matches!(st, BorderStyleValue::Solid | BorderStyleValue::Double)
@@ -1624,33 +1795,37 @@ pub(crate) fn draw_block_border(
         canvas.surface.set_fill(None);
 
         // top: normal=(0,+half) points down=inward, so outward_sign=-1
-        draw_border_line(
-            canvas,
-            x,
-            y + bt / 2.0,
-            x + w,
-            y + bt / 2.0,
-            bt,
-            st,
-            bc,
-            opacity,
-            true,
-            -1.0,
-        );
+        if !open.top {
+            draw_border_line(
+                canvas,
+                x,
+                y + bt / 2.0,
+                x + w,
+                y + bt / 2.0,
+                bt,
+                st,
+                bc,
+                opacity,
+                true,
+                -1.0,
+            );
+        }
         // bottom (top_or_left = false)
-        draw_border_line(
-            canvas,
-            x,
-            y + h - bb / 2.0,
-            x + w,
-            y + h - bb / 2.0,
-            bb,
-            sb,
-            bc,
-            opacity,
-            false,
-            1.0, // bottom: normal=(0,+half) points down=outward
-        );
+        if !open.bottom {
+            draw_border_line(
+                canvas,
+                x,
+                y + h - bb / 2.0,
+                x + w,
+                y + h - bb / 2.0,
+                bb,
+                sb,
+                bc,
+                opacity,
+                false,
+                1.0, // bottom: normal=(0,+half) points down=outward
+            );
+        }
         // left: normal=(-half,0) points left=outward, so outward_sign=+1
         draw_border_line(
             canvas,
@@ -2903,6 +3078,105 @@ mod dp_unit_tests {
         with_canvas_smoke(|canvas| {
             draw_block_border(canvas, &style, 0.0, 0.0, 80.0, 80.0);
         });
+    }
+
+    #[test]
+    fn build_sliced_rounded_border_path_shapes() {
+        let radii = [[4.0, 4.0]; 4];
+        for open in [
+            OpenEdges {
+                top: false,
+                bottom: true,
+            },
+            OpenEdges {
+                top: true,
+                bottom: false,
+            },
+            OpenEdges {
+                top: true,
+                bottom: true,
+            },
+        ] {
+            assert!(
+                build_sliced_rounded_border_path(0.0, 0.0, 80.0, 40.0, &radii, open).is_some(),
+                "every sliced shape must produce a path; open={open:?}"
+            );
+        }
+        // An unsliced box is not this function's shape — the caller must
+        // fall back to `build_rounded_rect_path`, which closes the path.
+        assert!(
+            build_sliced_rounded_border_path(0.0, 0.0, 80.0, 40.0, &radii, OpenEdges::CLOSED)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn draw_block_border_sliced_rounded_open_edges_smoke() {
+        // A uniform rounded border keeps its single-path fast path when
+        // sliced, routed through `build_sliced_rounded_border_path` so the
+        // corners at real edges survive. Exercises every combination so no
+        // `open` shape is left unpainted-by-accident.
+        let style = BlockStyle {
+            border_color: [0, 0, 0, 255],
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.as_pt()),
+            border_styles: [BorderStyleValue::Solid; 4],
+            border_radii: [[4.0, 4.0]; 4].map(|p| p.map(|v| v.as_pt())),
+            ..Default::default()
+        };
+        for open in [
+            OpenEdges {
+                top: false,
+                bottom: true,
+            },
+            OpenEdges {
+                top: true,
+                bottom: false,
+            },
+            OpenEdges {
+                top: true,
+                bottom: true,
+            },
+        ] {
+            assert!(open.any(), "the fixtures must all be sliced");
+            with_canvas_smoke(|canvas| {
+                draw_block_border_sliced(canvas, &style, 0.0, 0.0, 80.0, 80.0, open);
+            });
+        }
+    }
+
+    #[test]
+    fn open_edges_closed_is_not_sliced() {
+        assert!(!OpenEdges::CLOSED.any());
+        assert_eq!(OpenEdges::default(), OpenEdges::CLOSED);
+    }
+
+    #[test]
+    fn draw_block_border_sliced_square_open_edges_take_the_per_side_path_smoke() {
+        // No radius → the per-side fallback, with the cut sides skipped.
+        let style = BlockStyle {
+            border_color: [0, 0, 0, 255],
+            border_widths: [1.0, 1.0, 1.0, 1.0].map(|v| v.as_pt()),
+            border_styles: [BorderStyleValue::Solid; 4],
+            ..Default::default()
+        };
+        for open in [
+            OpenEdges {
+                top: false,
+                bottom: true,
+            },
+            OpenEdges {
+                top: true,
+                bottom: false,
+            },
+            OpenEdges {
+                top: true,
+                bottom: true,
+            },
+        ] {
+            with_canvas_smoke(|canvas| {
+                draw_block_border_sliced(canvas, &style, 0.0, 0.0, 80.0, 80.0, open);
+            });
+        }
     }
 
     #[test]

@@ -3366,7 +3366,11 @@ fn fragment_block_subtree(
         // placed content. Gates that mean "content is already on this
         // page" must read this, not the post-raise `cursor_y`, or a
         // container's own decoration masquerades as content.
-        let content_on_this_page = cursor_y > page_start_y;
+        //
+        // `mut` because the forced-break branch below may move us onto a
+        // fresh strip mid-iteration, after which the answer for the
+        // *current* page is trivially "no".
+        let mut content_on_this_page = cursor_y > page_start_y;
         // Update the cursor only when the child's bottom advances
         // past it. For block flow this matches cursor advancing by
         // `gap + child_h`; for grid parallel siblings the cursor
@@ -3419,6 +3423,9 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
+            // We are on a fresh strip now; the container has placed
+            // nothing on it yet.
+            content_on_this_page = false;
             // The breaking child is the first in-flow child on the
             // new page strip. Rebase the Taffy origin so it lands at
             // `page_start_y` (= 0) — discarding the inter-child gap,
@@ -3604,18 +3611,41 @@ fn fragment_block_subtree(
             }
             // Only claim a fragment on the page we are leaving when the
             // parent actually placed content there. When the break is
-            // propagated from the parent's leading edge (nothing emitted
-            // yet, `cursor_y == page_start_y`) the parent does not appear
-            // on the outgoing page at all, and a zero-height fragment
-            // would additionally flip `is_split()` on and corrupt
-            // downstream slicing.
-            let resume = resume_taffy_origin(
-                page_taffy_origin,
-                page_start_y,
-                page_height_px,
-                this_top_in_parent,
-            );
-            if cursor_y > page_start_y {
+            // propagated from the parent's leading edge the parent does
+            // not appear on the outgoing page at all, and a zero-height
+            // fragment would additionally flip `is_split()` on and
+            // corrupt downstream slicing.
+            //
+            // The gate is `content_on_this_page` — the cursor as of
+            // *before* this child — not the post-raise `cursor_y`. For
+            // the strip's leading child the raise has already moved
+            // `cursor_y` to the container's own `border-top +
+            // padding-top`, so reading it here let a container's
+            // decoration masquerade as placed content and open a
+            // childless fragment that paints an empty bordered box on
+            // the outgoing page. Block flow never showed it because
+            // `may_propagate_break` returns above first; inside a grid
+            // or flex container propagation is forbidden (§3.2 — items
+            // are not class A break points) so this is the only gate
+            // there is.
+            let resume = if content_on_this_page {
+                resume_taffy_origin(
+                    page_taffy_origin,
+                    page_start_y,
+                    page_height_px,
+                    this_top_in_parent,
+                )
+            } else {
+                // The container placed nothing on the outgoing strip, so
+                // it spent none of its leading decoration there either.
+                // Carry the origin over unchanged: the whole box —
+                // `border-top + padding-top` included — begins on the new
+                // page. Running `resume_taffy_origin` here instead would
+                // charge the outgoing page for decoration it never
+                // painted and leave the box one decoration short.
+                page_taffy_origin
+            };
+            if content_on_this_page {
                 parent_slice.close_continuing(
                     geometry,
                     row_state.as_mut(),
@@ -11401,19 +11431,27 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
-    /// A container cut *inside its own leading decoration*: the unspent
-    /// remainder is still owed on the continuation, so the box's border
-    /// box adds up across pages and its content is inset by what is
-    /// left rather than slammed against the strip top.
+    /// A grid cell whose 4px `padding-top` straddles the page boundary,
+    /// so the cut lands *inside its own leading decoration* and not one
+    /// of its children fits.
     ///
-    /// Uses a grid cell because that is where the case survives — in
-    /// block flow a container whose leading decoration does not fit now
-    /// moves whole instead (`propagate_leading_break`), while inside a
-    /// grid propagation is forbidden and the cell must cut in place.
-    /// The cell's `padding-top` is 4px and only 2px of it fit, so the
-    /// paragraph resumes 2px down.
+    /// Superseded case. This used to split: 2px of padding on the
+    /// outgoing page, the unspent 2px owed to the continuation
+    /// (`resume_taffy_origin`). Now the cell moves whole instead — a
+    /// fragment carrying nothing but 2px of padding is decoration
+    /// painted around no content, which is exactly what
+    /// `container_with_no_room_for_its_first_child_opens_no_fragment`
+    /// pins, and the
+    /// old split also stranded a 2px sliver of the cell's background and
+    /// side borders at the foot of the page.
+    ///
+    /// `resume_taffy_origin` is untouched and still governs the cases
+    /// where the container *did* place content on the outgoing strip;
+    /// this test now pins the other half of that decision — nothing
+    /// placed means nothing consumed, so the whole box (padding
+    /// included) starts on the next page.
     #[test]
-    fn container_cut_inside_its_leading_decoration_owes_the_remainder() {
+    fn container_cut_inside_its_leading_decoration_moves_whole() {
         // Fixed-height children rather than text, so the row pitch is an
         // exact 23px (4 + 14 + 4 + 1) and does not move with font
         // metrics. Rows then start at 0, 23, ... 253; a 255px strip cuts
@@ -11448,38 +11486,40 @@ h2 { string-set: chapter-title content(text); }
             .height;
         let table = run_pass(doc.deref_mut(), 255.0);
         let entry = table.get(&probe).expect("probe geometry");
+        // Row 12 starts at 253px on a 255px strip, so exactly 2px of the
+        // cell's 4px padding-top is all that would fit — the cut lands
+        // inside the leading decoration, which is what this fixture is
+        // built to produce.
         assert_eq!(
             entry.fragments.len(),
-            2,
-            "the last row straddles the boundary; frags={:?}",
+            1,
+            "a 2px slice of padding is decoration around no content; the \
+             cell moves whole instead. frags={:?}",
             entry.fragments
         );
-        let consumed_on_page_0 = entry.fragments[0].height.to_f32();
-        assert!(
-            consumed_on_page_0 < 4.0,
-            "the cut must land INSIDE the 4px padding-top for this test to \
-             exercise anything; got {consumed_on_page_0}px, frags={:?}",
+        assert_eq!(
+            entry.fragments[0].page_index, 1,
+            "frags={:?}",
             entry.fragments
         );
         assert!(
             (total_h(entry) - box_h).abs() < 0.51,
-            "the two fragments must partition the {box_h}px border box; got \
+            "the box that moved keeps its full {box_h}px border box; got \
              {}px, frags={:?}",
             total_h(entry),
             entry.fragments,
         );
-        // …and the content inside resumes below the unspent padding
-        // rather than flush against the strip top.
+        // Nothing was consumed on the outgoing page, so the cell owes its
+        // whole 4px padding-top here — not the 2px remainder it would owe
+        // after a split.
         let inner = find_by_id(doc.deref_mut(), "k12").expect("k12");
         let inner_frag = table
             .get(&inner)
             .and_then(|g| g.fragments.iter().find(|f| f.page_index == 1))
             .expect("inner child on page 1");
-        let expected_inset = 4.0 - consumed_on_page_0;
         assert!(
-            (inner_frag.y.to_f32() - expected_inset).abs() < 0.51,
-            "content must resume {expected_inset}px down (the unspent \
-             padding-top), got y={}",
+            (inner_frag.y.to_f32() - 4.0).abs() < 0.51,
+            "content sits under the full, unspent 4px padding-top; got y={}",
             inner_frag.y.to_f32()
         );
     }
@@ -11588,5 +11628,88 @@ h2 { string-set: chapter-title content(text); }
             last.height.to_f32(),
             entry.fragments,
         );
+    }
+
+    /// A container that cannot place a single child on the strip it
+    /// landed on must not open a fragment there — an empty slice paints
+    /// the box's decoration around nothing.
+    ///
+    /// The gate used to be the post-raise `cursor_y > page_start_y`,
+    /// which the container's own `border-top` alone makes true, so the
+    /// stub's height tracked the leftover strip exactly. Block flow
+    /// hid it (leading-edge propagation returns first), so this pins
+    /// all three display types against each other: whatever block does,
+    /// grid and flex must do, because css-break-3 §3.2 only says grid
+    /// and flex *items* are not break points — it says nothing about
+    /// the container painting where it has no content.
+    #[test]
+    fn container_with_no_room_for_its_first_child_opens_no_fragment() {
+        for (label, display) in [
+            ("grid", "display:grid; grid-template-columns:1fr 1fr;"),
+            ("flex", "display:flex; flex-wrap:wrap;"),
+            ("block", ""),
+        ] {
+            // 245px of spacer leaves 15px of the 260px strip; the first
+            // row needs 21px (a 20px cell under the container's 1px
+            // border-top), so nothing at all fits here.
+            let html = format!(
+                r#"
+                <html><body style="margin:0">
+                  <div style="height:245px"></div>
+                  <div id="probe" style="{display} border:1px solid #000">
+                    <div id="first" style="height:20px; width:50%"></div>
+                    <div style="height:20px; width:50%"></div>
+                    <div style="height:20px; width:50%"></div>
+                    <div style="height:20px; width:50%"></div>
+                  </div>
+                </body></html>
+            "#
+            );
+            let mut doc = parse(&html, 360.0);
+            let probe = find_by_id(doc.deref_mut(), "probe").expect("probe");
+            let box_h = doc
+                .get_node(probe)
+                .expect("probe node")
+                .final_layout
+                .size
+                .height;
+            let table = run_pass(doc.deref_mut(), 260.0);
+            let entry = table.get(&probe).expect("probe geometry");
+            assert_eq!(
+                entry.fragments.len(),
+                1,
+                "[{label}] no child fits the 15px strip, so the container must \
+                 not claim one; frags={:?}",
+                entry.fragments
+            );
+            assert_eq!(
+                entry.fragments[0].page_index, 1,
+                "[{label}] frags={:?}",
+                entry.fragments
+            );
+            // The container spent none of its leading decoration on the
+            // page it skipped, so the whole border box is owed here.
+            assert!(
+                (total_h(entry) - box_h).abs() < 0.51,
+                "[{label}] expected the full {box_h}px border box on page 1; \
+                 got {}px, frags={:?}",
+                total_h(entry),
+                entry.fragments,
+            );
+            // …and the first child sits below the 1px border-top rather
+            // than flush against the strip, which is the other half of
+            // "nothing was consumed on the outgoing page".
+            let first = find_by_id(doc.deref_mut(), "first").expect("first");
+            let first_frag = table
+                .get(&first)
+                .and_then(|g| g.fragments.first())
+                .expect("first child geometry");
+            assert!(
+                (first_frag.y.to_f32() - 1.0).abs() < 0.51,
+                "[{label}] the leading child starts under the container's \
+                 unspent 1px border-top; got y={}",
+                first_frag.y.to_f32()
+            );
+        }
     }
 }

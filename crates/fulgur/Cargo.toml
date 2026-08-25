@@ -55,5 +55,10 @@ getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] 
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Integration tests that need to read back the emitted content stream
+# (path geometry, not just text) parse it with the same PDF reader
+# `src/inspect.rs` uses. Keep the version in lockstep with the
+# `[dependencies]` entry above.
+lopdf = "0.42.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 toml = "1.1"

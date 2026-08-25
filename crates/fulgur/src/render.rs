@@ -1190,7 +1190,15 @@ pub(crate) fn dispatch_fragment(
             }
             return;
         }
-        draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
+        draw_block_v2(
+            canvas,
+            block,
+            x_pt,
+            y_pt,
+            frag,
+            is_split,
+            slice_open_edges(geom, frag),
+        );
     }
     if let Some(img) = drawables.images.get(&node_id) {
         draw_replaced_sliced(
@@ -1894,13 +1902,14 @@ fn draw_under_clip(
                 total_width,
                 total_height,
             );
-            crate::draw_primitives::draw_block_border(
+            crate::draw_primitives::draw_block_border_sliced(
                 canvas,
                 &block.style,
                 x_pt,
                 y_pt,
                 total_width,
                 total_height,
+                slice_open_edges(geom, frag),
             );
         }
 
@@ -2317,13 +2326,14 @@ fn draw_under_opacity(
                     total_width,
                     total_height,
                 );
-                crate::draw_primitives::draw_block_border(
+                crate::draw_primitives::draw_block_border_sliced(
                     canvas,
                     &block.style,
                     x_pt,
                     y_pt,
                     total_width,
                     total_height,
+                    slice_open_edges(geom, frag),
                 );
             }
             let inner_inset = block.style.content_inset();
@@ -2844,11 +2854,12 @@ fn draw_block_v2(
     y: f32,
     frag: &crate::pagination_layout::Fragment,
     is_split: bool,
+    open: crate::draw_primitives::OpenEdges,
 ) {
     use crate::draw_primitives::draw_with_opacity;
 
     draw_with_opacity(canvas, entry.opacity, |canvas| {
-        draw_block_inner_paint(canvas, entry, x, y, frag, is_split);
+        draw_block_inner_paint(canvas, entry, x, y, frag, is_split, open);
     });
 }
 
@@ -2920,6 +2931,7 @@ fn draw_block_inner_paint(
     y: f32,
     frag: &crate::pagination_layout::Fragment,
     is_split: bool,
+    open: crate::draw_primitives::OpenEdges,
 ) {
     let total_width = entry
         .layout_size
@@ -2953,13 +2965,18 @@ fn draw_block_inner_paint(
     if entry.visible {
         crate::background::draw_box_shadows(canvas, &entry.style, x, y, total_width, total_height);
         crate::background::draw_background(canvas, &entry.style, x, y, total_width, total_height);
-        crate::draw_primitives::draw_block_border(
+        // The background and the box-shadow deliberately still cover the
+        // full slice: under `box-decoration-break: slice` it is only the
+        // border that is suppressed at a cut — the background runs to the
+        // fragmentainer edge.
+        crate::draw_primitives::draw_block_border_sliced(
             canvas,
             &entry.style,
             x,
             y,
             total_width,
             total_height,
+            open,
         );
     }
 }
@@ -3292,7 +3309,15 @@ fn draw_block_with_inner_content(
     };
 
     draw_with_opacity(canvas, block.opacity, |canvas| {
-        draw_block_inner_paint(canvas, block, x, y, frag, is_split);
+        draw_block_inner_paint(
+            canvas,
+            block,
+            x,
+            y,
+            frag,
+            is_split,
+            slice_open_edges(geom, frag),
+        );
         if let Some(p) = paragraph {
             draw_paragraph_inner_paint(
                 canvas,
@@ -3389,7 +3414,15 @@ fn draw_list_item_with_block(
             draw_list_item_marker_tagged(canvas, list_item, node_id, drawables, x, y);
         }
         if let Some(b) = block {
-            draw_block_inner_paint(canvas, b, x, y, frag, is_split);
+            draw_block_inner_paint(
+                canvas,
+                b,
+                x,
+                y,
+                frag,
+                is_split,
+                slice_open_edges(geom, frag),
+            );
         }
         if let Some(p) = paragraph {
             let run_tag_node_id = run_tag_target(drawables, node_id);
@@ -3602,6 +3635,39 @@ fn fragment_is_continuation(
             .fragments
             .first()
             .is_some_and(|f| f.page_index != frag.page_index)
+}
+
+/// The mirror of [`fragment_is_continuation`] at the other end: whether
+/// the box continues past this fragment's bottom onto a later page.
+fn fragment_continues_after(
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+) -> bool {
+    geom.is_split()
+        && geom
+            .fragments
+            .last()
+            .is_some_and(|f| f.page_index != frag.page_index)
+}
+
+/// Which of `frag`'s horizontal edges are fragmentainer cuts, for
+/// `box-decoration-break: slice` border suppression (CSS Fragmentation 3
+/// §4.3). See [`crate::draw_primitives::OpenEdges`].
+///
+/// Both ends are decided by page index — the same convention
+/// [`fragment_is_continuation`] already uses for the leading-decoration
+/// offset, so the two stay in agreement. A node with several fragments
+/// on one page (a multicol container's per-column slices) therefore
+/// reads as closed at both ends: column-boundary slicing keeps today's
+/// behaviour rather than gaining half-open boxes as a side effect.
+fn slice_open_edges(
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+) -> crate::draw_primitives::OpenEdges {
+    crate::draw_primitives::OpenEdges {
+        top: fragment_is_continuation(geom, frag),
+        bottom: fragment_continues_after(geom, frag),
+    }
 }
 
 /// Phase 4 PR 3 follow-up (PR #302 Devin): mirror
@@ -5293,6 +5359,71 @@ mod tests {
         assert!(
             !fragment_is_continuation(&repeated, &repeated.fragments[1]),
             "is_repeat fragments each carry the full box"
+        );
+    }
+
+    /// css-break-3 §4.3 (`box-decoration-break: slice`, the initial
+    /// value): a fragmentainer cut is not an edge, so no border is drawn
+    /// there. The outgoing fragment loses its bottom, the incoming one
+    /// its top, and a fragment with a cut at both ends loses both.
+    ///
+    /// Before this, every fragment painted a closed rectangle — the
+    /// outgoing one stroking a bottom edge at the page's content bottom,
+    /// which reads as an empty bordered band under the last row that fit.
+    #[test]
+    fn slice_open_edges_opens_only_the_fragmentainer_cuts() {
+        use crate::draw_primitives::OpenEdges;
+
+        let three = make_geom(vec![
+            make_fragment(0, 32.0),
+            make_fragment(1, 32.0),
+            make_fragment(2, 32.0),
+        ]);
+        assert_eq!(
+            slice_open_edges(&three, &three.fragments[0]),
+            OpenEdges {
+                top: false,
+                bottom: true
+            },
+            "the first fragment keeps its real top and cuts at the bottom"
+        );
+        assert_eq!(
+            slice_open_edges(&three, &three.fragments[1]),
+            OpenEdges {
+                top: true,
+                bottom: true
+            },
+            "a middle fragment is a cut at both ends"
+        );
+        assert_eq!(
+            slice_open_edges(&three, &three.fragments[2]),
+            OpenEdges {
+                top: true,
+                bottom: false
+            },
+            "the last fragment keeps its real bottom"
+        );
+
+        // A box that fits one page is not sliced at all — this is the
+        // short-circuit that keeps unsplit output byte-identical.
+        let single = make_geom(vec![make_fragment(0, 32.0)]);
+        assert_eq!(
+            slice_open_edges(&single, &single.fragments[0]),
+            OpenEdges::CLOSED
+        );
+
+        // Per-page repetition redraws the whole box every time, so no
+        // fragment is a slice of another — same gate `is_split()` gives
+        // `fragment_is_continuation`.
+        let repeated = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![make_fragment(0, 32.0), make_fragment(1, 32.0)],
+            is_repeat: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            slice_open_edges(&repeated, &repeated.fragments[0]),
+            OpenEdges::CLOSED,
+            "is_repeat fragments are complete boxes, not slices"
         );
     }
 
