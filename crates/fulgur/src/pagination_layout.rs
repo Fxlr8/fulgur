@@ -1720,6 +1720,79 @@ fn run_pass_inner<'a>(
     table
 }
 
+/// Whether `id` carries `break-inside: avoid` (css-break-3 §4.4).
+/// Absent from the side-table means the author never declared the
+/// property, so the initial value `auto` applies.
+///
+/// css-break-3's **Applies to** line for `break-inside` is "all elements
+/// except inline-level boxes, internal ruby boxes, table column boxes,
+/// table column group boxes, absolutely-positioned boxes" — grid and
+/// flex items are not on it, and nothing conditions the property on how
+/// many tracks an item occupies.
+fn avoids_break_inside(styles: Option<&crate::column_css::ColumnStyleTable>, id: usize) -> bool {
+    styles.and_then(|t| t.get(&id)).is_some_and(|p| {
+        matches!(
+            p.break_inside,
+            Some(crate::draw_primitives::BreakInside::Avoid)
+        )
+    })
+}
+
+/// Measure the flex / grid row opened by the first walkable child in
+/// `rest`, in the container's own Taffy space.
+///
+/// `rest` is the container's layout-child list from that child onwards,
+/// and `row_top` its Taffy top. Returns
+/// `(row_height, any_member_avoids_break_inside)`.
+///
+/// Row membership uses the same rule as [`RowState`]: a following child
+/// belongs to this row while its Taffy top is above the row's running
+/// bottom (minus the shared half-pixel tolerance), which is how the
+/// walk already distinguishes a parallel sibling from the next row. The
+/// scan stops at the first child that fails it, so one pass per row
+/// costs the row's own width, not the container's whole child list.
+///
+/// The `avoid` flag is OR-ed across the row because the row is the unit
+/// that moves: honouring `break-inside: avoid` on one cell means not
+/// cutting the fragmentainer through that cell, and a grid row cannot
+/// be deferred cell-by-cell without tearing its siblings off their
+/// shared baseline (§2.1 — each item is a parallel fragmentation flow
+/// through one shared row).
+fn flex_grid_row_extent(
+    doc: &BaseDocument,
+    styles: Option<&crate::column_css::ColumnStyleTable>,
+    rest: &[usize],
+    row_top: f32,
+) -> (f32, bool) {
+    let mut row_bottom = row_top;
+    let mut avoid = false;
+    let mut started = false;
+    for &id in rest {
+        if is_walkable_skip(doc, id) {
+            continue;
+        }
+        let Some(node) = doc.get_node(id) else {
+            continue;
+        };
+        let top = node.final_layout.location.y;
+        // Same non-finite sanitization as `fragment_block_subtree`'s
+        // `child_h`: an `+inf` / `NaN` height must not poison the row's
+        // extent.
+        let h = if node.final_layout.size.height.is_finite() {
+            node.final_layout.size.height
+        } else {
+            0.0
+        };
+        if started && top >= row_bottom - 0.5 {
+            break;
+        }
+        started = true;
+        row_bottom = row_bottom.max(top + h);
+        avoid |= avoids_break_inside(styles, id);
+    }
+    ((row_bottom - row_top).max(0.0), avoid)
+}
+
 /// Whether `id` carries `box-decoration-break: clone` (CSS Fragmentation
 /// 3 §5.4). Absent from the side-table means the author never declared
 /// the property, so the initial value `slice` applies.
@@ -3263,17 +3336,7 @@ fn fragment_block_subtree(
     //
     // `cursor_in > 0.0` excludes a box already at a page top: there is
     // no earlier page to move to, and requesting one would bounce.
-    if cursor_in > 0.0
-        && propagate_leading_break
-        && column_styles
-            .and_then(|t| t.get(&parent_id))
-            .is_some_and(|p| {
-                matches!(
-                    p.break_inside,
-                    Some(crate::draw_primitives::BreakInside::Avoid)
-                )
-            })
-    {
+    if cursor_in > 0.0 && propagate_leading_break && avoids_break_inside(column_styles, parent_id) {
         let strip_here = (page_height_px - cursor_in).max(0.0);
         // The floor here is this frame's own: the branch above already
         // required `propagate_leading_break`, so the probe evaluates
@@ -3300,7 +3363,11 @@ fn fragment_block_subtree(
     // `layout_children` without that fix would lose the parent's
     // pre-recursion-page fragment in mo-006/008 (flex/grid + tall
     // monolithic + trailing inline text).
-    for child_id in layout_children_of(doc, parent_id) {
+    // Bound once rather than per row: `flex_grid_row_extent` below needs
+    // to look ahead from the current child, and re-deriving the list at
+    // every row start would make a tall grid quadratic in its children.
+    let layout_children = layout_children_of(doc, parent_id);
+    for (child_idx, child_id) in layout_children.iter().copied().enumerate() {
         if is_walkable_skip(doc, child_id) {
             continue;
         }
@@ -3357,6 +3424,11 @@ fn fragment_block_subtree(
         // `page_taffy_origin` against it on page advance).
         let this_top_in_parent = layout.location.y;
 
+        // Whether this child opens a new flex / grid row, i.e. whether
+        // the row-level `break-inside: avoid` check below has a row to
+        // consider. Always false outside a flex / grid container.
+        let mut row_starts_here = false;
+
         // fulgur-ysms: row-level co-split for flex/grid containers.
         // Must run BEFORE origin_pending_target_y is consumed so that
         // restoring page_taffy_origin is consistent.
@@ -3411,6 +3483,7 @@ fn fragment_block_subtree(
             }
             if row_state.is_none() {
                 // First cell in a new row: snapshot current state.
+                row_starts_here = true;
                 row_state = Some(RowState {
                     start_page: page_index,
                     start_cursor_y: cursor_y,
@@ -3450,6 +3523,108 @@ fn fragment_block_subtree(
                 page_taffy_origin = anchor - (target_y - page_start_y);
             } else {
                 page_taffy_origin = this_top_in_parent - (target_y - page_start_y);
+            }
+        }
+
+        // css-break-3 §4.4 rule 2 at flex / grid ROW granularity.
+        //
+        // The block path consults `break-inside: avoid` on a box when it
+        // recurses into that box (the `cursor_in > 0.0 &&
+        // propagate_leading_break` check near the top of this function).
+        // Neither half of that reaches a grid item: an item is usually a
+        // leaf the walk never recurses into, and `propagate_leading_break`
+        // is cleared for everything under a flex / grid container. So the
+        // property was silently inert on every grid and flex item —
+        // spanning or not — and the row was cut by the fragmentainer and
+        // reopened on the next page, which is precisely what `avoid` asks
+        // the engine not to do.
+        //
+        // The container gating is right about what it actually says: a
+        // grid item is not a class A break point (§3.2), so a break
+        // cannot be taken *between* two items. But `break-inside` is a
+        // different constraint. It forbids cutting *through* a box and
+        // needs no break point in front of that box; satisfying it means
+        // moving the break earlier, which for a grid means deferring the
+        // whole row. The row is already the unit the walk co-splits
+        // (fulgur-ysms), so it is the unit that moves here too.
+        //
+        // §4.4's relaxation clause still applies, exactly as it does for
+        // blocks (`avoid_is_fulfillable` on the inline path): a row too
+        // tall for any fragmentainer cannot be kept whole, and honouring
+        // `avoid` there would only push its tail off the page, so we fall
+        // through and split as before.
+        if row_starts_here && row_state.is_some() {
+            let row_page_y = page_start_y + (this_top_in_parent - page_taffy_origin);
+            let (row_h, row_avoids) = flex_grid_row_extent(
+                doc,
+                column_styles,
+                &layout_children[child_idx..],
+                this_top_in_parent,
+            );
+            let straddles_here = row_page_y + row_h > page_height_px;
+            let fits_a_fresh_page = row_h <= page_height_px;
+            if row_avoids && straddles_here && fits_a_fresh_page {
+                // The row is this container's leading content and the
+                // container itself began mid-page: the nearest legal
+                // break is the class A point *before the container*
+                // (§3.1.1 — a break before a box's first child is a
+                // break before the box). Hand it up; the caller
+                // re-places the whole container on the next page.
+                //
+                // Safe with respect to `RequestBreakBefore`'s invariant:
+                // `!emitted_anything` means `geometry` is untouched.
+                // Terminating: the caller re-enters at `cursor_in ==
+                // 0.0`, which this predicate excludes.
+                if !emitted_anything && cursor_in > 0.0 {
+                    return SubtreeResult::RequestBreakBefore;
+                }
+                // Otherwise the container has content of its own on this
+                // page (an earlier row, a preceding sibling), so the
+                // break lands between that content and this row and the
+                // container continues here.
+                //
+                // `content_on_this_page` is read from the cursor as of
+                // *before* this child — it has not been raised to the
+                // child's own top yet at this point in the loop, which
+                // is exactly why the check sits here.
+                let content_on_this_page = cursor_y > page_start_y;
+                let resume = if content_on_this_page {
+                    resume_taffy_origin(
+                        page_taffy_origin,
+                        page_start_y,
+                        page_height_px,
+                        this_top_in_parent,
+                    ) - clone_lead_in
+                } else {
+                    page_taffy_origin
+                };
+                if content_on_this_page {
+                    parent_slice.close_continuing(
+                        geometry,
+                        row_state.as_mut(),
+                        page_index,
+                        page_start_y,
+                    );
+                }
+                page_index += 1;
+                cursor_y = 0.0;
+                page_start_y = 0.0;
+                page_taffy_origin = resume;
+                // Re-snapshot the row: the state captured above still
+                // describes the page we just left, and the co-split
+                // restore would put every later cell of this row back
+                // onto it. Height comes from the row scan rather than
+                // this one cell, so a short leading cell cannot end the
+                // row early.
+                if let Some(ref mut rs) = row_state {
+                    rs.start_page = page_index;
+                    rs.start_cursor_y = cursor_y;
+                    rs.start_page_start_y = page_start_y;
+                    rs.start_page_taffy_origin = page_taffy_origin;
+                    rs.max_end_page = page_index;
+                    rs.max_end_cursor_y = cursor_y;
+                    rs.row_bottom = rs.row_bottom.max(this_top_in_parent + row_h);
+                }
             }
         }
 
@@ -9431,6 +9606,38 @@ h2 { string-set: chapter-title content(text); }
         }
     }
 
+    /// The grid fixture behind
+    /// `repro/break-inside-avoid-ignored-on-spanning-grid-item.html`,
+    /// parameterised on the item declaration so the `avoid` case and its
+    /// `auto` control share one shape. `span` optionally makes the
+    /// leading row's items span tracks — the configuration the bug
+    /// report singled out, though the property was inert either way.
+    fn avoid_grid_fixture(item_css: &str, span: bool) -> String {
+        // Both shapes put `a`/`b` in row 0 and `c`/`d` in row 1; the
+        // spanning one just gets there over four half-width tracks, so
+        // the only variable between the two runs is whether the leading
+        // items occupy one track or two.
+        let (columns, span_css) = if span {
+            ("repeat(4, 50px)", "grid-column: span 2;")
+        } else {
+            ("100px 100px", "")
+        };
+        format!(
+            r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 248px"></div>
+              <div id="grid" style="display: grid;
+                   grid-template-columns: {columns}; width: 200px">
+                <div id="a" style="{span_css} height: 22px; {item_css}"></div>
+                <div id="b" style="{span_css} height: 22px; {item_css}"></div>
+                <div id="c" style="height: 22px"></div>
+                <div id="d" style="height: 22px"></div>
+              </div>
+            </body></html>
+            "#
+        )
+    }
+
     /// Collect `(page_index, y, height)` for one node, for assertions
     /// that care about the whole fragment list.
     fn frags_of(geom: &PaginationGeometryTable, id: usize) -> Vec<(u32, f32, f32)> {
@@ -9442,6 +9649,151 @@ h2 { string-set: chapter-title content(text); }
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// css-break-3 §4.4 rule 2 on a grid item: the leading row does not
+    /// fit the strip left on this page but does fit a fresh one, so
+    /// `avoid` is fulfillable and the whole row must move rather than be
+    /// cut by the fragmentainer and reopened.
+    ///
+    /// The row is this grid's leading content and the grid began
+    /// mid-page, so the nearest legal break is the class A point before
+    /// the grid itself (§3.1.1) — the grid moves whole and claims no
+    /// fragment on the outgoing page.
+    ///
+    /// Pre-fix this asserted nothing: `break-inside` reached neither the
+    /// item (a leaf the walk never recurses into) nor the block check
+    /// (gated on `propagate_leading_break`, cleared under every flex /
+    /// grid container), so both columns below produced the split shape.
+    #[test]
+    fn grid_row_with_break_inside_avoid_moves_whole_to_the_next_page() {
+        for span in [false, true] {
+            let html = avoid_grid_fixture("break-inside: avoid", span);
+            let mut doc = parse(&html, 600.0);
+            let grid = find_by_id(doc.deref_mut(), "grid").expect("grid");
+            let a = find_by_id(doc.deref_mut(), "a").expect("a");
+            let b = find_by_id(doc.deref_mut(), "b").expect("b");
+            let c = find_by_id(doc.deref_mut(), "c").expect("c");
+            let table = blitz_adapter::extract_column_style_table(&doc);
+            let geom =
+                super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &table);
+
+            assert_eq!(
+                frags_of(&geom, a),
+                vec![(1, 0.0, 22.0)],
+                "span={span}: the leading item must move whole to page 1"
+            );
+            assert_eq!(
+                frags_of(&geom, b),
+                vec![(1, 0.0, 22.0)],
+                "span={span}: and so must its parallel sibling, at the same y"
+            );
+            assert_eq!(
+                frags_of(&geom, c),
+                vec![(1, 22.0, 22.0)],
+                "span={span}: the second row follows it, not the page top"
+            );
+            assert!(
+                frags_of(&geom, grid).iter().all(|(p, _, _)| *p != 0),
+                "span={span}: the grid moved whole, so it must claim no \
+                 fragment on the page it left; got {:?}",
+                frags_of(&geom, grid)
+            );
+        }
+    }
+
+    /// The control for the test above: with the declaration removed the
+    /// row is cut at the fragmentainer edge exactly as before, so the
+    /// fix is confined to documents that ask for it.
+    #[test]
+    fn grid_row_without_break_inside_avoid_still_splits_at_the_page_edge() {
+        for span in [false, true] {
+            let html = avoid_grid_fixture("", span);
+            let mut doc = parse(&html, 600.0);
+            let a = find_by_id(doc.deref_mut(), "a").expect("a");
+            let table = blitz_adapter::extract_column_style_table(&doc);
+            let geom =
+                super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &table);
+
+            assert_eq!(
+                frags_of(&geom, a),
+                vec![(0, 248.0, 12.0), (1, 0.0, 10.0)],
+                "span={span}: the initial value `auto` still slices the row \
+                 at the page edge"
+            );
+        }
+    }
+
+    /// css-break-3 §4.4's relaxation clause, at row granularity: a row
+    /// too tall for any fragmentainer cannot be kept whole, so `avoid`
+    /// is dropped and the row splits as it would without it. Mirrors
+    /// `avoid_is_fulfillable` on the inline-root path.
+    #[test]
+    fn grid_row_avoid_is_relaxed_when_the_row_cannot_fit_a_fragmentainer() {
+        // 400px cells on a 260px page: no fresh page holds the row.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 100px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px; width: 200px">
+                <div id="a" style="height: 400px; break-inside: avoid"></div>
+                <div id="b" style="height: 400px; break-inside: avoid"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let a = find_by_id(doc.deref_mut(), "a").expect("a");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &table);
+
+        assert_eq!(
+            frags_of(&geom, a),
+            vec![(0, 100.0, 160.0), (1, 0.0, 240.0)],
+            "an unfulfillable `avoid` must be ignored, not honoured into \
+             a page it cannot fit either"
+        );
+    }
+
+    /// A grid row that is not the container's leading content takes the
+    /// break between rows: the grid continues on the page it leaves and
+    /// the row moves whole. This is what the strip-overflow path already
+    /// did for `auto`, and the row-level `avoid` check must agree with
+    /// it rather than diverge.
+    #[test]
+    fn grid_avoid_on_a_later_row_breaks_between_rows() {
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 180px"></div>
+              <div id="grid" style="display: grid; grid-template-columns: 100px 100px; width: 200px">
+                <div id="a" style="height: 48px; break-inside: avoid"></div>
+                <div id="b" style="height: 48px; break-inside: avoid"></div>
+                <div id="c" style="height: 48px; break-inside: avoid"></div>
+                <div id="d" style="height: 48px; break-inside: avoid"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let grid = find_by_id(doc.deref_mut(), "grid").expect("grid");
+        let a = find_by_id(doc.deref_mut(), "a").expect("a");
+        let c = find_by_id(doc.deref_mut(), "c").expect("c");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &table);
+
+        assert_eq!(
+            frags_of(&geom, a),
+            vec![(0, 180.0, 48.0)],
+            "the first row fits and stays"
+        );
+        assert_eq!(
+            frags_of(&geom, c),
+            vec![(1, 0.0, 48.0)],
+            "the second row would straddle, so it moves whole"
+        );
+        assert_eq!(
+            frags_of(&geom, grid),
+            vec![(0, 180.0, 80.0), (1, 0.0, 48.0)],
+            "the grid keeps the strip it filled on page 0 and continues \
+             on page 1"
+        );
     }
 
     /// The whole-walk form of defect 2
@@ -9494,6 +9846,63 @@ h2 { string-set: chapter-title content(text); }
             "and the grid must not claim the strip its only content \
              declined; got {:?}",
             frags_of(&geom, grid)
+        );
+    }
+
+    /// [`flex_grid_row_extent`] groups by the same "top above the row's
+    /// running bottom" rule the co-split machinery uses, and OR-s
+    /// `break-inside: avoid` across the row because the row is the unit
+    /// that moves.
+    #[test]
+    fn flex_grid_row_extent_groups_one_row_and_ors_avoid() {
+        // Row 0: a 30px cell beside a 50px cell (the taller one sets the
+        // row's extent) with `avoid` on only the second. Row 1 follows
+        // at y=50 and must not be swept in.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div id="grid" style="display: grid; grid-template-columns: 100px 100px;
+                   align-items: start; width: 200px">
+                <div id="a" style="height: 30px"></div>
+                <div id="b" style="height: 50px; break-inside: avoid"></div>
+                <div id="c" style="height: 20px"></div>
+                <div id="d" style="height: 20px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let grid = find_by_id(doc.deref_mut(), "grid").expect("grid");
+        let a = find_by_id(doc.deref_mut(), "a").expect("a");
+        let c = find_by_id(doc.deref_mut(), "c").expect("c");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let children = super::layout_children_of(doc.deref_mut(), grid);
+        let from = |id: usize| -> &[usize] {
+            let at = children
+                .iter()
+                .position(|&c| c == id)
+                .expect("child of the grid");
+            &children[at..]
+        };
+
+        let (row0_h, row0_avoid) =
+            super::flex_grid_row_extent(doc.deref_mut(), Some(&table), from(a), 0.0);
+        assert!(
+            (row0_h - 50.0).abs() < 0.01,
+            "the row's extent is its tallest member, got {row0_h}"
+        );
+        assert!(
+            row0_avoid,
+            "`avoid` on any member makes the whole row avoid"
+        );
+
+        let (row1_h, row1_avoid) =
+            super::flex_grid_row_extent(doc.deref_mut(), Some(&table), from(c), 50.0);
+        assert!(
+            (row1_h - 20.0).abs() < 0.01,
+            "the scan must stop at the next row, got {row1_h}"
+        );
+        assert!(
+            !row1_avoid,
+            "and must not carry the previous row's `avoid` into it"
         );
     }
 
