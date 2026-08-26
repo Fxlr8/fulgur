@@ -533,6 +533,10 @@ fn fragment_zero_height_child(
 ///    and marks the row co-split (`crossed_by_recursion`), so
 ///    parallel flex / grid siblings restore. Body has no parent to
 ///    close. Gate: `frame.kind` / `frame.parent_slice` presence.
+///    `content_on_this_page` — the caller's cursor as of *before* this
+///    child, never the post-raise one — is what stops the outgoing
+///    page's parent fragment from being claimed for a paragraph that
+///    declined that page entirely.
 /// 4. **`row_state` max-end tracking.** Nested updates the row's
 ///    `max_end_page` / `max_end_cursor_y` after `break-after`;
 ///    body carries `row_state: None`, making the update a no-op.
@@ -556,6 +560,7 @@ fn fragment_inline_child(
     this_top_in_parent: f32,
     suppress_page_check: bool,
 ) -> Option<usize> {
+    let content_on_this_page = frame.content_on_this_page;
     let layout = child.final_layout;
     let child_w = if layout.size.width > 0.0 {
         layout.size.width
@@ -613,11 +618,21 @@ fn fragment_inline_child(
             this_top_in_parent,
         );
         if let Some(slice) = frame.parent_slice {
-            // Nested only: close the parent on the outgoing page
-            // (the `cursor > start` guard skips the fresh-strip
-            // close). Body has no parent to close. The inline root
-            // moves to the next page, so the parent continues here.
-            if frame.cursor_y > frame.page_start_y {
+            // Nested only: close the parent on the outgoing page (the
+            // `content_on_this_page` guard skips the fresh-strip close).
+            // Body has no parent to close. The inline root moves to the
+            // next page, so the parent continues here.
+            //
+            // The guard is the caller's cursor as of *before* this
+            // child, never `frame.cursor_y`, which has already been
+            // raised to the child's own top. For the strip's leading
+            // child that top IS the container's `border-top +
+            // padding-top`, so reading the raised cursor let a
+            // container's own decoration masquerade as placed content
+            // and claim a strip for a paragraph that then moved to the
+            // next page — an empty bordered box on the outgoing page,
+            // the same defect cfd21aa4 fixed on the block path.
+            if content_on_this_page {
                 slice.close_continuing(
                     geometry,
                     frame.row_state.as_mut(),
@@ -656,8 +671,8 @@ fn fragment_inline_child(
         page: frame.page,
     };
     let pre_page = frame.page;
-    let (new_page, new_cursor, frag_count) =
-        fragment_inline_root(geometry, cx.page_h, placement, &input);
+    let split = fragment_inline_root(geometry, cx.page_h, placement, &input);
+    let (new_page, new_cursor, frag_count) = (split.end_page, split.end_cursor_y, split.fragments);
     match frame.kind {
         ContainerKind::RootBody => {
             frame.page = new_page;
@@ -668,6 +683,19 @@ fn fragment_inline_child(
                 // Difference 3: the paragraph filled every page it
                 // crossed, so the parent spans those pages too
                 // (fulgur-oc51 via `emit_parent_page_spans`).
+                //
+                // `emit_pre_page` is where "filled" has to be checked
+                // rather than assumed. The paragraph may have declined
+                // the outgoing page entirely — not one line box fitted
+                // the strip, so its first fragment is on `pre_page + 1`
+                // (see [`InlineSplitOutcome::first_page`]). Claiming a
+                // parent fragment there anyway paints the container's
+                // background, side borders and shadow around content
+                // that never arrived, which is the defect cfd21aa4 fixed
+                // for the block path. The container still gets its
+                // fragment when it had *other* content on that page —
+                // an earlier grid row, a preceding sibling — which is
+                // what `content_on_this_page` carries in.
                 if let Some(slice) = frame.parent_slice {
                     emit_parent_page_spans(
                         geometry,
@@ -676,7 +704,7 @@ fn fragment_inline_child(
                         pre_page,
                         new_page,
                         frame.page_start_y,
-                        true,
+                        content_on_this_page || split.first_page == pre_page,
                     );
                 }
                 frame.page = new_page;
@@ -1412,6 +1440,19 @@ struct ContainerFrame {
     origin_pending_same_row: Option<(f32, f32, f32)>,
     prev_used_page: Option<Option<String>>,
     emitted_anything: bool,
+    /// Has this container placed content on the CURRENT page strip yet,
+    /// as of *before* the child a helper is about to handle?
+    ///
+    /// Set by the caller immediately before flushing the frame into a
+    /// child-branch helper, and meaningful only for the duration of that
+    /// call. It cannot be re-derived inside the helper: by then
+    /// `cursor_y` has been raised to the child's own top, which for the
+    /// strip's leading child IS the container's `border-top +
+    /// padding-top` — so `cursor_y > page_start_y` there reads a
+    /// container's own decoration as placed content and opens a fragment
+    /// that paints an empty bordered box on a page the content left
+    /// (the defect cfd21aa4 fixed on the block path).
+    content_on_this_page: bool,
     allow_leading_break: bool,
     depth: usize,
     row_state: Option<RowState>,
@@ -1446,6 +1487,7 @@ impl ContainerFrame {
             origin_pending_same_row: None,
             prev_used_page: None,
             emitted_anything: false,
+            content_on_this_page: false,
             allow_leading_break,
             depth,
             row_state: None,
@@ -1916,6 +1958,7 @@ impl<'a> PaginationLayoutTree<'a> {
             origin_pending_same_row: None,
             prev_used_page: None,
             emitted_anything: false,
+            content_on_this_page: false,
             allow_leading_break: true,
             depth: 0,
             row_state: None,
@@ -2130,6 +2173,11 @@ impl<'a> PaginationLayoutTree<'a> {
             // Body frames pass `false` for `suppress_page_check`; the
             // push-whole floor is the fixed 0.0 (leading-edge
             // propagation is always permitted at body level).
+            // `content_on_this_page` is consumed only by the nested
+            // arm's parent-fragment emission; body has no parent slice
+            // to claim. Set honestly all the same — body's implicit
+            // `page_start_y` is 0.
+            frame.content_on_this_page = frame.cursor_y > 0.0;
             if let Some(frag_count) = fragment_inline_child(
                 &cx,
                 &mut frame,
@@ -3578,6 +3626,7 @@ fn fragment_block_subtree(
         frame.origin_pending_same_row = origin_pending_same_row;
         frame.prev_used_page = prev_used_page.clone();
         frame.row_state = row_state.take();
+        frame.content_on_this_page = content_on_this_page;
         let inline_split = fragment_inline_child(
             cx,
             frame,
@@ -4204,9 +4253,14 @@ fn fragment_inline_root(
     page_height_px: f32,
     placement: InlinePlacement,
     input: &InlineSplitInput<'_>,
-) -> (u32, f32, usize) {
+) -> InlineSplitOutcome {
     if input.line_metrics.is_empty() {
-        return (placement.page, placement.cursor_y, 0);
+        return InlineSplitOutcome {
+            end_page: placement.page,
+            end_cursor_y: placement.cursor_y,
+            fragments: 0,
+            first_page: placement.page,
+        };
     }
 
     // Pass 1: honour the orphans / widows minimums.
@@ -4241,6 +4295,7 @@ fn fragment_inline_root(
     };
 
     let emitted = plan.len();
+    let first = *plan.first().expect("scan always emits a final fragment");
     let last = *plan.last().expect("scan always emits a final fragment");
     let entry = geometry.entry(placement.id).or_default();
     for f in &plan {
@@ -4255,7 +4310,35 @@ fn fragment_inline_root(
     entry.content_lead_in = input.lead_in.as_px();
     entry.content_lead_out = input.lead_out.as_px();
 
-    (last.page_index, last.y + last.height, emitted)
+    InlineSplitOutcome {
+        end_page: last.page_index,
+        end_cursor_y: last.y + last.height,
+        fragments: emitted,
+        first_page: first.page_index,
+    }
+}
+
+/// What [`fragment_inline_root`] did, for the caller's bookkeeping.
+///
+/// `first_page` is separate from `placement.page` because the scan may
+/// decline to place anything on the page it was handed: when not one
+/// line box fits the strip the paragraph opens on, the break lands
+/// *before* its first line and the whole box begins on the next
+/// fragmentainer (see [`scan_split_points`]). The caller needs that
+/// distinction to decide whether the containing box has a fragment on
+/// the outgoing page at all — emitting one for a paragraph that never
+/// arrived paints a container's background and borders around nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct InlineSplitOutcome {
+    /// Page the paragraph's **last** fragment landed on.
+    end_page: u32,
+    /// Bottom of that last fragment, in its page's local space.
+    end_cursor_y: f32,
+    /// How many fragments were emitted.
+    fragments: usize,
+    /// Page the paragraph's **first** fragment landed on. Equals
+    /// `placement.page` unless the opening strip could not hold a line.
+    first_page: u32,
 }
 
 /// One planned fragment of an inline root, in paragraph-local space.
@@ -4337,7 +4420,42 @@ fn scan_split_points(
             + (line_bottom_local - frag_top_local)
             + frag_lead_out;
 
-        if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
+        if projected_bottom_in_body > page_height_px
+            && i == fragment_start_idx
+            && paragraph_top_in_body > 0.0
+        {
+            // Not one line fits the strip this fragment opens on, so
+            // there is no legal split point *inside* the paragraph that
+            // can save it: `i > fragment_start_idx` below is false, the
+            // relaxed re-scan hits the same wall, and the fragment is
+            // emitted overhanging the fragmentainer — into the bottom
+            // margin and off the paper.
+            //
+            // The break that fixes it is the one *before* the
+            // paragraph's first line box (css-break-3 §4.1 class C),
+            // which needs no fragment on the outgoing page at all: the
+            // whole box, its `border-top + padding-top` included, simply
+            // begins on the next fragmentainer. Advance without pushing
+            // a plan entry, and the loop re-fits this same line against
+            // the fresh strip.
+            //
+            // `paragraph_top_in_body > 0.0` is what keeps this from
+            // looping at a page top, where there is nowhere left to move
+            // to and an oversized line must overflow (the monolithic
+            // case, §4.1). It also confines the branch to a paragraph's
+            // *opening* position — every later fragment starts at
+            // `paragraph_top_in_body == 0.0` by construction.
+            //
+            // In block flow this is unreachable: `fragment_inline_child`
+            // / `fragment_pagination_root` evaluate `break_decision`
+            // against floor `0.0` and have already pushed such a
+            // paragraph whole. It fires only under a suppressed floor —
+            // flex / grid items, atomic-inline and orthogonal children
+            // (see `suppress_page_check`) — where the box-level push is
+            // forbidden but a line-box break is still available.
+            page_index += 1;
+            paragraph_top_in_body = 0.0;
+        } else if projected_bottom_in_body > page_height_px && i > fragment_start_idx {
             let first_size = i - fragment_start_idx;
             let remaining_size = total_lines - i;
 
@@ -8455,6 +8573,117 @@ h2 { string-set: chapter-title content(text); }
         );
     }
 
+    /// A paragraph opening on a strip too short for even its first line
+    /// box must decline that page outright, not emit a fragment that
+    /// hangs past the fragmentainer.
+    ///
+    /// `i > fragment_start_idx` guards the in-paragraph split, so the
+    /// leading line can never be moved by it; the relaxed re-scan hits
+    /// the same wall. The break that saves the content is the one
+    /// *before* the first line box, which needs no fragment on the
+    /// outgoing page at all.
+    #[test]
+    fn scan_starts_on_the_next_page_when_the_opening_strip_holds_no_line() {
+        // Three 14px lines, 4px of leading decoration, opening 8px above
+        // a 260px page bottom: 252 + 4 + 14 = 270, so not even line 0
+        // fits. This is `repro/grid-row-paints-outside-fragmentainer.html`
+        // reduced to the scan's own inputs.
+        let lines: Vec<(f32, f32)> = (0..3)
+            .map(|i| (i as f32 * 14.0, (i + 1) as f32 * 14.0))
+            .collect();
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 4.0,
+            lead_out: 4.0,
+            orphans: 1,
+            widows: 1,
+            clone_decoration: false,
+        };
+        let plan = super::scan_split_points(&input, 252.0, 0, 260.0);
+        assert_eq!(
+            plan.len(),
+            1,
+            "the whole paragraph fits one fresh strip, so it should not \
+             split at all; plan={plan:?}"
+        );
+        let first = plan[0];
+        assert_eq!(
+            first.page_index, 1,
+            "the paragraph must open on the next page; plan={plan:?}"
+        );
+        assert!(
+            first.y.abs() < 0.01,
+            "and at that page's top; plan={plan:?}"
+        );
+        assert!(
+            (first.height - 50.0).abs() < 0.01,
+            "carrying its whole border box (4 + 3*14 + 4); plan={plan:?}"
+        );
+        for f in &plan {
+            assert!(
+                f.y + f.height <= 260.0 + 0.01,
+                "no fragment may hang past the fragmentainer; plan={plan:?}"
+            );
+        }
+    }
+
+    /// The counterpart guard: at a page top there is nowhere left to
+    /// move to, so an oversized line must be placed and overflow (the
+    /// monolithic case, css-break-3 §4.1) rather than advancing pages
+    /// forever.
+    #[test]
+    fn scan_places_an_oversized_line_at_a_page_top_instead_of_looping() {
+        let lines = [(0.0_f32, 400.0_f32)];
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 1,
+            widows: 1,
+            clone_decoration: false,
+        };
+        let plan = super::scan_split_points(&input, 0.0, 0, 260.0);
+        assert_eq!(plan.len(), 1, "one line, one fragment; plan={plan:?}");
+        assert_eq!(
+            plan[0].page_index, 0,
+            "a page top has no earlier page to defer to; plan={plan:?}"
+        );
+    }
+
+    /// The skip fires once per paragraph, not once per line: after it
+    /// the paragraph sits at a page top, where the guard is off.
+    #[test]
+    fn scan_defers_the_opening_strip_at_most_once() {
+        // Ten 100px lines opening 10px above a 250px page bottom. The
+        // opening strip holds none of them, so the paragraph moves to
+        // page 1 and then splits normally, two lines per page.
+        let lines: Vec<(f32, f32)> = (0..10)
+            .map(|i| (i as f32 * 100.0, (i + 1) as f32 * 100.0))
+            .collect();
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 0.0,
+            lead_out: 0.0,
+            orphans: 1,
+            widows: 1,
+            clone_decoration: false,
+        };
+        let plan = super::scan_split_points(&input, 240.0, 0, 250.0);
+        let pages: Vec<u32> = plan.iter().map(|f| f.page_index).collect();
+        assert_eq!(
+            pages,
+            vec![1, 2, 3, 4, 5],
+            "one deferral, then a contiguous run of 2-line fragments; \
+             plan={plan:?}"
+        );
+        for f in &plan {
+            assert!(
+                f.y + f.height <= 250.0 + 0.01,
+                "no fragment may hang past the fragmentainer; plan={plan:?}"
+            );
+        }
+    }
+
     /// fulgur-pgbrk R6: the widow minimum is the one constraint that can
     /// only be satisfied by splitting EARLIER than the natural overflow
     /// point, so `scan_split_points` has to back up rather than skip.
@@ -8547,8 +8776,8 @@ h2 { string-set: chapter-title content(text); }
             cursor_y: 0.0,
             page: 0,
         };
-        let (new_page, new_cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        let out = super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        let (new_page, new_cursor, emitted) = (out.end_page, out.end_cursor_y, out.fragments);
         assert_eq!(emitted, 2, "relaxation splits 2/1 rather than overflowing");
         assert_eq!(new_page, 1);
         assert!(
@@ -8594,8 +8823,8 @@ h2 { string-set: chapter-title content(text); }
             cursor_y: 0.0,
             page: 0,
         };
-        let (new_page, new_cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        let out = super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        let (new_page, new_cursor, emitted) = (out.end_page, out.end_cursor_y, out.fragments);
         assert_eq!(emitted, 2, "valid split → 2 fragments");
         assert_eq!(new_page, 1);
         let frags = &geom.get(&1).unwrap().fragments;
@@ -8642,8 +8871,8 @@ h2 { string-set: chapter-title content(text); }
             cursor_y: 0.0,
             page: 0,
         };
-        let (new_page, _new_cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 100.0, placement, &input);
+        let out = super::fragment_inline_root(&mut geom, 100.0, placement, &input);
+        let (new_page, emitted) = (out.end_page, out.fragments);
         assert_eq!(emitted, 3, "relaxation slices one line per page");
         assert_eq!(new_page, 2);
         let frags = &geom.get(&1).unwrap().fragments;
@@ -8680,8 +8909,8 @@ h2 { string-set: chapter-title content(text); }
             cursor_y: 0.0,
             page: 0,
         };
-        let (_page, cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 500.0, placement, &input);
+        let out = super::fragment_inline_root(&mut geom, 500.0, placement, &input);
+        let (cursor, emitted) = (out.end_cursor_y, out.fragments);
         assert_eq!(emitted, 1);
         let frags = &geom.get(&1).unwrap().fragments;
         assert!(
@@ -8721,8 +8950,8 @@ h2 { string-set: chapter-title content(text); }
             cursor_y: 0.0,
             page: 0,
         };
-        let (page, cursor, emitted) =
-            super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        let out = super::fragment_inline_root(&mut geom, 200.0, placement, &input);
+        let (page, cursor, emitted) = (out.end_page, out.end_cursor_y, out.fragments);
         assert_eq!(emitted, 2);
         assert_eq!(page, 1);
         let entry = geom.get(&1).unwrap();
@@ -9200,6 +9429,72 @@ h2 { string-set: chapter-title content(text); }
             };
             assert_cell_slices(&geom, *id, name, 100.0, 40.0, slices);
         }
+    }
+
+    /// Collect `(page_index, y, height)` for one node, for assertions
+    /// that care about the whole fragment list.
+    fn frags_of(geom: &PaginationGeometryTable, id: usize) -> Vec<(u32, f32, f32)> {
+        geom.get(&id)
+            .map(|g| {
+                g.fragments
+                    .iter()
+                    .map(|f| (f.page_index, f.y.to_f32(), f.height.to_f32()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The whole-walk form of defect 2
+    /// (`repro/grid-row-paints-outside-fragmentainer.html`): a grid cell
+    /// whose content is a multi-line inline root, opening on a strip too
+    /// short for even one line box.
+    ///
+    /// No `break-inside` anywhere — this is the initial `auto`, so the
+    /// engine is free to split the row; what it may not do is paint
+    /// below the fragmentainer. Pre-fix the cell emitted a first
+    /// fragment 10px past the page bottom, which `report_fragment_overflow`
+    /// turns into a panic in test builds, so this test fails loudly
+    /// rather than on a coordinate.
+    ///
+    /// The second assertion is the half that would otherwise be traded
+    /// for the first: the grid may not claim a fragment on a page where
+    /// its only content declined to appear, or its background and
+    /// borders paint around nothing (the defect cfd21aa4 fixed on the
+    /// block path).
+    #[test]
+    fn grid_inline_cell_that_cannot_fit_a_line_leaves_the_page_untouched() {
+        // 252px spacer on a 260px page leaves an 8px strip; each cell
+        // wants 4px of leading decoration plus a ~14px line.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0; font: 10px/1.4 sans-serif">
+              <div style="height: 252px"></div>
+              <div id="grid" style="display: grid; grid-template-columns: 100px 100px;
+                   width: 200px; background: #cfc">
+                <div id="a" style="border: 1px solid #000; padding: 3px">alpha one alpha two alpha three alpha four</div>
+                <div id="b" style="border: 1px solid #000; padding: 3px">beta one beta two beta three beta four</div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let grid = find_by_id(doc.deref_mut(), "grid").expect("grid");
+        let a = find_by_id(doc.deref_mut(), "a").expect("a");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        // Panics via `report_fragment_overflow` if anything lands past
+        // the 260px strip.
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &table);
+
+        assert!(
+            frags_of(&geom, a).iter().all(|(p, _, _)| *p != 0),
+            "not one line fits the 8px strip, so the cell must open on \
+             page 1; got {:?}",
+            frags_of(&geom, a)
+        );
+        assert!(
+            frags_of(&geom, grid).iter().all(|(p, _, _)| *p != 0),
+            "and the grid must not claim the strip its only content \
+             declined; got {:?}",
+            frags_of(&geom, grid)
+        );
     }
 
     #[test]
