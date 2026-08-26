@@ -1937,9 +1937,10 @@ fn draw_under_clip(
         // not the border-box. Mirrors `draw_block_with_inner_content`.
         let inner_x = x_pt + inner_inset.0;
         // fulgur-pgbrk R1: continuation fragments carry no leading
-        // decoration (`box-decoration-break: slice`).
+        // decoration under `box-decoration-break: slice`; under
+        // `clone` every fragment re-applies it.
         let inner_y = y_pt
-            + if fragment_is_continuation(geom, frag) {
+            + if fragment_omits_leading_decoration(geom, frag) {
                 0.0
             } else {
                 inner_inset.1
@@ -2339,9 +2340,10 @@ fn draw_under_opacity(
             let inner_inset = block.style.content_inset();
             let inner_x = x_pt + inner_inset.0;
             // fulgur-pgbrk R1: continuation fragments carry no leading
-            // decoration (`box-decoration-break: slice`).
+            // decoration under `box-decoration-break: slice`; under
+            // `clone` every fragment re-applies it.
             let inner_y = y_pt
-                + if fragment_is_continuation(geom, frag) {
+                + if fragment_omits_leading_decoration(geom, frag) {
                     0.0
                 } else {
                     inner_inset.1
@@ -3301,8 +3303,9 @@ fn draw_block_with_inner_content(
     let (ix, iy) = block.style.content_inset();
     let inner_x = x + ix;
     // fulgur-pgbrk R1: continuation fragments carry no leading
-    // decoration (`box-decoration-break: slice`).
-    let inner_y = y + if fragment_is_continuation(geom, frag) {
+    // decoration under `box-decoration-break: slice`; under
+    // `clone` every fragment re-applies it.
+    let inner_y = y + if fragment_omits_leading_decoration(geom, frag) {
         0.0
     } else {
         iy
@@ -3402,8 +3405,9 @@ fn draw_list_item_with_block(
     let inset = block.map(|b| b.style.content_inset()).unwrap_or((0.0, 0.0));
     let inner_x = x + inset.0;
     // fulgur-pgbrk R1: continuation fragments carry no leading
-    // decoration (`box-decoration-break: slice`).
-    let inner_y = y + if fragment_is_continuation(geom, frag) {
+    // decoration under `box-decoration-break: slice`; under
+    // `clone` every fragment re-applies it.
+    let inner_y = y + if fragment_omits_leading_decoration(geom, frag) {
         0.0
     } else {
         inset.1
@@ -3660,14 +3664,43 @@ fn fragment_continues_after(
 /// on one page (a multicol container's per-column slices) therefore
 /// reads as closed at both ends: column-boundary slicing keeps today's
 /// behaviour rather than gaining half-open boxes as a side effect.
+///
+/// `box-decoration-break: clone` (§5.4) inverts the whole question:
+/// "each box fragment is independently wrapped with the border, padding,
+/// and margin", so a cut *is* an edge and every fragment paints a closed
+/// box. That is the entirety of the paint half of `clone` — each
+/// fragment already draws its own background and resolves its own radii
+/// against its own rect, which is what §5.4 asks for. The layout half
+/// (§5.3, leaving room inside the fragmentainer for the cloned
+/// decoration) lives in `pagination_layout::fragment_block_subtree`.
 fn slice_open_edges(
     geom: &crate::pagination_layout::PaginationGeometry,
     frag: &crate::pagination_layout::Fragment,
 ) -> crate::draw_primitives::OpenEdges {
+    if geom.decoration_clone {
+        return crate::draw_primitives::OpenEdges::CLOSED;
+    }
     crate::draw_primitives::OpenEdges {
         top: fragment_is_continuation(geom, frag),
         bottom: fragment_continues_after(geom, frag),
     }
+}
+
+/// Whether `frag` starts at a fragmentainer cut and therefore paints
+/// **no** leading decoration — so inner content sharing the box's
+/// `node_id` (an inline-root paragraph, a replaced image) begins at the
+/// fragment's own top rather than `padding-top + border-top` below it.
+///
+/// This is [`fragment_is_continuation`] minus the `clone` boxes: under
+/// `box-decoration-break: clone` a continuation fragment re-applies the
+/// full leading decoration (css-break-3 §5.4), so its content is inset
+/// exactly like the first fragment's. `pagination_layout` sizes those
+/// fragments to match.
+fn fragment_omits_leading_decoration(
+    geom: &crate::pagination_layout::PaginationGeometry,
+    frag: &crate::pagination_layout::Fragment,
+) -> bool {
+    !geom.decoration_clone && fragment_is_continuation(geom, frag)
 }
 
 /// Phase 4 PR 3 follow-up (PR #302 Devin): mirror
@@ -3699,15 +3732,20 @@ fn paragraph_lines_for_page(
     // boxes (`ShapedLine::height`), so strip the decoration back out
     // before accumulating, or every page after the first starts its
     // slice `lead_in` too late and rebases its baselines by that much.
+    //
+    // Under `box-decoration-break: clone` (§5.4) the box is wrapped
+    // again at every fragment, so *each* fragment carries both — not
+    // just the first and the last.
     let lead_in = geom.content_lead_in.in_pt();
     let lead_out = geom.content_lead_out.in_pt();
     let last_pos = fragments.len() - 1;
+    let cloned = geom.decoration_clone;
     let lines_only = |pos: usize, f: &crate::pagination_layout::Fragment| {
         let mut h = f.height.in_pt();
-        if pos == 0 {
+        if cloned || pos == 0 {
             h -= lead_in;
         }
-        if pos == last_pos {
+        if cloned || pos == last_pos {
             h -= lead_out;
         }
         h.max(crate::units::Pt::ZERO)
@@ -5249,6 +5287,7 @@ mod tests {
             is_repeat: false,
             content_lead_in: 20.0_f32.as_px(),
             content_lead_out: 10.0_f32.as_px(),
+            decoration_clone: false,
         };
 
         for page in [0, 1] {
@@ -5322,6 +5361,7 @@ mod tests {
             is_repeat: false,
             content_lead_in: 20.0_f32.as_px(),
             content_lead_out: 10.0_f32.as_px(),
+            decoration_clone: false,
         };
         assert_eq!(
             fragment_consumed_pt(&plain, &plain.fragments[1]),
@@ -5425,6 +5465,106 @@ mod tests {
             OpenEdges::CLOSED,
             "is_repeat fragments are complete boxes, not slices"
         );
+    }
+
+    /// css-break-3 §5.4, the other value: with `box-decoration-break:
+    /// clone` "each box fragment is independently wrapped with the
+    /// border, padding, and margin", so a fragmentainer cut IS an edge
+    /// and every fragment paints a closed box — the exact inverse of
+    /// `slice`.
+    #[test]
+    fn slice_open_edges_closes_every_cut_under_clone() {
+        use crate::draw_primitives::OpenEdges;
+
+        let three = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![
+                make_fragment(0, 32.0),
+                make_fragment(1, 32.0),
+                make_fragment(2, 32.0),
+            ],
+            decoration_clone: true,
+            ..Default::default()
+        };
+        for (i, frag) in three.fragments.iter().enumerate() {
+            assert_eq!(
+                slice_open_edges(&three, frag),
+                OpenEdges::CLOSED,
+                "fragment {i} is independently wrapped under clone"
+            );
+        }
+    }
+
+    /// The paint-side counterpart for inner content that shares the
+    /// block's `node_id`: under `slice` a continuation fragment starts
+    /// its content flush with the cut, under `clone` it is inset by the
+    /// re-applied `border-top + padding-top`.
+    #[test]
+    fn fragment_omits_leading_decoration_only_under_slice() {
+        let sliced = make_geom(vec![make_fragment(0, 32.0), make_fragment(1, 32.0)]);
+        assert!(!fragment_omits_leading_decoration(
+            &sliced,
+            &sliced.fragments[0]
+        ));
+        assert!(
+            fragment_omits_leading_decoration(&sliced, &sliced.fragments[1]),
+            "slice inserts no padding at a break"
+        );
+
+        let cloned = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![make_fragment(0, 32.0), make_fragment(1, 32.0)],
+            decoration_clone: true,
+            ..Default::default()
+        };
+        for (i, frag) in cloned.fragments.iter().enumerate() {
+            assert!(
+                !fragment_omits_leading_decoration(&cloned, frag),
+                "fragment {i} re-applies the whole leading decoration"
+            );
+        }
+    }
+
+    /// `paragraph_lines_for_page` strips the box's own decoration out of
+    /// each fragment height before partitioning line boxes. Under `clone`
+    /// every fragment carries both `lead_in` and `lead_out`, so both come
+    /// off every fragment — not just the first and the last.
+    ///
+    /// Without this the second page would count its cloned decoration as
+    /// if it were text and start its slice 30pt of lines too late.
+    #[test]
+    fn paragraph_lines_for_page_strips_cloned_decoration_from_every_fragment() {
+        // Four 16pt lines. Under clone each fragment is
+        // `lead_in + 2 lines + lead_out` in px: 8 + 42.67 + 4.
+        let lines = vec![
+            make_line(16.0, 12.0),
+            make_line(16.0, 28.0),
+            make_line(16.0, 44.0),
+            make_line(16.0, 60.0),
+        ];
+        let plain = make_geom(vec![make_fragment(0, 42.667), make_fragment(1, 42.667)]);
+        let cloned = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![make_fragment(0, 54.667), make_fragment(1, 54.667)],
+            content_lead_in: 8.0_f32.as_px(),
+            content_lead_out: 4.0_f32.as_px(),
+            decoration_clone: true,
+            ..Default::default()
+        };
+
+        for page in [0, 1] {
+            let a = paragraph_lines_for_page(&lines, &plain, page, true).expect("plain");
+            let b = paragraph_lines_for_page(&lines, &cloned, page, true).expect("cloned");
+            assert_eq!(
+                a.len(),
+                b.len(),
+                "page {page}: a cloned-decoration paragraph must slice to \
+                 the same line count as its undecorated twin"
+            );
+            for (la, lb) in a.iter().zip(b.iter()) {
+                assert!(
+                    (la.baseline.to_f32() - lb.baseline.to_f32()).abs() < 0.05,
+                    "page {page}: baselines must be rebased identically"
+                );
+            }
+        }
     }
 
     #[test]

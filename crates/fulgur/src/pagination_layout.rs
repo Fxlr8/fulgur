@@ -125,10 +125,24 @@ pub struct Fragment {
 pub struct PaginationGeometry {
     pub fragments: Vec<Fragment>,
     pub is_repeat: bool,
-    /// `border-top + padding-top`, included in the FIRST fragment's height.
+    /// `border-top + padding-top`, included in the FIRST fragment's height
+    /// — or in EVERY fragment's when `decoration_clone` is set.
     pub content_lead_in: crate::units::Px,
-    /// `padding-bottom + border-bottom`, included in the LAST fragment's height.
+    /// `padding-bottom + border-bottom`, included in the LAST fragment's
+    /// height — or in EVERY fragment's when `decoration_clone` is set.
     pub content_lead_out: crate::units::Px,
+    /// `box-decoration-break: clone` (CSS Fragmentation 3 §5.4) is in
+    /// effect on this box, so each fragment is independently wrapped in
+    /// the full border / padding instead of the box being drawn once and
+    /// sliced.
+    ///
+    /// Stamped onto every entry by [`run_pass_inner`] from the
+    /// [`crate::column_css::ColumnStyleTable`], rather than at each of the
+    /// dozen `geometry.entry(id).or_default()` sites, so no producer can
+    /// forget it. Consumers read it to decide whether a fragmentainer cut
+    /// is an open edge (`slice`) or a real one (`clone`) — see
+    /// `render::slice_open_edges`.
+    pub decoration_clone: bool,
 }
 
 impl PaginationGeometry {
@@ -632,6 +646,7 @@ fn fragment_inline_child(
         lead_out,
         orphans,
         widows,
+        clone_decoration: uses_cloned_decoration(cx.styles, child_id),
     };
     let placement = InlinePlacement {
         id: child_id,
@@ -1449,6 +1464,12 @@ struct InlineSplitInput<'a> {
     lead_out: f32,
     orphans: usize,
     widows: usize,
+    /// `box-decoration-break: clone` (css-break-3 §5.4). Under the
+    /// initial `slice` only the first fragment carries `lead_in` and only
+    /// the last carries `lead_out`; under `clone` every fragment carries
+    /// both, which both shrinks each fragment's line budget and grows its
+    /// border-box height.
+    clone_decoration: bool,
 }
 
 /// Placement of the inline root being split (geometry-free inputs of
@@ -1651,9 +1672,42 @@ fn run_pass_inner<'a>(
         tree.fragment_pagination_root();
     }
     let body_id = tree.body_id;
-    let table = tree.take_geometry();
+    let mut table = tree.take_geometry();
+    stamp_cloned_decoration(&mut table, column_styles);
     report_fragment_overflow(&table, page_height_px, body_id);
     table
+}
+
+/// Whether `id` carries `box-decoration-break: clone` (CSS Fragmentation
+/// 3 §5.4). Absent from the side-table means the author never declared
+/// the property, so the initial value `slice` applies.
+fn uses_cloned_decoration(styles: Option<&crate::column_css::ColumnStyleTable>, id: usize) -> bool {
+    styles.and_then(|t| t.get(&id)).is_some_and(|p| {
+        matches!(
+            p.box_decoration_break,
+            Some(crate::draw_primitives::BoxDecorationBreak::Clone)
+        )
+    })
+}
+
+/// Copy `box-decoration-break: clone` from the style side-table onto
+/// every geometry entry, once, after the walk.
+///
+/// The walk creates `PaginationGeometry` entries at a dozen
+/// `geometry.entry(id).or_default()` sites spread over the block, inline,
+/// zero-height, sliced-leaf and out-of-flow paths. Setting the flag here
+/// instead of at each of them means a new producer cannot silently ship a
+/// fragment whose paint semantics disagree with its own geometry.
+fn stamp_cloned_decoration(
+    table: &mut PaginationGeometryTable,
+    styles: Option<&crate::column_css::ColumnStyleTable>,
+) {
+    let Some(styles) = styles else { return };
+    for (id, geom) in table.iter_mut() {
+        if uses_cloned_decoration(Some(styles), *id) {
+            geom.decoration_clone = true;
+        }
+    }
 }
 
 /// fulgur-pgbrk R3: surface any fragment the walk left outside the page
@@ -3106,6 +3160,46 @@ fn fragment_block_subtree(
     });
     let parent_slice = frame.parent_slice.expect("parent_slice set on entry");
 
+    // The container's own block-axis decoration. Read up here rather
+    // than at the tail because `box-decoration-break: clone` makes it a
+    // *layout* input, not just something to add to the last fragment.
+    let (lead_in, lead_out) = box_decoration(parent);
+    // css-break-3 §5.4 / §5.3. Under `clone` every fragment is wrapped in
+    // its own border and padding, and — the half that is easy to miss —
+    // the content box "extends to fill any remaining fragmentainer extent
+    // (leaving room for any margins/borders/padding applied by
+    // `box-decoration-break: clone`)". So on a page this container
+    // leaves, children must stop `lead_out` above the fragmentainer
+    // bottom; on a page it resumes on, they start `lead_in` below its
+    // top. Under the initial value `slice` both are zero here and the
+    // decoration is carried by the first / last fragment only, which is
+    // what the tail below already does.
+    //
+    // Margins are excluded on purpose: §5.2 truncates cloned margins to
+    // zero on block-level boxes, and [`box_decoration`] reports border +
+    // padding only.
+    let (clone_lead_in, clone_lead_out) = if uses_cloned_decoration(column_styles, parent_id) {
+        (lead_in, lead_out)
+    } else {
+        (0.0, 0.0)
+    };
+    // The y below which this container may not place child content on a
+    // strip it will leave. See `clone_lead_out` above.
+    //
+    // **Scope.** Both adjustments cover the page crossings THIS loop
+    // takes — the ones where the container itself decides a direct child
+    // does not fit. A crossing taken further down (a recursed subtree, a
+    // sliced oversized leaf, an inline root split at its own line
+    // boundaries) runs against `cx.page_h`, which knows nothing about an
+    // ancestor's cloned decoration: `page_height_px` is the page model's
+    // own extent and shrinking it there would corrupt every
+    // `page_start_y` derived from it. So a `clone` container whose
+    // fragmentation is driven from inside a descendant still paints its
+    // cloned bottom border over that descendant's last line. Closing
+    // that needs an effective-bottom threaded through the whole walk,
+    // which is a larger change than the property itself.
+    let child_page_bottom = (page_height_px - clone_lead_out).max(0.0);
+
     // fulgur-pgbrk R4 (css-break-3 §4.4 rule 2): breaking at a class A
     // point is forbidden when a common ancestor of the adjoining
     // siblings has `break-inside: avoid`. fulgur read `break-inside`
@@ -3418,7 +3512,7 @@ fn fragment_block_subtree(
                 page_start_y,
                 page_height_px,
                 this_top_in_parent,
-            );
+            ) - clone_lead_in;
             parent_slice.close_continuing(geometry, row_state.as_mut(), page_index, page_start_y);
             page_index += 1;
             cursor_y = 0.0;
@@ -3432,7 +3526,10 @@ fn fragment_block_subtree(
             // matching CSS 3 Fragmentation §3 (margins at forced breaks
             // truncate). Padding and border do not truncate, so any
             // unspent leading decoration still offsets it; see
-            // `resume_taffy_origin`.
+            // `resume_taffy_origin`. Under `box-decoration-break: clone`
+            // the container additionally re-applies its whole
+            // `border-top + padding-top` on the new strip — that is the
+            // `- clone_lead_in` folded into `resume` above.
             page_taffy_origin = resume;
             child_page_y = this_top_in_parent - resume;
         }
@@ -3586,7 +3683,11 @@ fn fragment_block_subtree(
         } else {
             page_start_y
         };
-        if break_decision(child_page_y, child_h, overflow_floor, page_height_px)
+        // `child_page_bottom` is `page_height_px` under the initial
+        // `slice`; under `clone` it is short by the container's cloned
+        // `padding-bottom + border-bottom`, which §5.3 requires this
+        // fragment's content box to leave room for.
+        if break_decision(child_page_y, child_h, overflow_floor, child_page_bottom)
             == BreakDecision::PushToNextPage
         {
             // css-break-3 §3.1.1 / §4.1, the unforced twin of the
@@ -3629,12 +3730,16 @@ fn fragment_block_subtree(
             // are not class A break points) so this is the only gate
             // there is.
             let resume = if content_on_this_page {
+                // `- clone_lead_in`: under `box-decoration-break: clone`
+                // the container is wrapped again on the page it resumes
+                // on, so its children start that much below the new
+                // strip's top. Zero under the initial `slice`.
                 resume_taffy_origin(
                     page_taffy_origin,
                     page_start_y,
                     page_height_px,
                     this_top_in_parent,
-                )
+                ) - clone_lead_in
             } else {
                 // The container placed nothing on the outgoing strip, so
                 // it spent none of its leading decoration there either.
@@ -3642,7 +3747,10 @@ fn fragment_block_subtree(
                 // `border-top + padding-top` included — begins on the new
                 // page. Running `resume_taffy_origin` here instead would
                 // charge the outgoing page for decoration it never
-                // painted and leave the box one decoration short.
+                // painted and leave the box one decoration short. No
+                // `clone_lead_in` either: this is the box's real leading
+                // edge, not a fragmentainer cut, so there is nothing to
+                // clone.
                 page_taffy_origin
             };
             if content_on_this_page {
@@ -3839,11 +3947,14 @@ fn fragment_block_subtree(
             page_index += 1;
             cursor_y = 0.0;
             page_start_y = 0.0;
+            // The following sibling opens the container's next fragment,
+            // which under `box-decoration-break: clone` re-applies the
+            // whole `border-top + padding-top` before any content.
             (
                 origin_pending_target_y,
                 origin_pending_anchor,
                 origin_pending_same_row,
-            ) = (Some(page_start_y), None, None);
+            ) = (Some(page_start_y + clone_lead_in), None, None);
         }
         if !is_float {
             prev_used_page = Some(used_end.clone());
@@ -3884,8 +3995,12 @@ fn fragment_block_subtree(
     // The leading decoration needs no equivalent: children sit
     // `lead_in` below the container's own top, so the first fragment —
     // measured from `page_start_y` to the first child's bottom —
-    // already contains it.
-    let (lead_in, lead_out) = box_decoration(parent);
+    // already contains it. Under `box-decoration-break: clone` the same
+    // holds for every fragment, because `clone_lead_in` has already
+    // pushed each strip's leading child down by that much.
+    //
+    // `(lead_in, lead_out)` are read at the top of this function, where
+    // `clone_lead_in` / `clone_lead_out` derive from them.
     cursor_y += lead_out;
 
     // Close the parent's fragment for the final page span. Always
@@ -4077,7 +4192,10 @@ fn box_decoration(node: &blitz_dom::Node) -> (f32, f32) {
 /// **border box**, so `lead_in` is added to the first fragment and
 /// `lead_out` to the last, per `box-decoration-break: slice`
 /// (CSS Fragmentation 3 §5.4). Both are recorded on the geometry entry
-/// so line-partitioning consumers can subtract them back out.
+/// so line-partitioning consumers can subtract them back out. Under
+/// `box-decoration-break: clone` every fragment carries both instead —
+/// [`PaginationGeometry::decoration_clone`] is what tells those consumers
+/// which reading applies.
 /// fulgur-pgbrk Risk 1: the split inputs travel as one
 /// [`InlineSplitInput`] and the placement as one [`InlinePlacement`],
 /// so the signature no longer needs a clippy arity exemption.
@@ -4115,6 +4233,7 @@ fn fragment_inline_root(
             lead_out: input.lead_out,
             orphans: 1,
             widows: 1,
+            clone_decoration: input.clone_decoration,
         };
         scan_split_points(&relaxed, placement.cursor_y, placement.page, page_height_px)
     } else {
@@ -4187,8 +4306,9 @@ fn scan_split_points(
         let frag_top_local = line_metrics[fragment_start_idx].0;
         // Only the first fragment carries the leading decoration
         // (`box-decoration-break: slice`), so only it starts its lines
-        // `lead_in` below its own top edge.
-        let frag_lead_in = if fragment_start_idx == 0 {
+        // `lead_in` below its own top edge. Under `clone` (§5.4) every
+        // fragment is independently wrapped, so every one does.
+        let frag_lead_in = if input.clone_decoration || fragment_start_idx == 0 {
             lead_in
         } else {
             0.0
@@ -4203,7 +4323,15 @@ fn scan_split_points(
         // `page_height_px` unnoticed, and the relaxed re-scan below
         // hits the identical blind spot (fulgur-pgbrk R7 follow-up,
         // Codex review PR #719).
-        let frag_lead_out = if i == total_lines - 1 { lead_out } else { 0.0 };
+        //
+        // Under `clone` the same reasoning applies to *every* fragment,
+        // not just the last: §5.3 requires each one to leave room for
+        // its own cloned trailing decoration inside the fragmentainer.
+        let frag_lead_out = if input.clone_decoration || i == total_lines - 1 {
+            lead_out
+        } else {
+            0.0
+        };
         let projected_bottom_in_body = paragraph_top_in_body
             + frag_lead_in
             + (line_bottom_local - frag_top_local)
@@ -4241,11 +4369,20 @@ fn scan_split_points(
             };
 
             // Lines [fragment_start_idx, split_at) fit on the current page.
+            // Under `clone` this fragment closes with its own cloned
+            // `padding-bottom + border-bottom`, so its border box is that
+            // much taller than the lines it holds; under `slice` a
+            // fragmentainer cut inserts nothing (§5.4).
+            let closing_lead_out = if input.clone_decoration {
+                lead_out
+            } else {
+                0.0
+            };
             let prev_line_bottom = line_metrics[split_at - 1].1;
             plan.push(InlineFragmentPlan {
                 page_index,
                 y: paragraph_top_in_body,
-                height: frag_lead_in + (prev_line_bottom - frag_top_local),
+                height: frag_lead_in + (prev_line_bottom - frag_top_local) + closing_lead_out,
             });
 
             page_index += 1;
@@ -4258,7 +4395,7 @@ fn scan_split_points(
     // box's trailing decoration (`box-decoration-break: slice`).
     let frag_top_local = line_metrics[fragment_start_idx].0;
     let last_bottom_local = line_metrics.last().expect("non-empty checked above").1;
-    let frag_lead_in = if fragment_start_idx == 0 {
+    let frag_lead_in = if input.clone_decoration || fragment_start_idx == 0 {
         lead_in
     } else {
         0.0
@@ -8302,6 +8439,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 100.0,
             orphans: 1,
             widows: 1,
+            clone_decoration: false,
         };
         let plan = super::scan_split_points(&input, 0.0, 0, 250.0);
         for f in &plan {
@@ -8334,6 +8472,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 0.0,
             orphans: 2,
             widows: 4,
+            clone_decoration: false,
         };
         let plan = super::scan_split_points(&input, 0.0, 0, 450.0);
         assert_eq!(plan.len(), 2, "plan={plan:?}");
@@ -8366,6 +8505,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 0.0,
             orphans: 3,
             widows: 5,
+            clone_decoration: false,
         };
         let plan = super::scan_split_points(&input, 0.0, 0, 450.0);
         assert_eq!(plan.len(), 1, "no legal split; plan={plan:?}");
@@ -8398,6 +8538,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 0.0,
             orphans: 2,
             widows: 2,
+            clone_decoration: false,
         };
         let placement = InlinePlacement {
             id: 1,
@@ -8444,6 +8585,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 0.0,
             orphans: 2,
             widows: 2,
+            clone_decoration: false,
         };
         let placement = InlinePlacement {
             id: 1,
@@ -8491,6 +8633,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 0.0,
             orphans: 2,
             widows: 2,
+            clone_decoration: false,
         };
         let placement = InlinePlacement {
             id: 1,
@@ -8528,6 +8671,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 10.0,
             orphans: 2,
             widows: 2,
+            clone_decoration: false,
         };
         let placement = InlinePlacement {
             id: 1,
@@ -8568,6 +8712,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 10.0,
             orphans: 2,
             widows: 2,
+            clone_decoration: false,
         };
         let placement = InlinePlacement {
             id: 1,
@@ -11059,6 +11204,7 @@ h2 { string-set: chapter-title content(text); }
             lead_out: 0.0,
             orphans: 2,
             widows: 2,
+            clone_decoration: false,
         };
         let placement = InlinePlacement {
             id: 1,
@@ -11709,6 +11855,233 @@ h2 { string-set: chapter-title content(text); }
                 "[{label}] the leading child starts under the container's \
                  unspent 1px border-top; got y={}",
                 first_frag.y.to_f32()
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // box-decoration-break (css-break-3 §5.4 / §5.3)
+    // ---------------------------------------------------------------
+
+    /// Both halves of `clone` on one fixture, pinned against the same
+    /// document under the initial `slice`.
+    ///
+    /// A one-column grid with a 10px border top and bottom and six 50px
+    /// rows, on a 260px strip. Under `slice` the container is drawn once
+    /// and cut, so rows 1–5 exactly fill the strip (`10 + 5*50 == 260`)
+    /// and only row 6 moves. Under `clone`:
+    ///
+    /// - §5.3 — the outgoing fragment's content box has to leave room for
+    ///   the cloned `border-bottom`, so the usable strip is 250px and row
+    ///   5 no longer fits; and
+    /// - §5.4 — the incoming fragment is wrapped again, so row 5 starts
+    ///   10px below the new strip's top rather than flush with it.
+    ///
+    /// The two are asserted together because implementing either alone is
+    /// worse than implementing neither: a cloned border with no room
+    /// reserved paints over content, and reserved room with no border
+    /// paints a gap.
+    #[test]
+    fn cloned_decoration_reserves_room_and_re_wraps_each_fragment() {
+        fn geometry_for(decl: &str) -> (PaginationGeometryTable, usize, Vec<usize>) {
+            let rows: String = (1..=6)
+                .map(|r| format!("<div class=r id=\"r{r}\"></div>"))
+                .collect();
+            let html = format!(
+                r#"
+                <html><body style="margin:0">
+                  <style>
+                    .g {{ display:grid; grid-template-columns:1fr;
+                          border-top:10px solid #000; border-bottom:10px solid #000;
+                          {decl} }}
+                    .r {{ height:50px }}
+                  </style>
+                  <div class="g" id="g">{rows}</div>
+                </body></html>
+            "#
+            );
+            let mut doc = parse(&html, 360.0);
+            let styles = blitz_adapter::extract_column_style_table(&doc);
+            let container = find_by_id(doc.deref_mut(), "g").expect("g");
+            let row_ids: Vec<usize> = (1..=6)
+                .map(|r| find_by_id(doc.deref_mut(), &format!("r{r}")).expect("row"))
+                .collect();
+            let table = run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &styles);
+            (table, container, row_ids)
+        }
+
+        fn page_of(table: &PaginationGeometryTable, id: usize) -> u32 {
+            table.get(&id).expect("row geometry").fragments[0].page_index
+        }
+
+        let (slice, slice_g, slice_rows) = geometry_for("");
+        let (clone, clone_g, clone_rows) = geometry_for("box-decoration-break: clone");
+
+        assert!(
+            !slice.get(&slice_g).expect("g geometry").decoration_clone,
+            "the initial value is slice"
+        );
+        assert!(
+            clone.get(&clone_g).expect("g geometry").decoration_clone,
+            "the declaration must reach the geometry table"
+        );
+
+        // §5.3: row 5 ends exactly on the fragmentainer edge, so it fits
+        // under `slice` and does not under `clone`.
+        assert_eq!(page_of(&slice, slice_rows[4]), 0, "slice: {slice:?}");
+        assert_eq!(
+            page_of(&clone, clone_rows[4]),
+            1,
+            "clone must leave 10px for its cloned border-bottom, pushing \
+             the row that ended flush with the page edge: {clone:?}"
+        );
+
+        // §5.4: the row that opens the incoming fragment starts below the
+        // cloned `border-top` under `clone`, and flush under `slice`.
+        let slice_incoming = &slice.get(&slice_rows[5]).expect("row 6").fragments[0];
+        assert!(
+            slice_incoming.y.to_f32().abs() < 0.51,
+            "slice inserts no border at a break, so row 6 is flush with \
+             the strip top; got y={}",
+            slice_incoming.y.to_f32()
+        );
+        let clone_incoming = &clone.get(&clone_rows[4]).expect("row 5").fragments[0];
+        assert!(
+            (clone_incoming.y.to_f32() - 10.0).abs() < 0.51,
+            "clone re-applies the whole 10px border-top on the page it \
+             resumes on; got y={}",
+            clone_incoming.y.to_f32()
+        );
+
+        // The container's own fragments: the outgoing one runs to the
+        // fragmentainer edge either way (its border box does — §5.3 shrinks
+        // the *content* box, and the cloned border is drawn inside it), and
+        // the incoming one is taller under `clone` by the cloned
+        // `border-top` plus the extra row it had to take.
+        let clone_frags = &clone.get(&clone_g).expect("g geometry").fragments;
+        assert_eq!(clone_frags.len(), 2, "frags={clone_frags:?}");
+        assert!(
+            (clone_frags[0].height.to_f32() - 260.0).abs() < 0.51,
+            "frags={clone_frags:?}"
+        );
+        assert!(
+            (clone_frags[1].height.to_f32() - 120.0).abs() < 0.51,
+            "10px cloned border-top + two 50px rows + the real 10px \
+             border-bottom; frags={clone_frags:?}"
+        );
+    }
+
+    /// The property is not inherited: a `clone` container's *children*
+    /// keep the initial `slice`, so a nested box that fragments is still
+    /// drawn once and cut.
+    #[test]
+    fn cloned_decoration_does_not_inherit_to_children() {
+        let html = r#"
+            <html><body style="margin:0">
+              <div id="outer" style="box-decoration-break: clone; border:1px solid #000">
+                <div id="inner" style="height:400px; border:1px solid #000"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 360.0);
+        let styles = blitz_adapter::extract_column_style_table(&doc);
+        let outer = find_by_id(doc.deref_mut(), "outer").expect("outer");
+        let inner = find_by_id(doc.deref_mut(), "inner").expect("inner");
+        let table = run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &styles);
+
+        assert!(table.get(&outer).expect("outer").decoration_clone);
+        assert!(
+            !table.get(&inner).expect("inner").decoration_clone,
+            "box-decoration-break is not an inherited property"
+        );
+    }
+
+    /// `uses_cloned_decoration` reads "absent" as the initial value
+    /// `slice`, which is what makes the sparse side-table safe to consult
+    /// without densifying it.
+    #[test]
+    fn uses_cloned_decoration_treats_absent_as_slice() {
+        use crate::draw_primitives::BoxDecorationBreak;
+
+        let mut styles = crate::column_css::ColumnStyleTable::new();
+        styles.insert(
+            7,
+            crate::column_css::ColumnStyleProps {
+                box_decoration_break: Some(BoxDecorationBreak::Clone),
+                ..Default::default()
+            },
+        );
+        styles.insert(
+            8,
+            crate::column_css::ColumnStyleProps {
+                box_decoration_break: Some(BoxDecorationBreak::Slice),
+                ..Default::default()
+            },
+        );
+        styles.insert(9, crate::column_css::ColumnStyleProps::default());
+
+        assert!(uses_cloned_decoration(Some(&styles), 7));
+        assert!(!uses_cloned_decoration(Some(&styles), 8));
+        assert!(
+            !uses_cloned_decoration(Some(&styles), 9),
+            "declared nothing"
+        );
+        assert!(!uses_cloned_decoration(Some(&styles), 10), "not in table");
+        assert!(!uses_cloned_decoration(None, 7), "no table at all");
+    }
+
+    /// The inline-root splitter's half of §5.4: with `clone` every
+    /// fragment carries the box's own `lead_in` and `lead_out`, not just
+    /// the first and the last.
+    ///
+    /// Four 100px lines, a 20px `lead_in` and a 10px `lead_out`, on a
+    /// 250px strip. Under `slice` the first fragment is `20 + 200` and
+    /// the second `200 + 10` — the decoration is spent once. Under
+    /// `clone` both fragments are `20 + 200 + 10`, and each still has to
+    /// fit the fragmentainer *including* the decoration it now carries.
+    #[test]
+    fn scan_split_points_clone_wraps_every_fragment() {
+        let lines = [(0.0, 100.0), (100.0, 200.0), (200.0, 300.0), (300.0, 400.0)];
+
+        let sliced = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 20.0,
+            lead_out: 10.0,
+            orphans: 1,
+            widows: 1,
+            clone_decoration: false,
+        };
+        let sliced_plan = super::scan_split_points(&sliced, 0.0, 0, 250.0);
+        assert_eq!(sliced_plan.len(), 2, "plan={sliced_plan:?}");
+        assert!(
+            (sliced_plan[0].height - 220.0).abs() < 0.01,
+            "lead_in + two lines; plan={sliced_plan:?}"
+        );
+        assert!(
+            (sliced_plan[1].height - 210.0).abs() < 0.01,
+            "two lines + lead_out, no border at the cut; plan={sliced_plan:?}"
+        );
+
+        let cloned = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 20.0,
+            lead_out: 10.0,
+            orphans: 1,
+            widows: 1,
+            clone_decoration: true,
+        };
+        let cloned_plan = super::scan_split_points(&cloned, 0.0, 0, 250.0);
+        assert_eq!(cloned_plan.len(), 2, "plan={cloned_plan:?}");
+        for (i, f) in cloned_plan.iter().enumerate() {
+            assert!(
+                (f.height - 230.0).abs() < 0.01,
+                "fragment {i} is independently wrapped: lead_in + two \
+                 lines + lead_out; plan={cloned_plan:?}"
+            );
+            assert!(
+                f.y + f.height <= 250.0 + OVERFLOW_EPS_PX,
+                "fragment {i} must fit the fragmentainer including the \
+                 decoration it now carries (§5.3); plan={cloned_plan:?}"
             );
         }
     }

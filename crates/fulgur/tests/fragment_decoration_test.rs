@@ -447,3 +447,134 @@ fn a_split_rounded_box_keeps_the_corners_at_its_real_edges() {
         "the incoming cut must not be stroked; got {page1:?}"
     );
 }
+
+/// The other value of `box-decoration-break` (css-break-3 §5.4):
+/// `clone` wraps every fragment in its own border, and §5.3 makes the
+/// content box leave room for it inside the fragmentainer.
+///
+/// This is `repro/box-decoration-break-clone-ignored.html`: a one-column
+/// grid of 40px rows split across two pages, rendered twice with the
+/// declaration as the only difference. The `slice` half is the control —
+/// it must not move.
+///
+/// Coordinates below are stroke *centres*, so a 1px (0.75pt) border
+/// whose outer edge sits on the content edge strokes 0.375pt inside it.
+#[test]
+fn box_decoration_break_clone_wraps_each_fragment_and_reserves_room() {
+    /// Every horizontal stroke's y on `page`, sorted.
+    fn rules(pdf: &[u8], page: usize) -> Vec<f32> {
+        let mut ys: Vec<f32> = horizontals(&stroked_segments(pdf, page))
+            .iter()
+            .map(|s| s.y1)
+            .collect();
+        ys.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        ys
+    }
+
+    fn render_with(decl: &str) -> Vec<u8> {
+        let html = format!(
+            r#"<html><head><style>
+                 {PAGE_CSS}
+                 .spacer {{ height: 120px }}
+                 .tbl {{ display: grid; grid-template-columns: 1fr;
+                         border: 1px solid #000; {decl} }}
+                 .tbl > div {{ height: 40px; border-bottom: 1px solid #000 }}
+               </style></head><body>
+                 <div class="spacer"></div>
+                 <div class="tbl">
+                   <div></div><div></div><div></div>
+                   <div></div><div></div><div></div>
+                 </div>
+               </body></html>"#
+        );
+        render(&html)
+    }
+
+    // Half a border width: an edge "at" C strokes its centre here.
+    const HALF: f32 = 0.375;
+    let near = |a: f32, b: f32| (a - b).abs() < 0.05;
+
+    // --- control: the initial value, which must be untouched ----------
+    let sliced = render_with("");
+    assert_eq!(
+        rules(&sliced, 0),
+        vec![105.375, 136.125, 166.875, 197.625],
+        "slice: three row rules plus the container's top border, and no \
+         stroke at the cut"
+    );
+    assert_eq!(
+        rules(&sliced, 1),
+        vec![45.375, 76.125, 106.875, 107.625],
+        "slice: the continuation has no top border either"
+    );
+    for s in side_borders(&stroked_segments(&sliced, 0)) {
+        assert!(
+            near(s.y_max(), CONTENT_BOTTOM),
+            "slice: the sides run flush into the cut; got {s:?}"
+        );
+    }
+    for s in side_borders(&stroked_segments(&sliced, 1)) {
+        assert!(
+            near(s.y_min(), CONTENT_TOP),
+            "slice: the sides resume flush from the cut; got {s:?}"
+        );
+    }
+
+    // --- clone --------------------------------------------------------
+    let cloned = render_with("box-decoration-break: clone; -webkit-box-decoration-break: clone");
+    let outgoing = rules(&cloned, 0);
+    let incoming = rules(&cloned, 1);
+
+    // §5.4, outgoing: a real bottom border, its OUTER edge on the
+    // fragmentainer content edge — not tucked under the last row.
+    assert!(
+        outgoing.iter().any(|y| near(*y, CONTENT_BOTTOM - HALF)),
+        "clone must close the outgoing fragment at {CONTENT_BOTTOM}; got \
+         {outgoing:?}"
+    );
+    assert_eq!(
+        outgoing.len(),
+        rules(&sliced, 0).len() + 1,
+        "the bottom border is the ONLY new stroke on the outgoing page; \
+         got {outgoing:?}"
+    );
+
+    // §5.4, incoming: the top border repeats.
+    assert!(
+        incoming.iter().any(|y| near(*y, CONTENT_TOP + HALF)),
+        "clone must re-wrap the incoming fragment at {CONTENT_TOP}; got \
+         {incoming:?}"
+    );
+
+    // §5.3: that border is drawn *inside* the fragmentainer, so the
+    // content box starts 0.75pt lower — every row rule on the incoming
+    // page shifts down by exactly one border width.
+    let sliced_incoming = rules(&sliced, 1);
+    for y in &sliced_incoming {
+        assert!(
+            incoming.iter().any(|c| near(*c, y + 0.75)),
+            "every slice rule at {y} must reappear 0.75pt lower under \
+             clone; got {incoming:?}"
+        );
+    }
+
+    // Both fragments are closed boxes: their side borders are inset by
+    // half a border width at BOTH ends, where slice ran them flush into
+    // the cut.
+    let outgoing_sides = side_borders(&stroked_segments(&cloned, 0));
+    assert_eq!(outgoing_sides.len(), 2, "got {outgoing_sides:?}");
+    for s in &outgoing_sides {
+        assert!(
+            near(s.y_max(), CONTENT_BOTTOM - HALF),
+            "the outgoing box closes at the fragmentainer edge; got {s:?}"
+        );
+    }
+    let incoming_sides = side_borders(&stroked_segments(&cloned, 1));
+    assert_eq!(incoming_sides.len(), 2, "got {incoming_sides:?}");
+    for s in &incoming_sides {
+        assert!(
+            near(s.y_min(), CONTENT_TOP + HALF),
+            "the incoming box opens at the fragmentainer edge; got {s:?}"
+        );
+    }
+}

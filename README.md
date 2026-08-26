@@ -20,7 +20,7 @@ Built in Rust for server-side workloads where memory footprint and startup time 
 ## Features
 
 - HTML/CSS to PDF conversion with automatic page splitting
-- CSS pagination control (`break-before`, `break-after`, `break-inside`, orphans/widows)
+- CSS pagination control (`break-before`, `break-after`, `break-inside`, `box-decoration-break`, orphans/widows)
 - CSS Generated Content for Paged Media (page counters, running headers/footers, margin boxes)
 - Template engine with JSON data binding (MiniJinja)
 - Image embedding (PNG / JPEG / GIF)

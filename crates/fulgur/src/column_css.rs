@@ -38,7 +38,7 @@ use cssparser::{
     color::{parse_hash_color, parse_named_color},
 };
 
-use crate::draw_primitives::{BreakAfter, BreakBefore, BreakInside};
+use crate::draw_primitives::{BoxDecorationBreak, BreakAfter, BreakBefore, BreakInside};
 use crate::units::F32Units;
 
 // ---------------------------------------------------------------------------
@@ -137,6 +137,17 @@ pub struct ColumnStyleProps {
     /// of line boxes that must be carried into the next fragment. See
     /// [`ColumnStyleProps::orphans`] for the inheritance note.
     pub widows: Option<u32>,
+    /// `box-decoration-break` (CSS Fragmentation 3 §5.4), also accepted
+    /// under its `-webkit-` alias. `None` means the author did not set
+    /// it — consumers use the initial value
+    /// [`BoxDecorationBreak::Slice`].
+    ///
+    /// Not inherited, and unlike `orphans` / `widows` it must not be:
+    /// each box decides for its own fragments. The sparse side-table's
+    /// natural "absent means initial value" reading is therefore already
+    /// the correct one, so there is no equivalent of
+    /// [`inherit_line_break_constraints`] here.
+    pub box_decoration_break: Option<BoxDecorationBreak>,
 }
 
 impl ColumnStyleProps {
@@ -167,6 +178,9 @@ impl ColumnStyleProps {
         if other.widows.is_some() {
             self.widows = other.widows;
         }
+        if other.box_decoration_break.is_some() {
+            self.box_decoration_break = other.box_decoration_break;
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -178,6 +192,7 @@ impl ColumnStyleProps {
             && self.page.is_none()
             && self.orphans.is_none()
             && self.widows.is_none()
+            && self.box_decoration_break.is_none()
     }
 }
 
@@ -486,6 +501,22 @@ fn parse_break_inside_value<'i>(
     }
 }
 
+/// Parse the value side of `box-decoration-break` (CSS Fragmentation 3
+/// §5.4): the two keywords `slice` and `clone`. Anything else — including
+/// the `-webkit-` era's `-webkit-box-decoration-break: clone` written with
+/// a vendor-prefixed *value*, which never existed — drops the declaration
+/// so a sibling `slice`/`clone` in the same block still applies.
+fn parse_box_decoration_break_value<'i>(
+    input: &mut Parser<'i, '_>,
+) -> Result<BoxDecorationBreak, ParseError<'i, ()>> {
+    let ident = input.expect_ident()?.clone();
+    match ident.as_ref().to_ascii_lowercase().as_str() {
+        "slice" => Ok(BoxDecorationBreak::Slice),
+        "clone" => Ok(BoxDecorationBreak::Clone),
+        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+    }
+}
+
 /// Parse the value side of `orphans` / `widows` (CSS Fragmentation 3
 /// §4.4): a single `<integer>` that must be **positive**.
 ///
@@ -676,6 +707,17 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
         } else if name.eq_ignore_ascii_case("widows") {
             if let Ok(v) = input.parse_entirely(parse_line_count_value) {
                 self.props.widows = Some(v);
+            }
+        } else if name.eq_ignore_ascii_case("box-decoration-break")
+            || name.eq_ignore_ascii_case("-webkit-box-decoration-break")
+        {
+            // The `-webkit-` alias is treated as the same property rather
+            // than a separate one: authors still ship both declarations as
+            // a pair, and source order between them is meaningless when
+            // they always carry the same value. Folding them here means a
+            // block writing only the prefixed form still works.
+            if let Ok(v) = input.parse_entirely(parse_box_decoration_break_value) {
+                self.props.box_decoration_break = Some(v);
             }
         } else {
             // Unknown property — discard its value tokens silently.
@@ -1230,6 +1272,81 @@ mod tests {
         let rules = parse_stylesheet(".keep { break-inside: avoid; }");
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].props.break_inside, Some(BreakInside::Avoid));
+    }
+
+    // -------- box-decoration-break (css-break-3 §5.4) --------
+
+    #[test]
+    fn parse_box_decoration_break_keywords() {
+        assert_eq!(
+            parse_declaration_block("box-decoration-break: clone").box_decoration_break,
+            Some(BoxDecorationBreak::Clone)
+        );
+        assert_eq!(
+            parse_declaration_block("box-decoration-break: slice").box_decoration_break,
+            Some(BoxDecorationBreak::Slice)
+        );
+        assert_eq!(
+            parse_declaration_block("BOX-DECORATION-BREAK: CLONE").box_decoration_break,
+            Some(BoxDecorationBreak::Clone),
+            "property and value are both ASCII case-insensitive"
+        );
+    }
+
+    /// The `-webkit-` alias folds onto the same field. Authors ship the
+    /// pair, so a block writing only the prefixed form still has to work.
+    #[test]
+    fn parse_webkit_box_decoration_break_is_the_same_property() {
+        assert_eq!(
+            parse_declaration_block("-webkit-box-decoration-break: clone").box_decoration_break,
+            Some(BoxDecorationBreak::Clone)
+        );
+        let pair = parse_declaration_block(
+            "box-decoration-break: clone; -webkit-box-decoration-break: clone",
+        );
+        assert_eq!(pair.box_decoration_break, Some(BoxDecorationBreak::Clone));
+    }
+
+    #[test]
+    fn parse_box_decoration_break_invalid_value_is_silently_dropped() {
+        assert_eq!(
+            parse_declaration_block("box-decoration-break: banana").box_decoration_break,
+            None
+        );
+        assert_eq!(
+            parse_declaration_block("box-decoration-break: clone slice").box_decoration_break,
+            None,
+            "the value is a single keyword, so a trailing token invalidates it"
+        );
+        // A dropped declaration must not take its siblings with it.
+        let props = parse_declaration_block("box-decoration-break: banana; break-inside: avoid");
+        assert_eq!(props.break_inside, Some(BreakInside::Avoid));
+    }
+
+    #[test]
+    fn parse_box_decoration_break_via_selector() {
+        let rules = parse_stylesheet(".tbl { box-decoration-break: clone; }");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].props.box_decoration_break,
+            Some(BoxDecorationBreak::Clone)
+        );
+    }
+
+    /// Source order wins, per this module's cascade note — including
+    /// across the prefixed / unprefixed spelling.
+    #[test]
+    fn box_decoration_break_merge_is_last_wins() {
+        let mut base = parse_declaration_block("box-decoration-break: clone");
+        base.merge(parse_declaration_block(
+            "-webkit-box-decoration-break: slice",
+        ));
+        assert_eq!(base.box_decoration_break, Some(BoxDecorationBreak::Slice));
+
+        // An absent value never clobbers a present one.
+        let mut kept = parse_declaration_block("box-decoration-break: clone");
+        kept.merge(parse_declaration_block("break-inside: avoid"));
+        assert_eq!(kept.box_decoration_break, Some(BoxDecorationBreak::Clone));
     }
 
     #[test]

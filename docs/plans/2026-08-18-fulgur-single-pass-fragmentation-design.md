@@ -99,7 +99,7 @@ geometry rule.
 | §5.1 | Layout per varying-size fragmentainer | **limitation** | The one rule that mandates re-layout. Unreachable by theorem clause (3): `F` is uniform, so the trigger never fires. Prescribed behavior: sizes resolve once against the single fragmentainer size — §5.1's own intrinsic-size clause ("assume the size of the first fragmentainer") endorsed literally |
 | §5.2 | Adjoining margins at breaks truncate to zero | **reachable** | Truncation is a vertical adjustment at the break point; pinned by `css_break3_s52_*` |
 | §5.3 | Content box fills remaining fragmentainer extent before a break | **reachable** | Pure fragment-height bookkeeping over frozen extents |
-| §5.4 | `box-decoration-break: slice`/`clone` | **paint-only** | Geometry carries `content_lead_in`/`lead_out` for slice semantics; `clone` needs a VRT fixture, not the geometry table |
+| §5.4 | `box-decoration-break: slice`/`clone` | **reachable** | Geometry carries `content_lead_in`/`lead_out` for slice semantics. `clone` was scoped here as paint-only; that was wrong — §5.3's parenthetical makes it a layout input too (each fragment's content box must leave room for its own cloned decoration), so `PaginationGeometry::decoration_clone` now travels with the table and the walk reserves the extent |
 | §5.4.1 | Joining boxes for `slice` | **paint-only** | Background compositing across reassembled fragments |
 | §5.5 | Transforms/positioning interplay | **paint-only** | Per-fragment graphical effects; §5.5 explicitly permits UA latitude for absolutely-positioned boxes spanning breaks |
 

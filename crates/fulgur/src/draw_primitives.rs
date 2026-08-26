@@ -283,6 +283,30 @@ pub enum BreakInside {
     Avoid,
 }
 
+/// `box-decoration-break` (CSS Fragmentation 3 §5.4).
+///
+/// - [`BoxDecorationBreak::Slice`] (the initial value): "the element is
+///   rendered with no breaks present, and then sliced by the breaks
+///   afterward" — no border and no padding is inserted at a break, and
+///   `border-radius` / `border-image` / the background apply to the
+///   geometry of the whole, unbroken box.
+/// - [`BoxDecorationBreak::Clone`]: "each box fragment is independently
+///   wrapped with the border, padding, and margin", each with its own
+///   radii, shadow and background. Per §5.3 this also costs *layout*:
+///   a fragment's content box has to leave room for the cloned
+///   decoration inside the fragmentainer rather than overflowing it.
+///
+/// `stylo 0.8.0` gates this longhand to its gecko engine and blitz uses
+/// the servo engine, so it never reaches `ComputedValues`. fulgur reads
+/// it out of the stylesheet source in [`crate::column_css`], next to the
+/// other fragmentation properties with the same problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxDecorationBreak {
+    #[default]
+    Slice,
+    Clone,
+}
+
 /// Axis-aligned rectangle used to describe PDF link activation areas.
 ///
 /// Coordinates are in PDF points in the Krilla surface coordinate space
