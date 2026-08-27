@@ -232,3 +232,130 @@ fn a_straddling_grid_row_never_paints_below_the_fragmentainer() {
         "every cell should open whole at the top of page 2; got {cells:?}"
     );
 }
+
+/// A third defect from the same neighbourhood, filed separately as
+/// `todo/FULGUR_FLEX_GRID_CONTENT_LOSS.md`: a flex / grid child whose
+/// first fragment is too short for its first line box lost that content
+/// outright. Both fragments were still painted, so the symptom was an
+/// empty two-page frame — a silently wrong document rather than a
+/// visibly broken one.
+///
+/// Mechanism. A single-line inline root never reached the line splitter
+/// (`fragment_inline_child` returned early on `len() <= 1`), so a grid
+/// item pinned at its container's floor — which §3.2 forbids pushing —
+/// fell through to R7b strip-slicing. Slicing is the right treatment for
+/// a monolithic *box* and the wrong one for a box carrying a line: a
+/// line box is itself monolithic, so cutting the box in two leaves the
+/// line belonging to neither half, and `render`'s line partition, which
+/// assigns whole lines to fragments by height budget, finds no fragment
+/// that can hold it and emits none.
+///
+/// The window is a few pixels wide and moves with the box's decoration,
+/// so this sweeps rather than spot-checks — acceptance criterion 3 of
+/// the report. `display: block` is the control: it never reproduced,
+/// because a block child may be pushed whole.
+#[test]
+fn a_flex_or_grid_child_never_loses_its_only_line_to_a_short_strip() {
+    // `.c` is 22px tall: 1px border + 3px padding + a 14px line box,
+    // both edges. The reported window was 247..251 for this decoration;
+    // stripping the decoration widened it to 248..259. The sweep covers
+    // every reported window at 1px resolution with room either side.
+    for display in ["grid", "flex", "block"] {
+        for decoration in [
+            "border: 1px solid #000; padding: 3px",
+            "padding: 3px",
+            "border: 1px solid #000",
+            "",
+        ] {
+            for spacer in 243..=275 {
+                let html = format!(
+                    r#"<!doctype html><html><head><style>
+                         {PAGE_CSS}
+                         body {{ font: 10px/1.4 sans-serif }}
+                         .spacer {{ height: {spacer}px }}
+                         .tbl {{ display: {display} }}
+                         .c {{ {decoration} }}
+                       </style></head><body>
+                         <div class="spacer">spacer</div>
+                         <div class="tbl"><div class="c">alpha one alpha two</div></div>
+                       </body></html>"#
+                );
+                let out = layout(&html);
+                let label = format!("display:{display} decoration:{decoration:?} spacer:{spacer}");
+
+                // `.c` is its own inline root, so it is the node the
+                // paragraph for "alpha ..." is keyed by — a precise
+                // handle, and one that fails loudly if the box ever
+                // stops resolving a paragraph at all. Width would not do
+                // here: constraining `.c` to a distinctive width would
+                // wrap the text and destroy the single-line shape this
+                // test is about.
+                let cell_id = out
+                    .drawables
+                    .paragraphs
+                    .iter()
+                    .find(|(_, p)| {
+                        p.lines.iter().flat_map(|l| l.items.iter()).any(|i| {
+                            matches!(
+                                i,
+                                fulgur::paragraph::LineItem::Text(t) if t.text.contains("alpha")
+                            )
+                        })
+                    })
+                    .map(|(id, _)| *id);
+                let Some(cell) = cell_id.and_then(|id| out.geometry.get(&id)) else {
+                    panic!("{label}: the cell must resolve a paragraph and appear in geometry");
+                };
+                let lead_in = cell.content_lead_in.to_f32();
+                let lead_out = cell.content_lead_out.to_f32();
+                let last = cell.fragments.len() - 1;
+                let budget = |pos: usize, h: f32| {
+                    let mut h = h;
+                    if pos == 0 {
+                        h -= lead_in;
+                    }
+                    if pos == last {
+                        h -= lead_out;
+                    }
+                    h
+                };
+                let best = cell
+                    .fragments
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, f)| budget(pos, f.height.to_f32()))
+                    .fold(f32::MIN, f32::max);
+                assert!(
+                    best >= 14.0 - 0.51,
+                    "{label}: some fragment must have room for the 14px line box, \
+                     else `render` drops it and the box paints empty; \
+                     best budget={best}, lead_in={lead_in}, lead_out={lead_out}, \
+                     frags={:?}",
+                    cell.fragments
+                );
+
+                // And nothing may hang past the fragmentainer while
+                // doing it — the `252` row of the report, where the
+                // surviving line was rebased into the page margin.
+                //
+                // The slack is `OVERSIZE_QUANTIZATION_TOLERANCE_PX`, the
+                // 1px the walk deliberately allows so Stylo/Taffy integer
+                // rounding of a CSS `<length>` does not trip the slicing
+                // gate. It is load-bearing here: `border: 1px` with no
+                // padding puts the box's bottom edge exactly 1px past the
+                // strip at spacer 245, `needs_leaf_slicing` declines by
+                // that tolerance, and the box is emitted whole. That
+                // predates this fix and is on a path it does not touch —
+                // the line fits the strip there, so the guard added to
+                // `fragment_inline_child` returns `None` and the walk is
+                // byte-for-byte what it was.
+                for f in &cell.fragments {
+                    assert!(
+                        f.y.to_f32() + f.height.to_f32() <= PAGE_H + 1.01,
+                        "{label}: fragment escapes the {PAGE_H}px content box: {f:?}"
+                    );
+                }
+            }
+        }
+    }
+}

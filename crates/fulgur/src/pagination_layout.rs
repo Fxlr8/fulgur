@@ -592,7 +592,7 @@ fn fragment_inline_child(
     } else {
         all_line_metrics
     };
-    if line_metrics.len() <= 1 {
+    if line_metrics.is_empty() {
         return None;
     }
 
@@ -608,6 +608,41 @@ fn fragment_inline_child(
     } else {
         frame.page_start_y
     };
+
+    // One line has no split point *inside* it, so the splitter normally
+    // has nothing to do and the box goes back to the generic branch,
+    // whose height comes from Taffy and is exact. There is one shape
+    // where the splitter is still the right owner: the strip cannot hold
+    // that line, and the box cannot be pushed whole either because a
+    // flex / grid item is pinned at its container's floor (§3.2). The
+    // break css-break-3 §4.1 leaves available is the one *before* the
+    // line, and `scan_split_points` already takes it (63901d43).
+    //
+    // Falling through to the generic branch there means R7b strip-
+    // slicing, which is right for a monolithic *box* and wrong for one
+    // carrying a line. A line box is itself monolithic: cut the box in
+    // two and the line belongs to neither half, `render`'s line
+    // partition finds no fragment whose budget can hold it, and the
+    // content leaves the document — an empty two-page frame
+    // (`todo/FULGUR_FLEX_GRID_CONTENT_LOSS.md`).
+    //
+    // The three conditions are the negation of "nothing to do here":
+    // the box is not pushable by the ordinary rule, the strip really
+    // cannot hold `lead_in` plus the line, and it is not already at a
+    // page top (`scan_split_points`' own guard against advancing
+    // forever). A single line taller than a whole fragmentainer stays
+    // with the slicer, which is fulgur's standing treatment of content
+    // no page can hold.
+    if line_metrics.len() == 1 {
+        let first_line_h = line_metrics[0].1 - line_metrics[0].0;
+        let pushable = break_decision(child_top_on_page, box_total_h, overflow_floor, cx.page_h)
+            == BreakDecision::PushToNextPage;
+        let line_fits_here =
+            child_top_on_page + lead_in + first_line_h <= cx.page_h + OVERFLOW_EPS_PX;
+        if pushable || line_fits_here || child_top_on_page <= 0.0 || box_total_h > cx.page_h {
+            return None;
+        }
+    }
     if break_decision(child_top_on_page, box_total_h, overflow_floor, cx.page_h)
         == BreakDecision::PushToNextPage
     {
