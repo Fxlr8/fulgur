@@ -702,15 +702,23 @@ fn main() {
                 iso
             };
 
-            let pdf = if data.is_some() {
-                engine.render_template()
+            let (pdf, warnings) = if data.is_some() {
+                engine.render_template().map(|pdf| (pdf, Vec::new()))
             } else {
-                engine.render(&input_content)
+                engine.render_with_warnings(&input_content)
             }
             .unwrap_or_else(|e| {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             });
+
+            // Warnings never abort the render: the PDF above is still the
+            // best fulgur can do for this input. They go to stderr, before
+            // the bytes are written, so a `-o -` consumer sees them even if
+            // it is piping the PDF straight into something else.
+            for w in &warnings {
+                eprintln!("Warning: {w}");
+            }
 
             if to_stdout {
                 #[cfg(unix)]

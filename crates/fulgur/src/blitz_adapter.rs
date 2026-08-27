@@ -870,6 +870,73 @@ fn is_flex_or_grid_container(node: &Node) -> bool {
 /// containers are flex / grid items, which the spec excludes from
 /// class A break points — the `page` property does not apply to them
 /// and implicit page-name forced breaks should not fire among them.
+/// Every element in `doc` whose computed `display` is `contents`, named
+/// well enough for a diagnostic (`div#id`, `span.class`, or the bare tag).
+///
+/// `display: contents` is **not rendered correctly** by the pinned
+/// blitz-dom 0.2.4, and the failure is silent. Box construction is
+/// supposed to hoist such an element's children into its parent's
+/// `layout_children`; measured against 0.2.4 it drops them instead, so
+/// `<div style="display:contents"><p>A</p></div><p>B</p>` lays `body` out
+/// with `layout_children = [B]` and `A` never reaches Taffy, `Drawables`
+/// or the PDF. Upstream knows: `layout/construct.rs` carries both
+/// `// TODO: fix display:contents` and `// TODO: make "all_inline"
+/// detection work in the presence of display:contents nodes`.
+///
+/// The second TODO is the reason this reports every occurrence rather
+/// than only the ones that lose content. Where children *do* survive, the
+/// containing block is misclassified as an inline root — a `<p>` inside a
+/// `display: contents` wrapper comes out as a 35px-wide inline instead of
+/// a full-width block — so "rendered" is not the same as "rendered
+/// correctly" for any of them.
+///
+/// fulgur cannot fix this from outside without reimplementing upstream box
+/// construction, so it reports it: see [`crate::RenderWarning`] and
+/// `todo/FULGUR_PAGINATION_BUG.md` §4.5.
+pub fn collect_display_contents_elements(doc: &HtmlDocument) -> Vec<String> {
+    use ::style::values::specified::box_::DisplayInside;
+    let base = &**doc;
+    let mut found = Vec::new();
+    let mut stack = vec![base.root_node().id];
+    // Iterative, and bounded by the node count rather than by recursion
+    // depth: this runs on every render, including adversarial input.
+    while let Some(id) = stack.pop() {
+        let Some(node) = base.get_node(id) else {
+            continue;
+        };
+        stack.extend(node.children.iter().copied());
+        let Some(elem) = node.element_data() else {
+            continue;
+        };
+        let is_contents = node
+            .primary_styles()
+            .is_some_and(|s| s.clone_display().inside() == DisplayInside::Contents);
+        if !is_contents {
+            continue;
+        }
+        let tag = elem.name.local.to_string();
+        // Anonymous boxes Stylo synthesizes are not author markup and
+        // would only be noise in a diagnostic aimed at the document.
+        if tag.is_empty() {
+            continue;
+        }
+        let label = match (
+            elem.attr(blitz_dom::LocalName::from("id")),
+            elem.attr(blitz_dom::LocalName::from("class"))
+                .and_then(|c| c.split_whitespace().next()),
+        ) {
+            (Some(id), _) => format!("{tag}#{id}"),
+            (None, Some(class)) => format!("{tag}.{class}"),
+            (None, None) => tag,
+        };
+        found.push(label);
+    }
+    // `stack.pop()` walks siblings back-to-front; sort so the diagnostic is
+    // stable across runs (CLAUDE.md: deterministic output).
+    found.sort();
+    found
+}
+
 pub fn is_flex_or_grid_container_node(node: &Node) -> bool {
     use ::style::values::specified::box_::DisplayInside;
     node.primary_styles().is_some_and(|s| {

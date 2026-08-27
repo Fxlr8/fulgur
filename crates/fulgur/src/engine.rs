@@ -55,6 +55,49 @@ pub struct LayoutOutput {
     pub geometry: crate::pagination_layout::PaginationGeometryTable,
 }
 
+/// A condition fulgur could not render faithfully, reported rather than
+/// failed on.
+///
+/// A warning never aborts a render: the PDF is still produced, and is still
+/// the best fulgur can do for the input. It exists because the alternative
+/// on this path is silence — the document renders, exits 0, and is simply
+/// missing content.
+///
+/// The library never prints these. `crates/fulgur` must not touch fd 1
+/// under any circumstance (CLAUDE.md), and a library writing to fd 2 from
+/// under a multi-threaded binding is barely better, so warnings travel out
+/// through [`Engine::render_with_warnings`] and the caller decides. The CLI
+/// prints them to stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RenderWarning {
+    /// The document uses `display: contents`, which the pinned blitz-dom
+    /// 0.2.4 does not construct boxes for correctly. Carries one label per
+    /// occurrence (`div#id`, `span.class`, or the bare tag), sorted.
+    ///
+    /// See [`crate::blitz_adapter::collect_display_contents_elements`] for
+    /// the measured behaviour and the upstream TODOs, and
+    /// `todo/FULGUR_PAGINATION_BUG.md` §4.5.
+    DisplayContentsUnsupported { elements: Vec<String> },
+}
+
+impl std::fmt::Display for RenderWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenderWarning::DisplayContentsUnsupported { elements } => {
+                write!(
+                    f,
+                    "`display: contents` is not supported and its children may be \
+                     dropped from the output: {}. Replace the wrapper with a plain \
+                     block, or remove it and let its children sit in the parent \
+                     directly.",
+                    elements.join(", ")
+                )
+            }
+        }
+    }
+}
+
 /// Full per-pass output of [`Engine::layout_to_drawables`] — a superset of the
 /// public [`LayoutOutput`] holding every side-channel `render::render_v2`
 /// needs. `fonts` / `system_fonts` are intentionally absent: both are re-derived
@@ -70,6 +113,7 @@ struct LayoutArtifacts {
     implicit_href_map: BTreeMap<usize, String>,
     collected_anchor_map: AnchorMap,
     needs_pass_two: bool,
+    warnings: Vec<RenderWarning>,
 }
 
 impl Engine {
@@ -121,6 +165,23 @@ impl Engine {
     /// `CounterPass::with_anchor_map` substitute real values instead of
     /// fixed-width placeholders.
     pub fn render(&self, html: &str) -> Result<Vec<u8>> {
+        self.render_with_warnings(html).map(|(pdf, _)| pdf)
+    }
+
+    /// [`render`](Engine::render), plus whatever fulgur could not render
+    /// faithfully.
+    ///
+    /// The PDF is identical either way — a [`RenderWarning`] never changes
+    /// the output or aborts the render. It reports a condition whose only
+    /// other symptom is silence: the document renders, the process exits 0,
+    /// and content is missing. Callers that surface warnings turn that into
+    /// something a user can act on; `render` drops them.
+    ///
+    /// Warnings are collected once per render, from the **final** pass — on
+    /// the 2-pass `target-*` path pass 1's are discarded, since both passes
+    /// lay out the same document and would otherwise report every warning
+    /// twice.
+    pub fn render_with_warnings(&self, html: &str) -> Result<(Vec<u8>, Vec<RenderWarning>)> {
         // Pass 1: layout only. `layout_to_drawables` parses the full GCPM
         // context (AssetBundle, `<link>`-loaded stylesheets, inline `<style>`
         // blocks) and reports `needs_pass_two` based on that parsed view, so
@@ -132,7 +193,10 @@ impl Engine {
         // 2-pass loop; the final PDF serialization happens exactly once.
         let pass1 = self.layout_to_drawables(html, None)?;
         if !pass1.needs_pass_two {
-            return self.render_artifacts(pass1, None);
+            let warnings = pass1.warnings.clone();
+            return self
+                .render_artifacts(pass1, None)
+                .map(|pdf| (pdf, warnings));
         }
         // Pass 2: re-lay-out with the pass-1 AnchorMap so `target-*` resolvers
         // substitute resolved values instead of fixed-width placeholders, then
@@ -142,7 +206,9 @@ impl Engine {
             ..
         } = pass1;
         let pass2 = self.layout_to_drawables(html, Some(&anchor_map))?;
+        let warnings = pass2.warnings.clone();
         self.render_artifacts(pass2, Some(&anchor_map))
+            .map(|pdf| (pdf, warnings))
     }
 
     /// Run the full parse → style → layout → convert pipeline for a single
@@ -501,6 +567,18 @@ impl Engine {
 
         crate::blitz_adapter::resolve(&mut doc);
 
+        // Read straight after `resolve()`, which is where the computed
+        // `display` first exists. Nothing downstream can detect this: by the
+        // time the walk runs, an element that lost its children is
+        // indistinguishable from one that never had any.
+        let mut warnings = Vec::new();
+        let display_contents = crate::blitz_adapter::collect_display_contents_elements(&doc);
+        if !display_contents.is_empty() {
+            warnings.push(RenderWarning::DisplayContentsUnsupported {
+                elements: display_contents,
+            });
+        }
+
         // The `@page` size / margin and resolved content box were computed
         // earlier (right after `extract_gcpm_from_inline_styles`) so the
         // first `resolve()` above already cascaded against the corrected
@@ -743,6 +821,7 @@ impl Engine {
             implicit_href_map,
             collected_anchor_map,
             needs_pass_two: needs_anchor_map_for_pass_two,
+            warnings,
         })
     }
 
@@ -2149,5 +2228,93 @@ mod tests {
             .render(html)
             .expect("bookmarks + target-refs render should succeed");
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `todo/FULGUR_PAGINATION_BUG.md` §4.5. `display: contents` is broken
+    /// in the pinned blitz-dom 0.2.4 — box construction is meant to hoist
+    /// such an element's children into its parent's `layout_children` and
+    /// drops them instead, so the content never reaches Taffy, `Drawables`
+    /// or the PDF. Measured directly against Blitz:
+    ///
+    /// ```text
+    /// display:contents   body layout_children = [7]      <- hoisted <p> missing
+    /// control            body layout_children = [4, 7]
+    /// ```
+    ///
+    /// fulgur cannot fix that without reimplementing upstream box
+    /// construction, so it must at least stop being silent about it: the
+    /// render succeeds, exits 0, and is missing content, which is the worst
+    /// failure mode for a document generator.
+    #[test]
+    fn display_contents_renders_but_warns() {
+        let html = r#"<!doctype html><html><body>
+            <div id="hdr" style="display:contents"><p>ALPHA</p></div>
+            <p>BRAVO</p>
+        </body></html>"#;
+        let (pdf, warnings) = Engine::builder()
+            .build()
+            .render_with_warnings(html)
+            .expect("a warning must not abort the render");
+
+        assert!(
+            pdf.starts_with(b"%PDF"),
+            "the PDF is still produced — a warning reports, it does not fail"
+        );
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::DisplayContentsUnsupported {
+                elements: vec!["div#hdr".to_string()],
+            }],
+            "the wrapper must be named well enough for a user to find it"
+        );
+        assert!(
+            warnings[0].to_string().contains("display: contents"),
+            "the rendered message must name the property; got {}",
+            warnings[0]
+        );
+    }
+
+    /// The other half: no `display: contents`, no warning. Without this a
+    /// detector that matched too broadly would make the channel noise, and
+    /// the report is explicit that fulgur's existing stderr output is
+    /// already ignored for exactly that reason.
+    #[test]
+    fn an_ordinary_document_produces_no_warnings() {
+        let html = r#"<!doctype html><html><body>
+            <div id="hdr"><p>ALPHA</p></div>
+            <p style="display:block">BRAVO</p>
+            <span style="display:inline">CHARLIE</span>
+            <div style="display:flex"><div>DELTA</div></div>
+            <div style="display:none">ECHO</div>
+        </body></html>"#;
+        let (_, warnings) = Engine::builder()
+            .build()
+            .render_with_warnings(html)
+            .expect("render");
+        assert!(
+            warnings.is_empty(),
+            "no warning is due for a document that uses none of it; got {warnings:?}"
+        );
+    }
+
+    /// `render` and `render_with_warnings` must produce the same bytes —
+    /// the warning channel is observation only, and a future change that
+    /// let it perturb layout would be caught here.
+    #[test]
+    fn warnings_do_not_change_the_rendered_bytes() {
+        let html = r#"<!doctype html><html><body>
+            <div style="display:contents"><p>ALPHA</p></div>
+            <p>BRAVO</p>
+        </body></html>"#;
+        let engine = Engine::builder().build();
+        let plain = engine.render(html).expect("render");
+        let (with_warnings, warnings) = engine
+            .render_with_warnings(html)
+            .expect("render_with_warnings");
+        assert!(!warnings.is_empty(), "fixture must actually warn");
+        assert_eq!(
+            plain, with_warnings,
+            "the two entry points must serialize identically"
+        );
     }
 }
