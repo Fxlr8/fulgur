@@ -467,6 +467,24 @@ fn fragment_zero_height_child(
             });
     }
 
+    // A wrapper whose only content is a running element is itself
+    // zero-height — `position: running()` is rewritten to `display: none`
+    // — so this branch is where such a wrapper lands, and it does not
+    // descend. Find the markers and nothing else; see
+    // [`record_running_markers`] for why the descent is that narrow.
+    record_running_markers(
+        geometry,
+        SubtreeRecordCtx {
+            doc: cx.doc,
+            running: cx.running,
+        },
+        child_id,
+        frame.page,
+        frame.cursor_y,
+        frame.x_in_body + layout.location.x,
+        0,
+    );
+
     if matches!(
         break_props.break_after,
         Some(crate::draw_primitives::BreakAfter::Page)
@@ -2423,6 +2441,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 let (np, nc) = slice_oversized_leaf(
                     &mut self.geometry,
                     cx.doc,
+                    cx.running,
                     child_id,
                     frag_x,
                     child_w,
@@ -2477,7 +2496,10 @@ impl<'a> PaginationLayoutTree<'a> {
             // this geometry today read only `page_index`.
             record_subtree_descendants(
                 &mut self.geometry,
-                cx.doc,
+                SubtreeRecordCtx {
+                    doc: cx.doc,
+                    running: cx.running,
+                },
                 child_id,
                 frame.page,
                 frame.cursor_y,
@@ -2564,6 +2586,89 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
     false
 }
 
+/// The two inputs every subtree-recording walk carries unchanged through
+/// its recursion: the document it reads layout from, and the running-element
+/// store it needs in order to recognise a `position: running()` node.
+///
+/// Bundled rather than passed as a pair because both walks below already sit
+/// at clippy's argument threshold, and because it makes the recursion sites
+/// read as "same context, different position" — which is exactly what they
+/// are. `Copy`, so recursing costs nothing.
+#[derive(Clone, Copy)]
+struct SubtreeRecordCtx<'a> {
+    doc: &'a BaseDocument,
+    running: Option<&'a crate::gcpm::running::RunningElementStore>,
+}
+
+/// Record `position: running()` markers for every running instance under
+/// `parent_id`, and nothing else.
+///
+/// The zero-height child branch ([`fragment_zero_height_child`]) does not
+/// descend: a box with no height has no flow content to place, so walking
+/// it would only add geometry entries for descendants that have none
+/// today — and `render`'s v2 dispatcher keys off exactly that table, so
+/// growing it is not a free change.
+///
+/// Running elements are the one thing that must be found down there
+/// anyway. They are not flow content: `gcpm::parser::parse_gcpm` rewrites
+/// `position: running(name)` to `display: none`, so a wrapper whose only
+/// child is one is *always* zero-height, which is why the defect reads as
+/// "fails under any in-flow wrapper, zero-height or not". Their marker
+/// carries no extent — `collect_running_element_states` reads only
+/// `page_index` — so recording one cannot move anything that paints.
+///
+/// Bails at [`crate::MAX_DOM_DEPTH`], like every other subtree walk here.
+fn record_running_markers(
+    geometry: &mut PaginationGeometryTable,
+    ctx: SubtreeRecordCtx<'_>,
+    parent_id: usize,
+    page_index: u32,
+    parent_page_y: f32,
+    parent_x_in_body: f32,
+    depth: usize,
+) {
+    let Some(running) = ctx.running else {
+        return;
+    };
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
+    for child_id in layout_children_of(ctx.doc, parent_id) {
+        let Some(child) = ctx.doc.get_node(child_id) else {
+            continue;
+        };
+        let layout = child.final_layout;
+        let child_y = parent_page_y + layout.location.y;
+        let child_x = parent_x_in_body + layout.location.x;
+        if running.instance_for_node(child_id).is_some() {
+            if child.element_data().is_some() {
+                geometry
+                    .entry(child_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: child_x.as_px(),
+                        y: child_y.as_px(),
+                        width: 0.0_f32.as_px(),
+                        height: 0.0_f32.as_px(),
+                    });
+            }
+            // Nothing below a running element belongs to this flow.
+            continue;
+        }
+        record_running_markers(
+            geometry,
+            ctx,
+            child_id,
+            page_index,
+            child_y,
+            child_x,
+            depth + 1,
+        );
+    }
+}
+
 /// fulgur-s67g Phase 2.5: recursively record fragments for every
 /// visible descendant of a body-direct child, attaching them to the
 /// same `page_index` as the ancestor.
@@ -2587,7 +2692,7 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
 /// introduce.
 fn record_subtree_descendants(
     geometry: &mut PaginationGeometryTable,
-    doc: &BaseDocument,
+    ctx: SubtreeRecordCtx<'_>,
     parent_id: usize,
     page_index: u32,
     parent_page_y: f32,
@@ -2597,6 +2702,8 @@ fn record_subtree_descendants(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
+    let doc = ctx.doc;
+    let running = ctx.running;
     // fulgur-bq6i: anonymous block wrappers live only in
     // `layout_children` — the shared enumeration policy is
     // `layout_children_of`.
@@ -2607,6 +2714,38 @@ fn record_subtree_descendants(
         let layout = child.final_layout;
         let h = layout.size.height;
         let w = layout.size.width;
+        // The third and last of the running-element carve-outs, matching
+        // `fragment_pagination_root`'s in-flow body walk and
+        // `record_subtree_fragments_at_offset`'s absolute-subtree walk
+        // (67ea60c5). `gcpm::parser::parse_gcpm` rewrites
+        // `position: running(name)` to `display: none`, which collapses
+        // the node's Taffy box to zero size — so the zero-size branch
+        // below recurses *past* it without ever recording an entry, and
+        // `collect_running_element_states` cannot map the instance to a
+        // page. The margin box then renders empty with no error.
+        //
+        // This is the arm that covers a running element under an
+        // ordinary in-flow wrapper. The body-direct and
+        // `position: absolute` shapes already worked, which is why the
+        // report reads as "fails under any in-flow wrapper".
+        if running.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
+            if child.element_data().is_some() {
+                geometry
+                    .entry(child_id)
+                    .or_default()
+                    .fragments
+                    .push(Fragment {
+                        page_index,
+                        x: (parent_x_in_body + layout.location.x).as_px(),
+                        y: (parent_page_y + layout.location.y).as_px(),
+                        width: 0.0_f32.as_px(),
+                        height: 0.0_f32.as_px(),
+                    });
+            }
+            // Nothing below a running element belongs to this flow: it is
+            // painted only through its `@page` margin box.
+            continue;
+        }
         // Phase 4 PR 5: zero-size containers (`<tbody>`, `<tr>`,
         // anonymous boxes) carry no paint payload but DO host visible
         // descendants (e.g. table cells) that v2 needs in geometry.
@@ -2617,7 +2756,7 @@ fn record_subtree_descendants(
         if h <= 0.0 && w <= 0.0 {
             record_subtree_descendants(
                 geometry,
-                doc,
+                ctx,
                 child_id,
                 page_index,
                 parent_page_y + layout.location.y,
@@ -2641,7 +2780,7 @@ fn record_subtree_descendants(
             });
         record_subtree_descendants(
             geometry,
-            doc,
+            ctx,
             child_id,
             page_index,
             child_y,
@@ -2718,6 +2857,7 @@ fn needs_leaf_slicing(child_h: f32, child_page_y: f32, page_height_px: f32) -> b
 fn slice_oversized_leaf(
     geometry: &mut PaginationGeometryTable,
     doc: &BaseDocument,
+    running: Option<&crate::gcpm::running::RunningElementStore>,
     id: usize,
     x_in_body: f32,
     w: f32,
@@ -2735,7 +2875,15 @@ fn slice_oversized_leaf(
         width: w.as_px(),
         height: first_slice_h.as_px(),
     });
-    record_subtree_descendants(geometry, doc, id, page_index, cursor_y, x_in_body, depth);
+    record_subtree_descendants(
+        geometry,
+        SubtreeRecordCtx { doc, running },
+        id,
+        page_index,
+        cursor_y,
+        x_in_body,
+        depth,
+    );
     let mut remaining = h - first_slice_h;
     let mut last_slice_h = first_slice_h;
     // fulgur-ezst: a CHILDLESS block whose slicing would exceed
@@ -4232,6 +4380,7 @@ fn fragment_block_subtree(
             let (np, nc) = slice_oversized_leaf(
                 geometry,
                 doc,
+                cx.running,
                 child_id,
                 child_x_in_body,
                 child_w,
@@ -4338,7 +4487,10 @@ fn fragment_block_subtree(
             });
         record_subtree_descendants(
             geometry,
-            doc,
+            SubtreeRecordCtx {
+                doc,
+                running: cx.running,
+            },
             child_id,
             page_index,
             child_page_y,
@@ -6740,7 +6892,7 @@ mod tests {
         let mut geom = PaginationGeometryTable::new();
         // 1600px on an 800px strip from cursor 0: two full slices.
         let (page, cursor) = super::slice_oversized_leaf(
-            &mut geom, &doc, probe, 0.0, 600.0, 1600.0, 0, 0.0, 800.0, 0,
+            &mut geom, &doc, None, probe, 0.0, 600.0, 1600.0, 0, 0.0, 800.0, 0,
         );
         let frags = &geom.get(&probe).expect("probe").fragments;
         assert_eq!(frags.len(), 2, "exact fit slices, no sliver: {frags:?}");
@@ -6771,7 +6923,7 @@ mod tests {
         let probe = find_by_id(&doc, "p").expect("div#p");
         let mut geom = PaginationGeometryTable::new();
         let (page, cursor) = super::slice_oversized_leaf(
-            &mut geom, &doc, probe, 0.0, 600.0, 801.0, 0, 0.0, 800.0, 0,
+            &mut geom, &doc, None, probe, 0.0, 600.0, 801.0, 0, 0.0, 800.0, 0,
         );
         let frags = &geom.get(&probe).expect("probe").fragments;
         assert_eq!(frags.len(), 2, "sliver slice: {frags:?}");
@@ -6803,8 +6955,9 @@ mod tests {
         // the childless collapse's `ceil > MAX_PAGES` gate would not
         // fire).
         let huge = 9_999_999.0_f32;
-        let (page, _) =
-            super::slice_oversized_leaf(&mut geom, &doc, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0);
+        let (page, _) = super::slice_oversized_leaf(
+            &mut geom, &doc, None, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0,
+        );
         let frags = &geom.get(&probe).expect("probe").fragments;
         assert_eq!(page, crate::MAX_PAGES, "capped at MAX_PAGES");
         assert_eq!(
@@ -6825,8 +6978,9 @@ mod tests {
         let probe = find_by_id(&doc, "p").expect("div#p");
         let mut geom = PaginationGeometryTable::new();
         let huge = 9_999_999.0_f32;
-        let (page, cursor) =
-            super::slice_oversized_leaf(&mut geom, &doc, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0);
+        let (page, cursor) = super::slice_oversized_leaf(
+            &mut geom, &doc, None, probe, 0.0, 600.0, huge, 0, 0.0, 800.0, 0,
+        );
         let frags = &geom.get(&probe).expect("probe").fragments;
         assert_eq!(frags.len(), 1, "collapsed to the first slice: {frags:?}");
         assert_eq!(page, 1, "only one page consumed");
@@ -7247,6 +7401,120 @@ h2 { string-set: chapter-title content(text); }
             entry.instance_ids,
             vec![store.instance_for_node(node_id).unwrap()]
         );
+    }
+
+    /// `todo/FULGUR_PAGINATION_BUG.md` §4.6b: a running element under an
+    /// ordinary **in-flow** wrapper never reached geometry, so its margin
+    /// box rendered empty with no error. Body-direct and
+    /// `position: absolute` wrappers already worked (the latter since
+    /// 67ea60c5), which is what made the defect read as "fails under any
+    /// in-flow wrapper, zero-height or not".
+    ///
+    /// The "or not" is the tell: a wrapper whose only child is a running
+    /// element is *always* zero-height, because `parse_gcpm` rewrites
+    /// `position: running(name)` to `display: none`. So two separate
+    /// walkers had to learn the same carve-out — the zero-height branch,
+    /// which does not descend at all, and `record_subtree_descendants`,
+    /// which descends but treated the zero-size running node as a
+    /// container to recurse past rather than a node to record.
+    ///
+    /// Both are covered here, plus the two shapes that already worked, so
+    /// a future narrowing of either carve-out is caught.
+    #[test]
+    fn running_element_under_an_in_flow_wrapper_lands_in_geometry() {
+        use crate::blitz_adapter;
+        use crate::gcpm::parser::parse_gcpm;
+        use std::ops::DerefMut;
+        use std::sync::Arc;
+
+        // Every in-flow wrapper shape the report names. `body-direct` is
+        // the control that already worked. The `position: absolute`
+        // wrapper is deliberately absent: its markers are recorded by
+        // `record_subtree_fragments_at_offset`, which the engine drives
+        // separately from this entry point, and it has its own coverage in
+        // `running_element_nested_in_absolute_subtree_lands_in_geometry_when_display_none`.
+        let bodies = [
+            ("body-direct", r#"<div class="h">H</div><p>B</p>"#),
+            (
+                "zero-height in-flow wrapper",
+                r#"<div><div class="h">H</div></div><p>B</p>"#,
+            ),
+            (
+                "explicit height:0 wrapper",
+                r#"<div style="height:0"><div class="h">H</div></div><p>B</p>"#,
+            ),
+            (
+                "two in-flow wrappers",
+                r#"<div><div><div class="h">H</div></div></div><p>B</p>"#,
+            ),
+            (
+                "flex wrapper",
+                r#"<div style="display:flex"><div class="h">H</div></div><p>B</p>"#,
+            ),
+            (
+                "wrapper with flow content of its own",
+                r#"<div><p>W</p><div class="h">H</div></div><p>B</p>"#,
+            ),
+        ];
+
+        for (label, body) in bodies {
+            let css = "@page { @top-center { content: element(hdr); } } \
+                       .h { position: running(hdr); }";
+            let html = format!(r#"<!DOCTYPE html><html><body>{body}</body></html>"#);
+            let fonts: Vec<Arc<Vec<u8>>> = Vec::new();
+            let gcpm = parse_gcpm(css);
+            let mut doc = blitz_adapter::parse(&html, 600.0, &fonts);
+            let pass_ctx = blitz_adapter::PassContext { font_data: &fonts };
+
+            // Inject `cleaned_css` exactly as `Engine::layout_to_drawables`
+            // does. This is what collapses the running element's Taffy box
+            // to zero size (`parse_gcpm` rewrites `position: running()` to
+            // `display: none`) and so what makes the wrapper zero-height —
+            // without it the node keeps a real box, lands in geometry
+            // through the ordinary path, and the defect does not reproduce.
+            let inject = blitz_adapter::InjectCssPass {
+                css: gcpm.cleaned_css.clone(),
+            };
+            blitz_adapter::apply_single_pass(&inject, &mut doc, &pass_ctx);
+
+            let pass = blitz_adapter::RunningElementPass::new(gcpm.running_mappings.clone());
+            blitz_adapter::apply_single_pass(&pass, &mut doc, &pass_ctx);
+            let store = pass.into_running_store();
+            blitz_adapter::resolve(&mut doc);
+            let column_styles = blitz_adapter::extract_column_style_table(&doc);
+
+            let geometry = run_pass_with_break_and_running(
+                doc.deref_mut(),
+                800.0_f32.as_pt().in_px().to_f32(),
+                &column_styles,
+                &store,
+            );
+
+            let found = geometry
+                .iter()
+                .find(|&(&id, _)| store.instance_for_node(id).is_some());
+            let Some((_, geom)) = found else {
+                panic!(
+                    "{label}: the running element must appear in geometry, else \
+                     `collect_running_element_states` cannot map it to a page and \
+                     the margin box renders empty with no error"
+                );
+            };
+            assert!(
+                geom.fragments.iter().all(|f| f.height.to_f32() == 0.0),
+                "{label}: a running marker carries no extent — it must not \
+                 advance any cursor; frags={:?}",
+                geom.fragments
+            );
+
+            // …and the collector actually surfaces it, which is what the
+            // margin box consumes.
+            let states = collect_running_element_states(&geometry, &store);
+            assert!(
+                states.first().is_some_and(|page| page.contains_key("hdr")),
+                "{label}: page 0 state must carry the `hdr` instance; states={states:?}"
+            );
+        }
     }
 
     /// Regression for the `--css` + hidden-ancestor running-element bug
