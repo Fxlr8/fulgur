@@ -3726,16 +3726,87 @@ fn paragraph_lines_for_page(
         return Some(all_lines.to_vec());
     }
 
-    // fulgur-pgbrk R1: fragment heights describe the BORDER box — the
-    // first carries `content_lead_in`, the last `content_lead_out`
-    // (`box-decoration-break: slice`). This partition is over line
-    // boxes (`ShapedLine::height`), so strip the decoration back out
-    // before accumulating, or every page after the first starts its
-    // slice `lead_in` too late and rebases its baselines by that much.
+    // Preferred path: the fragmenter published the line partition it
+    // actually chose (`PaginationGeometry::line_boundaries`), so use it
+    // verbatim. `reconstruct_line_partition` is a *second* accounting of
+    // the same decision, and its inputs disagree with the fragmenter's —
+    // see that field's doc comment.
     //
-    // Under `box-decoration-break: clone` (§5.4) the box is wrapped
-    // again at every fragment, so *each* fragment carries both — not
-    // just the first and the last.
+    // `line_boundaries.last()` is the fragmenter's total line count, so
+    // requiring it to equal `all_lines.len()` proves the two sides are
+    // talking about the same line vector. Any divergence falls back to
+    // the reconstruction rather than slicing with indices that mean
+    // something else.
+    let (start_idx, end_idx) = if geom.line_boundaries.len() == fragments.len() + 1
+        && geom.line_boundaries.last() == Some(&all_lines.len())
+    {
+        let start_idx = geom.line_boundaries[target_pos];
+        (
+            start_idx,
+            geom.line_boundaries[target_pos + 1].max(start_idx),
+        )
+    } else {
+        reconstruct_line_partition(all_lines, geom, target_pos)
+    };
+    // Rebase by the lines actually left behind, not by the outgoing
+    // fragments' height budgets: when the two disagree the continuation
+    // is lifted off its fragment's content top by the difference, which
+    // for the reported grid case put its first line in the page margin.
+    let consumed: crate::units::Pt = all_lines[..start_idx.min(all_lines.len())]
+        .iter()
+        .map(|l| l.height)
+        .sum();
+
+    if end_idx <= start_idx {
+        return None;
+    }
+
+    let sliced: Vec<crate::paragraph::ShapedLine> = all_lines[start_idx..end_idx]
+        .iter()
+        .cloned()
+        .map(|mut line| {
+            // Rebase paragraph-absolute coords (baseline + inline
+            // image `computed_y`) to fragment-local. Mirror
+            // `ParagraphRender::slice_for_page` exactly.
+            line.baseline -= consumed;
+            for item in &mut line.items {
+                if let crate::paragraph::LineItem::Image(img) = item {
+                    img.computed_y -= consumed;
+                }
+            }
+            line
+        })
+        .collect();
+    Some(sliced)
+}
+
+/// Reconstruct which lines belong to fragment `target_pos` from the
+/// fragment heights alone, for the producers that never published a
+/// partition (a paragraph that declined the line splitter and was
+/// strip-sliced whole).
+///
+/// fulgur-pgbrk R1: fragment heights describe the BORDER box — the first
+/// carries `content_lead_in`, the last `content_lead_out`
+/// (`box-decoration-break: slice`). This partition is over line boxes
+/// (`ShapedLine::height`), so the decoration is stripped back out before
+/// accumulating, or every page after the first would start its slice
+/// `lead_in` too late. Under `box-decoration-break: clone` (§5.4) the
+/// box is wrapped again at every fragment, so *each* one carries both.
+///
+/// This is a best-effort reconstruction, not a source of truth: it
+/// measures lines in a different unit than the fragmenter did (see
+/// [`crate::pagination_layout::PaginationGeometry::line_boundaries`]),
+/// so it can under-count. The last fragment therefore absorbs every
+/// remaining line — css-break-3 §4.4, "the UA may break anywhere in
+/// order to avoid losing content off the edge of the fragmentainer":
+/// overflowing a fragment is a layout blemish, while dropping the tail
+/// is content loss with no later fragment to recover it from.
+fn reconstruct_line_partition(
+    all_lines: &[crate::paragraph::ShapedLine],
+    geom: &crate::pagination_layout::PaginationGeometry,
+    target_pos: usize,
+) -> (usize, usize) {
+    let fragments = &geom.fragments;
     let lead_in = geom.content_lead_in.in_pt();
     let lead_out = geom.content_lead_out.in_pt();
     let last_pos = fragments.len() - 1;
@@ -3770,6 +3841,10 @@ fn paragraph_lines_for_page(
         start_idx += 1;
     }
 
+    if target_pos == last_pos {
+        return (start_idx, all_lines.len());
+    }
+
     let mut end_idx = start_idx;
     let mut accum = crate::units::Pt::ZERO;
     while end_idx < all_lines.len() {
@@ -3780,28 +3855,7 @@ fn paragraph_lines_for_page(
         accum += line_h;
         end_idx += 1;
     }
-
-    if end_idx <= start_idx {
-        return None;
-    }
-
-    let sliced: Vec<crate::paragraph::ShapedLine> = all_lines[start_idx..end_idx]
-        .iter()
-        .cloned()
-        .map(|mut line| {
-            // Rebase paragraph-absolute coords (baseline + inline
-            // image `computed_y`) to fragment-local. Mirror
-            // `ParagraphRender::slice_for_page` exactly.
-            line.baseline -= consumed;
-            for item in &mut line.items {
-                if let crate::paragraph::LineItem::Image(img) = item {
-                    img.computed_y -= consumed;
-                }
-            }
-            line
-        })
-        .collect();
-    Some(sliced)
+    (start_idx, end_idx)
 }
 
 /// Build krilla Metadata from Config.
@@ -5288,6 +5342,7 @@ mod tests {
             content_lead_in: 20.0_f32.as_px(),
             content_lead_out: 10.0_f32.as_px(),
             decoration_clone: false,
+            line_boundaries: Vec::new(),
         };
 
         for page in [0, 1] {
@@ -5307,6 +5362,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `todo/FULGUR_FRAGMENT_BOUNDARY_LINE_LOSS.md`: the fragmenter and
+    /// this partition disagree about how tall a line is. Parley reports
+    /// line coordinates rounded to whole pixels, so a 14.4px line is
+    /// 14px to `collect_inline_line_metrics` — and therefore to the
+    /// split — while `ShapedLine::height` keeps the fractional 10.8pt.
+    /// A fragment budgeted for two of the fragmenter's lines (3px
+    /// lead-in + 28px lines = 31px = 23.25pt) admits only one 10.8pt
+    /// line here, so the reconstruction walks off the end of the last
+    /// fragment and the tail lines are dropped from the document
+    /// entirely — there is no third page to find them on.
+    ///
+    /// With `line_boundaries` published, the fragmenter's own partition
+    /// is used and every line is placed.
+    #[test]
+    fn paragraph_lines_for_page_honours_the_published_line_partition() {
+        let lines = vec![
+            make_line(10.8, 8.1),
+            make_line(10.8, 18.9),
+            make_line(10.8, 29.7),
+            make_line(10.8, 40.5),
+        ];
+        // Two fragments of 31px, 3px of decoration at each end — what
+        // `scan_split_points` emits for this paragraph, splitting after
+        // line 2.
+        let geom = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![make_fragment(0, 31.0), make_fragment(1, 31.0)],
+            is_repeat: false,
+            content_lead_in: 3.0_f32.as_px(),
+            content_lead_out: 3.0_f32.as_px(),
+            decoration_clone: false,
+            line_boundaries: vec![0, 2, 4],
+        };
+
+        let p0 = paragraph_lines_for_page(&lines, &geom, 0, true).expect("page 0");
+        let p1 = paragraph_lines_for_page(&lines, &geom, 1, true).expect("page 1");
+        assert_eq!(p0.len(), 2, "page 0 carries the first two lines");
+        assert_eq!(p1.len(), 2, "page 1 carries the remaining two");
+
+        // The continuation rebases by the height of the lines actually
+        // left behind (2 x 10.8), not by the outgoing fragment's line
+        // budget (21.0) — rebasing by the budget lifted the first
+        // continuation line 10.2pt above the fragment's content top,
+        // i.e. into the page's margin.
+        assert!(
+            (p1[0].baseline - (lines[2].baseline - 21.6_f32.as_pt())).abs() < 0.01_f32.as_pt(),
+            "continuation rebased by the wrong amount: {:?}",
+            p1[0].baseline
+        );
+    }
+
+    /// The guard on the authoritative branch: `line_boundaries` indexes
+    /// the fragmenter's line vector, so it may only be trusted when that
+    /// vector is the one being sliced. A stale or mismatched partition
+    /// falls back to the height reconstruction rather than slicing with
+    /// indices that mean something else.
+    #[test]
+    fn paragraph_lines_for_page_ignores_a_line_partition_of_the_wrong_length() {
+        let lines = vec![make_line(12.0, 9.0), make_line(12.0, 21.0)];
+        let geom = crate::pagination_layout::PaginationGeometry {
+            fragments: vec![make_fragment(0, 16.0), make_fragment(1, 16.0)],
+            is_repeat: false,
+            // Says the paragraph has five lines; it has two.
+            line_boundaries: vec![0, 3, 5],
+            ..Default::default()
+        };
+        let p0 = paragraph_lines_for_page(&lines, &geom, 0, true).expect("page 0");
+        assert_eq!(p0.len(), 1, "fell back to the height reconstruction");
+    }
+
+    /// css-break-3 §4.4 safety net on the fallback path: whatever the
+    /// height reconstruction makes of the earlier fragments, the last
+    /// one absorbs every remaining line. Overflowing a fragment is a
+    /// layout blemish; dropping the tail is content loss with no later
+    /// fragment to recover it from.
+    #[test]
+    fn paragraph_lines_for_page_last_fragment_absorbs_the_tail() {
+        // Four 12pt lines, but the fragments only budget for one each.
+        let lines = vec![
+            make_line(12.0, 9.0),
+            make_line(12.0, 21.0),
+            make_line(12.0, 33.0),
+            make_line(12.0, 45.0),
+        ];
+        let geom = make_geom(vec![make_fragment(0, 16.0), make_fragment(1, 16.0)]);
+        let p0 = paragraph_lines_for_page(&lines, &geom, 0, true).expect("page 0");
+        let p1 = paragraph_lines_for_page(&lines, &geom, 1, true).expect("page 1");
+        assert_eq!(p0.len() + p1.len(), lines.len(), "no line may be dropped");
     }
 
     // --- fragment_consumed_pt ---
@@ -5362,6 +5506,7 @@ mod tests {
             content_lead_in: 20.0_f32.as_px(),
             content_lead_out: 10.0_f32.as_px(),
             decoration_clone: false,
+            line_boundaries: Vec::new(),
         };
         assert_eq!(
             fragment_consumed_pt(&plain, &plain.fragments[1]),

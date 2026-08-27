@@ -143,6 +143,28 @@ pub struct PaginationGeometry {
     /// is an open edge (`slice`) or a real one (`clone`) — see
     /// `render::slice_open_edges`.
     pub decoration_clone: bool,
+    /// The line-box partition [`fragment_inline_root`] actually chose,
+    /// as fragment boundaries: fragment `i` carries lines
+    /// `[line_boundaries[i], line_boundaries[i + 1])`. Length is
+    /// `fragments.len() + 1` when populated, and the last entry is the
+    /// node's total line count; empty for every node that is not a
+    /// line-split inline root.
+    ///
+    /// This exists so consumers do not have to *re-derive* the split.
+    /// The obvious reconstruction — accumulate `frag.height`, subtract
+    /// the decoration, and count `ShapedLine::height` into the
+    /// remainder — is a second, independent accounting of the same
+    /// decision, and the two inputs do not agree: Parley reports line
+    /// coordinates rounded to whole pixels (what
+    /// `collect_inline_line_metrics` and therefore the split are built
+    /// on) while `ShapedLine::height` keeps the fractional line height.
+    /// A 14.4px line reads as 14px to the fragmenter and 10.8pt to the
+    /// consumer, so a two-line fragment budgeted at 21.0pt admits only
+    /// one 10.8pt line — and every line past the *last* fragment's
+    /// budget is dropped from the document entirely, since there is no
+    /// further fragment to carry it
+    /// (`todo/FULGUR_FRAGMENT_BOUNDARY_LINE_LOSS.md`).
+    pub line_boundaries: Vec<usize>,
 }
 
 impl PaginationGeometry {
@@ -4819,6 +4841,11 @@ fn fragment_inline_root(
     let first = *plan.first().expect("scan always emits a final fragment");
     let last = *plan.last().expect("scan always emits a final fragment");
     let entry = geometry.entry(placement.id).or_default();
+    // `line_boundaries` is parallel to `fragments`, so it can only be
+    // published when this call owns the whole vector. A node that
+    // already carries fragments from another producer keeps the empty
+    // vector and its consumers fall back to the height heuristic.
+    let boundaries_align = entry.fragments.is_empty();
     for f in &plan {
         entry.fragments.push(Fragment {
             page_index: f.page_index,
@@ -4827,6 +4854,18 @@ fn fragment_inline_root(
             width: placement.width.as_px(),
             height: f.height.as_px(),
         });
+    }
+    if boundaries_align {
+        entry.line_boundaries = plan
+            .iter()
+            .map(|f| f.start_line)
+            .chain(std::iter::once(input.line_metrics.len()))
+            .collect();
+    } else {
+        // Whatever was there described a different fragment vector.
+        // Clearing beats leaving a partition that might still pass the
+        // consumer's length check while meaning something else.
+        entry.line_boundaries.clear();
     }
     entry.content_lead_in = input.lead_in.as_px();
     entry.content_lead_out = input.lead_out.as_px();
@@ -4870,6 +4909,9 @@ struct InlineFragmentPlan {
     y: f32,
     /// Border-box height of this slice (see [`fragment_inline_root`]).
     height: f32,
+    /// Index of the first line box this fragment carries. Published to
+    /// consumers as [`PaginationGeometry::line_boundaries`].
+    start_line: usize,
 }
 
 /// Walk `line_metrics` and decide where the inline root splits, without
@@ -5022,6 +5064,7 @@ fn scan_split_points(
                 page_index,
                 y: paragraph_top_in_body,
                 height: frag_lead_in + (prev_line_bottom - frag_top_local) + closing_lead_out,
+                start_line: fragment_start_idx,
             });
 
             page_index += 1;
@@ -5043,6 +5086,7 @@ fn scan_split_points(
         page_index,
         y: paragraph_top_in_body,
         height: frag_lead_in + (last_bottom_local - frag_top_local) + lead_out,
+        start_line: fragment_start_idx,
     });
 
     plan
@@ -9170,6 +9214,94 @@ h2 { string-set: chapter-title content(text); }
             super::resolved_line_constraints(doc.deref_mut(), probe, None),
             (2, 2),
             "no table at all still yields the initial values"
+        );
+    }
+
+    /// `todo/FULGUR_FRAGMENT_BOUNDARY_LINE_LOSS.md`: whatever the scan
+    /// decides, the partition it publishes must be a *cover* of the
+    /// paragraph's lines — starts strictly increasing, first boundary
+    /// `0`, last boundary the line count. A consumer that trusts it can
+    /// then place every line by construction, which is the whole point
+    /// of publishing it instead of letting the consumer re-derive the
+    /// split from fragment heights.
+    ///
+    /// Swept across strip offsets so the widow / orphan back-up, the
+    /// class-C leading break (which advances a page *without* pushing a
+    /// plan entry) and the ordinary mid-paragraph split are all covered.
+    #[test]
+    fn the_published_line_partition_covers_every_line() {
+        let lines: Vec<(f32, f32)> = (0..8)
+            .map(|i| (i as f32 * 14.0, (i + 1) as f32 * 14.0))
+            .collect();
+        for cursor in (0..=110).step_by(5) {
+            let input = InlineSplitInput {
+                line_metrics: &lines,
+                lead_in: 3.0,
+                lead_out: 3.0,
+                orphans: ORPHANS_INITIAL,
+                widows: WIDOWS_INITIAL,
+                clone_decoration: false,
+            };
+            let plan = super::scan_split_points(&input, cursor as f32, 0, 120.0);
+            let starts: Vec<usize> = plan.iter().map(|f| f.start_line).collect();
+            assert_eq!(
+                starts.first(),
+                Some(&0),
+                "cursor {cursor}: starts at line 0"
+            );
+            assert!(
+                starts.windows(2).all(|w| w[0] < w[1]),
+                "cursor {cursor}: fragment starts must strictly increase, got {starts:?}"
+            );
+            assert!(
+                starts.last().is_some_and(|&s| s < lines.len()),
+                "cursor {cursor}: the last fragment must open on a real line, got {starts:?}"
+            );
+        }
+    }
+
+    /// The partition reaches the geometry table intact, parallel to the
+    /// fragments it describes and terminated by the line count — the
+    /// exact shape `render::paragraph_lines_for_page` checks before it
+    /// trusts the partition.
+    #[test]
+    fn fragment_inline_root_publishes_the_partition_it_used() {
+        let lines: Vec<(f32, f32)> = (0..4)
+            .map(|i| (i as f32 * 14.0, (i + 1) as f32 * 14.0))
+            .collect();
+        let mut geometry = PaginationGeometryTable::new();
+        let input = InlineSplitInput {
+            line_metrics: &lines,
+            lead_in: 3.0,
+            lead_out: 3.0,
+            orphans: 1,
+            widows: 1,
+            clone_decoration: false,
+        };
+        let out = super::fragment_inline_root(
+            &mut geometry,
+            120.0,
+            InlinePlacement {
+                id: 1,
+                x: 0.0,
+                width: 100.0,
+                cursor_y: 80.0,
+                page: 0,
+            },
+            &input,
+        );
+        assert!(out.fragments > 1, "the paragraph must actually split");
+        let entry = &geometry[&1];
+        assert_eq!(
+            entry.line_boundaries.len(),
+            entry.fragments.len() + 1,
+            "one boundary per fragment plus the terminator"
+        );
+        assert_eq!(entry.line_boundaries.first(), Some(&0));
+        assert_eq!(
+            entry.line_boundaries.last(),
+            Some(&lines.len()),
+            "the terminator is the line count, so no line falls outside"
         );
     }
 

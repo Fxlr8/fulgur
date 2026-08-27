@@ -359,3 +359,106 @@ fn a_flex_or_grid_child_never_loses_its_only_line_to_a_short_strip() {
         }
     }
 }
+
+/// `todo/FULGUR_FRAGMENT_BOUNDARY_LINE_LOSS.md`: a multi-line child that
+/// straddles a page break placed some of its lines and dropped the rest
+/// from the document. Not deferred, not carried onto a third fragment —
+/// absent, with no overflow page to find them on.
+///
+/// The cause was two independent accountings of one decision.
+/// `pagination_layout` split the paragraph using Parley's line
+/// coordinates, which are rounded to whole pixels; `render` re-derived
+/// that split from the resulting fragment *heights* and
+/// `ShapedLine::height`, which keeps the fractional line height. A
+/// 14.4px line reads as 14px to the fragmenter and 10.8pt to the
+/// consumer, so a fragment budgeted for two lines admitted one — and the
+/// lines past the last fragment's budget had nowhere to go.
+///
+/// The fix publishes the partition the fragmenter chose
+/// (`PaginationGeometry::line_boundaries`). This asserts the invariant
+/// that makes the loss impossible: the partition is a cover of the
+/// paragraph's own line vector, terminated by its length, so every line
+/// belongs to exactly one fragment. `render` checks that same
+/// terminator before trusting the partition, so agreement here is what
+/// keeps the authoritative path live rather than silently falling back.
+///
+/// Swept across the whole straddling window — the report measured loss
+/// at *every* offset at which the box actually fragments, a 46px range,
+/// not a narrow coincidence — and across the line counts that put the
+/// box over two, three and four fragmentainers.
+#[test]
+fn a_straddling_multi_line_child_keeps_every_line() {
+    for display in ["grid", "flex", "block"] {
+        for lines in [4, 8, 20] {
+            for spacer in (190..=245).step_by(5) {
+                let body = (1..=lines)
+                    .map(|i| format!("L{i}"))
+                    .collect::<Vec<_>>()
+                    .join("<br>");
+                let html = format!(
+                    r#"<!doctype html><html><head><style>
+                         {PAGE_CSS}
+                         body {{ font: 12px sans-serif }}
+                         .spacer {{ height: {spacer}px }}
+                         .tbl {{ display: {display} }}
+                         .c {{ border: 1px solid #000; padding: 2px 4px }}
+                       </style></head><body>
+                         <div class="spacer">spacer</div>
+                         <div class="tbl"><div class="c">{body}</div></div>
+                       </body></html>"#
+                );
+                let out = layout(&html);
+                let label = format!("display:{display} lines:{lines} spacer:{spacer}");
+
+                // Same handle as the sweep above: `.c` is its own inline
+                // root, so it owns the paragraph carrying "L1".
+                let (cell_id, para) = out
+                    .drawables
+                    .paragraphs
+                    .iter()
+                    .find(|(_, p)| {
+                        p.lines.iter().flat_map(|l| l.items.iter()).any(|i| {
+                            matches!(
+                                i,
+                                fulgur::paragraph::LineItem::Text(t) if t.text.contains("L1")
+                            )
+                        })
+                    })
+                    .map(|(id, p)| (*id, p))
+                    .unwrap_or_else(|| panic!("{label}: the cell must resolve a paragraph"));
+                let geom = out
+                    .geometry
+                    .get(&cell_id)
+                    .unwrap_or_else(|| panic!("{label}: the cell must appear in geometry"));
+
+                if geom.fragments.len() < 2 {
+                    // Fits one strip, or moved whole — nothing to cover.
+                    continue;
+                }
+
+                let b = &geom.line_boundaries;
+                assert_eq!(
+                    b.len(),
+                    geom.fragments.len() + 1,
+                    "{label}: a line-split inline root must publish one boundary                      per fragment plus the terminator; got {b:?} for {} fragments",
+                    geom.fragments.len()
+                );
+                assert_eq!(
+                    b.first(),
+                    Some(&0),
+                    "{label}: the first fragment opens on line 0; got {b:?}"
+                );
+                assert_eq!(
+                    b.last(),
+                    Some(&para.lines.len()),
+                    "{label}: the partition must terminate at the paragraph's own                      line count ({}), else `render` cannot trust it and every line                      past the last fragment's height budget leaves the document;                      got {b:?}",
+                    para.lines.len()
+                );
+                assert!(
+                    b.windows(2).all(|w| w[0] < w[1]),
+                    "{label}: every fragment must carry at least one line; got {b:?}"
+                );
+            }
+        }
+    }
+}
