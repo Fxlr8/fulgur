@@ -929,22 +929,79 @@ fn fragment_recursion_child(
     // agree on the leading-child floor by construction.
     let allow_leading_break = frame.allow_leading_break && !suppress_page_check;
     let available_strip = (cx.page_h - frame.cursor_y).max(0.0);
-    let needs_recursion = has_splittable_children
-        && (!is_multicol || multicol_span_all_exception)
-        && (has_forced_break_below(cx.doc, child_id, cx.styles, 0)
-            || has_page_name_change_below(cx.doc, child_id, cx.used_page_names, 0)
-            || subtree_requires_recursion(cx, child_id, available_strip, allow_leading_break));
-    if !needs_recursion {
-        return None;
-    }
 
-    let child_x_in_body = frame.x_in_body + layout.location.x;
-    // Difference 2: entry cursor (see the doc comment).
+    // Difference 2: entry cursor (see the doc comment). Hoisted above
+    // the gate because `moves_whole` below needs the child's page-local
+    // top, and it is the same value the caller's strip-overflow branch
+    // computes as `child_page_y`.
     let entry_cursor_y = if frame.kind == ContainerKind::Nested {
         frame.page_start_y + (this_top_in_parent - frame.page_taffy_origin)
     } else {
         frame.cursor_y
     };
+
+    // fulgur-ysms (piece E): the child would place NOTHING on the strip
+    // it opens on — its own leading content is pushed off that strip —
+    // and its border box fits a fresh fragmentainer. Then the caller's
+    // strip-overflow branch, a few lines below this gate, is the whole
+    // of the correct answer: the box moves as a unit. Entering it first
+    // cannot improve on that, and the walk that runs inside is the one
+    // that gets the box's leading edge wrong.
+    //
+    // Wrong how: a box entered here spends none of its `border-top +
+    // padding-top` on the outgoing page, but the inner walk advances the
+    // page with `page_start_y = 0` and no knowledge of where its own
+    // container's content box begins on the new one, then closes its
+    // fragment from its first child's edge. The box loses its own
+    // leading decoration, and inside a flex / grid container it also
+    // loses the row's offset below the container's border. A childless
+    // sibling in the same row never reaches this gate, takes the push
+    // branch, and keeps both — which is exactly how the two text-bearing
+    // cells of a straddling grid row came to disagree with their empty
+    // sibling (`todo/FULGUR_GRID_FRAGMENT_BUG.md`, piece E).
+    //
+    // All three conditions are load-bearing:
+    //
+    // - `child_h <= cx.page_h`. A box too tall for any fragmentainer has
+    //   to split wherever it lands, so it must still be entered.
+    // - the caller will actually push. The floor mirrors the caller's
+    //   `overflow_floor` — `propagate_leading_break` there is this
+    //   function's `allow_leading_break`, from the same inputs — so the
+    //   gate and the branch that acts on it cannot disagree.
+    // - the child places nothing here. This is what keeps a box that
+    //   *does* open on this page in the walk: a grid whose leading row
+    //   starts at the strip top still splits at the fragmentainer
+    //   (`break-inside: auto`, css-break-3 §4.1), and its cells still
+    //   co-split per strip. Without it this gate would defer every
+    //   straddling box to the next page, which is `avoid` behaviour
+    //   applied to `auto`.
+    let overflow_floor = if allow_leading_break {
+        0.0
+    } else {
+        frame.page_start_y
+    };
+    let moves_whole = child_h <= cx.page_h
+        && break_decision(entry_cursor_y, child_h, overflow_floor, cx.page_h)
+            == BreakDecision::PushToNextPage
+        && subtree_places_nothing_here(
+            cx,
+            cx.doc.get_node(frame.id),
+            child,
+            available_strip,
+            allow_leading_break,
+        );
+
+    let needs_recursion = has_splittable_children
+        && (!is_multicol || multicol_span_all_exception)
+        && (has_forced_break_below(cx.doc, child_id, cx.styles, 0)
+            || has_page_name_change_below(cx.doc, child_id, cx.used_page_names, 0)
+            || (!moves_whole
+                && subtree_requires_recursion(cx, child_id, available_strip, allow_leading_break)));
+    if !needs_recursion {
+        return None;
+    }
+
+    let child_x_in_body = frame.x_in_body + layout.location.x;
     // Difference 3: child-frame depth (see the doc comment).
     let child_depth = if frame.kind == ContainerKind::Nested {
         frame.depth + 1
@@ -2726,6 +2783,108 @@ fn slice_oversized_leaf(
         };
         (page_index, cursor_y)
     }
+}
+
+/// fulgur-ysms (piece E): would `child` place nothing at all on the
+/// strip it opens on?
+///
+/// The walk lays a box out by descending its leading in-flow children
+/// until it reaches something it can place. So the question is decided
+/// by the **leading leaf** of the subtree: follow first in-flow,
+/// non-zero-height layout children down, and ask whether that leaf is
+/// pushed off the strip. If it is, every box on the chain above it
+/// opens the page with its own `border-top + padding-top` and nothing
+/// else — a fragment css-break-3 §4.1 does not consider worth taking,
+/// since the class B point between a box's content edge and its first
+/// child is only usable when the leading decoration it strands has
+/// content to lead into.
+///
+/// Stopping at the first child instead of the leading leaf would be
+/// wrong in the common wrapper shape: `<div><div><div h=100><div
+/// h=300>`, where the outer child does not fit the strip but its own
+/// leading grandchild does. The walk places that grandchild and splits;
+/// the box genuinely has content on the page.
+///
+/// Used by [`fragment_recursion_child`]'s gate to tell a box that
+/// *straddles* the fragmentainer (which must split, `break-inside:
+/// auto`) from one that merely *starts too late* on it (which moves as
+/// a unit). Only the second is safe to hand to the caller's
+/// strip-overflow branch.
+///
+/// The floor is derived exactly as [`subtree_requires_recursion`]
+/// derives it, and re-derived at every hop: a flex / grid /
+/// atomic-inline / orthogonal box pins its own children at
+/// `page_start_y` (css-break-3 §3.2), so once the descent enters one,
+/// every level below it is pinned too — probing those at floor `0.0`
+/// would report a push the walk would never take.
+fn subtree_places_nothing_here(
+    cx: &FragmentationCtx<'_>,
+    parent: Option<&blitz_dom::Node>,
+    child: &blitz_dom::Node,
+    available_strip: f32,
+    allow_leading_break: bool,
+) -> bool {
+    let page_h = cx.page_h;
+    let page_start_y = (page_h - available_strip).max(0.0);
+
+    let mut parent = parent;
+    let mut node = child;
+    let mut top = page_start_y;
+    let mut allow = allow_leading_break;
+    // Every hop below the first is reached only through a leading child
+    // the strip cannot hold, so once the descent bottoms out on a node
+    // the walk places as a unit, that verdict stands. At the first hop
+    // it is still `false`: a box with no in-flow content places nothing
+    // because it *has* nothing, which is not this predicate's business
+    // (`has_splittable_children` already excluded it).
+    let mut pushed = false;
+
+    for _ in 0..crate::MAX_DOM_DEPTH {
+        let suppresses = crate::blitz_adapter::is_flex_or_grid_container_node(node)
+            || crate::blitz_adapter::is_atomic_inline_container_node(node)
+            || parent.is_some_and(|p| crate::blitz_adapter::is_orthogonal_to_parent(p, node));
+        allow = allow && !suppresses;
+        let floor = if allow { 0.0 } else { page_start_y };
+
+        let mut leading = None;
+        for id in layout_children_of(cx.doc, node.id) {
+            if is_walkable_skip(cx.doc, id) {
+                continue;
+            }
+            let Some(candidate) = cx.doc.get_node(id) else {
+                continue;
+            };
+            if candidate.final_layout.size.height <= 0.0 {
+                continue;
+            }
+            leading = Some(candidate);
+            break;
+        }
+        // Nothing in-flow below this node — an inline root, whose text
+        // children carry no layout box, or a genuinely empty box. Either
+        // way the walk places it as a unit, so the last verdict is final.
+        let Some(leading) = leading else {
+            return pushed;
+        };
+
+        let layout = leading.final_layout;
+        let leading_top = top + layout.location.y;
+        if break_decision(leading_top, layout.size.height, floor, page_h)
+            != BreakDecision::PushToNextPage
+        {
+            // The leading child stays, so the box has content here
+            // whatever its siblings do.
+            return false;
+        }
+        pushed = true;
+        parent = Some(node);
+        node = leading;
+        top = leading_top;
+    }
+    // Depth-capped, like every other subtree probe on this walk. Falling
+    // out here means the leading chain is deeper than `MAX_DOM_DEPTH`;
+    // answer `false` so the gate keeps today's behaviour and recurses.
+    false
 }
 
 /// fulgur-7hf5 (Phase 3.1.5c) + fulgur-pgbrk walker-convergence
@@ -9165,12 +9324,24 @@ h2 { string-set: chapter-title content(text); }
     /// Before the fix the geometry recorded `y=100, height=160` for a
     /// 460px-tall box, the overflow check never fired, and the tail was
     /// painted off the paper and discarded.
+    ///
+    /// The 10px sibling ahead of the `<p>` is what keeps the paragraph on
+    /// the line-splitter, which is the only writer of `content_lead_in` /
+    /// `content_lead_out`. Without it the `<p>` is the wrapper's leading
+    /// child, nothing lands on the outgoing page, and
+    /// `fragment_recursion_child`'s `moves_whole` gate hands the whole
+    /// wrapper to the caller's push branch instead of entering it — the
+    /// same fragment, on the same page, but recorded without the two
+    /// lead fields. That path is deliberate (fulgur-ysms piece E) and has
+    /// its own coverage; this test is about the break *decision* being
+    /// made on the border box, so it keeps the splitter in play.
     #[test]
     fn padded_inline_root_breaks_on_its_border_box_not_its_line_boxes() {
         let html = r#"
             <html><body style="margin:0">
               <div style="height:100px"></div>
               <div><div>
+                <div style="height:10px"></div>
                 <p id="probe" style="margin:0;padding:150px 0;line-height:20px;font-size:14px">
                   alpha bravo charlie delta echo foxtrot golf hotel india
                   juliett kilo lima mike november oscar papa quebec romeo
@@ -9198,8 +9369,8 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(
             entry.fragments.first().map(|f| f.page_index),
             Some(1),
-            "the box is 460px tall on a 400px strip starting at y=100, so it \
-             must move to a fresh page rather than overflow; frags={:?}",
+            "the box is taller than the strip left below y=110, so it must \
+             move to a fresh page rather than overflow; frags={:?}",
             entry.fragments
         );
         // The blanket R3 guard in `run_pass_inner` is blind to this shape
@@ -9722,6 +9893,146 @@ h2 { string-set: chapter-title content(text); }
                  at the page edge"
             );
         }
+    }
+
+    /// fulgur-ysms piece E: every cell of a straddling grid row must
+    /// produce the SAME fragment sequence.
+    ///
+    /// The two cells here differ only in whether they have a child. The
+    /// one that does used to be entered by `fragment_recursion_child`,
+    /// fragment itself, and — having placed nothing on the outgoing page
+    /// — come back on the next one flush against the strip top, missing
+    /// both its own `padding-top` and the grid's `border-top`. Its
+    /// childless neighbour never reached that gate, took the container's
+    /// push branch, and kept both. The row's bottom borders then landed
+    /// at different `y` per column, which is the whole of
+    /// `todo/FULGUR_GRID_FRAGMENT_BUG.md`.
+    ///
+    /// The grid's 1px border is load-bearing: it is what puts the cells'
+    /// tops *above* the container's `page_start_y`, so the push branch
+    /// fires at all. Without it the cells are pinned at the floor and the
+    /// row slices per strip instead (`grid_row_leaf_cells_cosplit_across_
+    /// page_boundary` covers that shape).
+    #[test]
+    fn grid_row_cells_agree_on_geometry_when_the_row_moves_whole() {
+        // 260px page. Grid at y=214 with a 1px border, so cells open at
+        // 215 and end at 261 — 1px past the strip, with 45px left below
+        // them. `a` carries 6px of padding above a 40px block; `b` is the
+        // empty cell of the bug report, sized by the row.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 214px"></div>
+              <div style="display: grid; grid-template-columns: 100px 100px;
+                          width: 200px; border: 1px solid #000">
+                <div id="a" style="padding-top: 6px">
+                  <div style="height: 40px"></div>
+                </div>
+                <div id="b"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let a = find_by_id(doc.deref_mut(), "a").expect("a");
+        let b = find_by_id(doc.deref_mut(), "b").expect("b");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 260.0_f32.as_px(), &table);
+
+        assert_eq!(
+            frags_of(&geom, a),
+            frags_of(&geom, b),
+            "the two cells of one row must fragment identically; \
+             a={:?} b={:?}",
+            frags_of(&geom, a),
+            frags_of(&geom, b)
+        );
+        assert_eq!(
+            frags_of(&geom, a),
+            vec![(1, 1.0, 46.0)],
+            "and the shared answer is the whole 46px cell, opening 1px \
+             below the grid's border-top on the next page"
+        );
+    }
+
+    /// The block-flow half of the same defect, and acceptance criterion 4
+    /// of `todo/FULGUR_GRID_FRAGMENT_BUG.md`: a container that moves
+    /// whole must record its full Taffy border box, and the sibling after
+    /// it must resume from that box's real bottom.
+    ///
+    /// The 16px `margin-bottom` on the inner block is what this pins.
+    /// The container used to be entered, close its fragment from its last
+    /// child's edge plus its own `padding-bottom`, and so drop the
+    /// child's trailing margin entirely — 118px recorded for a 134px box,
+    /// with the next sibling painted 16px into it.
+    #[test]
+    fn a_container_that_moves_whole_records_its_full_border_box() {
+        // 10 + 8 + 82 + 16 + 18 = 134px, opening at y=215 on a 300px
+        // page: the box does not fit the 85px strip and does fit a fresh
+        // page, and its leading child is pushed off the strip too.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 215px"></div>
+              <div id="row" style="padding: 10px 0 18px 0">
+                <div style="height: 82px; margin: 8px 0 16px 0"></div>
+              </div>
+              <div id="tail" style="height: 14px"></div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let row = find_by_id(doc.deref_mut(), "row").expect("row");
+        let tail = find_by_id(doc.deref_mut(), "tail").expect("tail");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 300.0_f32.as_px(), &table);
+
+        assert_eq!(
+            frags_of(&geom, row),
+            vec![(1, 0.0, 134.0)],
+            "one fragment carrying the whole border box — the inner \
+             block's 16px margin-bottom included"
+        );
+        assert_eq!(
+            frags_of(&geom, tail),
+            vec![(1, 134.0, 14.0)],
+            "and the next sibling opens at that box's real bottom, not \
+             16px inside it"
+        );
+    }
+
+    /// The other half of the `moves_whole` gate, and the reason it probes
+    /// the leading *leaf* rather than the leading child: a box whose own
+    /// first child fits the strip genuinely has content on this page, so
+    /// it must still be entered and split. Stopping the probe one level
+    /// down would defer every straddling wrapper to the next page, which
+    /// is `break-inside: avoid` behaviour applied to the initial `auto`.
+    #[test]
+    fn a_container_whose_leading_leaf_fits_still_splits_in_place() {
+        // `wrap` is 400px and cannot fit the 200px strip, but its own
+        // leading child is 100px and does.
+        let html = r#"
+            <html><body style="margin: 0; padding: 0">
+              <div style="height: 200px"></div>
+              <div id="wrap">
+                <div id="lead" style="height: 100px"></div>
+                <div style="height: 300px"></div>
+              </div>
+            </body></html>
+        "#;
+        let mut doc = parse(html, 600.0);
+        let wrap = find_by_id(doc.deref_mut(), "wrap").expect("wrap");
+        let lead = find_by_id(doc.deref_mut(), "lead").expect("lead");
+        let table = blitz_adapter::extract_column_style_table(&doc);
+        let geom = super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table);
+
+        assert_eq!(
+            frags_of(&geom, lead),
+            vec![(0, 200.0, 100.0)],
+            "the leading child fits the strip and must stay on page 0"
+        );
+        assert!(
+            frags_of(&geom, wrap).iter().any(|(page, ..)| *page == 0),
+            "so its container splits and keeps a fragment there; \
+             frags={:?}",
+            frags_of(&geom, wrap)
+        );
     }
 
     /// css-break-3 §4.4's relaxation clause, at row granularity: a row
