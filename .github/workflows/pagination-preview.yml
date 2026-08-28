@@ -1,0 +1,153 @@
+name: pagination preview build
+
+# Builds fulgur from a fork branch and publishes the binaries as a GitHub
+# Release, so downstream projects can pin an unreleased build without anything
+# being published to a registry.
+#
+# Lives on the `preview-builds` branch, NOT on the fix branch, so the branch
+# destined for an upstream PR stays free of downstream-specific CI. That also
+# rules out `workflow_dispatch` as the only trigger: GitHub only offers manual
+# dispatch for workflows present on the default branch, and putting this on
+# `main` would diverge the fork from upstream. So a push to this branch is the
+# trigger, and the build is configured by the defaults below.
+#
+# To cut a new build: bump SOURCE_REF/RELEASE_TAG here and push. Re-pushing
+# without bumping the tag rebuilds but will not touch the existing release —
+# a published tag is immutable, since downstream pins its checksums.
+
+on:
+  push:
+    branches: [preview-builds]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to build
+        required: false
+      tag:
+        description: Release tag to create
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.cfg.outputs.ref }}
+      tag: ${{ steps.cfg.outputs.tag }}
+      exists: ${{ steps.cfg.outputs.exists }}
+    steps:
+      - id: cfg
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: fix/fulgur-pgbrk-page-fragmentation
+          RELEASE_TAG: fulgur-pagination-preview-0.40.0-1
+          IN_REF: ${{ inputs.ref }}
+          IN_TAG: ${{ inputs.tag }}
+        run: |
+          REF="${IN_REF:-$SOURCE_REF}"
+          TAG="${IN_TAG:-$RELEASE_TAG}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release $TAG already exists — it will not be modified."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "building $REF -> $TAG"
+
+  build:
+    needs: setup
+    if: needs.setup.outputs.exists == 'false'
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            asset: fulgur-darwin-arm64
+          # musl, not gnu: a statically linked binary carries no libc
+          # requirement into whatever base image the consumer runs, and needs
+          # no matching of build-host glibc against runtime glibc.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: fulgur-linux-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --bin fulgur -p fulgur-cli --target ${{ matrix.target }}
+
+      - name: Stage binary
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/fulgur" "out/${{ matrix.asset }}"
+          chmod +x "out/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
+
+  release:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Checked out at the built ref so the tag records the exact commit these
+      # binaries came from.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksum
+        run: |
+          cd dist
+          chmod +x fulgur-*
+          sha256sum fulgur-* | tee SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.setup.outputs.tag }}
+          REF: ${{ needs.setup.outputs.ref }}
+        run: |
+          SHA="$(git rev-parse HEAD)"
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "$TAG" \
+            --notes "Unreleased fulgur build from \`$REF\` at \`$SHA\`.
+
+          Carries pagination fixes not yet merged upstream. **Not a fulgur
+          release** — do not use it as one. Reports the same \`--version\` as
+          stock 0.40.0 while paginating differently.
+
+          | asset | target |
+          | --- | --- |
+          | \`fulgur-darwin-arm64\` | aarch64-apple-darwin |
+          | \`fulgur-linux-x64\` | x86_64-unknown-linux-musl (static) |"
