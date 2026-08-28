@@ -42,7 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REF: fix/fulgur-pgbrk-page-fragmentation
-          RELEASE_TAG: fulgur-pagination-preview-0.40.0-1
+          RELEASE_TAG: fulgur-pagination-preview-0.40.0-2
           IN_REF: ${{ inputs.ref }}
           IN_TAG: ${{ inputs.tag }}
         run: |
@@ -75,6 +75,11 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             asset: fulgur-linux-x64
+          # arm64 linux covers WSL on ARM Windows, arm servers, and an Apple
+          # Silicon docker build that was not forced to linux/amd64.
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            asset: fulgur-linux-arm64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -150,4 +155,5 @@ jobs:
           | asset | target |
           | --- | --- |
           | \`fulgur-darwin-arm64\` | aarch64-apple-darwin |
-          | \`fulgur-linux-x64\` | x86_64-unknown-linux-musl (static) |"
+          | \`fulgur-linux-x64\` | x86_64-unknown-linux-musl (static) |
+          | \`fulgur-linux-arm64\` | aarch64-unknown-linux-musl (static) |"
